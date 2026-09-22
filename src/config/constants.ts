@@ -18,6 +18,9 @@ export const MIN_SCAN_INTERVAL_MS = 60_000;
 /** Price move over trailing 1h that disqualifies a candidate pool (crash guard). */
 export const PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT = -20;
 
+/** How many of the strongest-6h-trend candidates to shortlist before picking the best vol/TVL ratio among them. */
+export const TREND_SHORTLIST_SIZE = 3;
+
 export const RPC_MAX_RETRIES = 5;
 export const RPC_RETRY_BASE_DELAY_MS = 500;
 

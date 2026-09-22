@@ -7,6 +7,7 @@ import {
   WSOL_MINT,
   MIN_SCAN_INTERVAL_MS,
   PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT,
+  TREND_SHORTLIST_SIZE,
   HTTP_MAX_RETRIES,
   HTTP_RETRY_BASE_DELAY_MS,
 } from '../config/constants.js';
@@ -324,21 +325,27 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     return true;
   });
 
-  // Best pool first: vol/TVL ratio (capital efficiency) weighted up for
-  // stronger 6h uptrends — a merely-good pool that's also trending up
-  // should outrank an equally-good pool that's flat/drifting down within
-  // the filter's floor. Downtrends never boost the score (multiplier
-  // floors at 1x), they're just not filtered out unless requireUptrend
-  // already excluded them above.
-  const score = (p: MeteoraPair) => {
-    const volTvlRatio = Number(p.trade_volume_24h) / Number(p.liquidity);
-    const trendBoost = 1 + Math.max(0, p.priceChange6hPct ?? 0) / 100;
-    return volTvlRatio * trendBoost;
-  };
-  candidates.sort((a, b) => score(b) - score(a));
+  // Two-stage pick, not a single blended score: a composite score let raw
+  // vol/TVL ratio dominate (e.g. a 27x-ratio pool with flat/negative 6h
+  // still won over a genuinely-trending one) — trend was only ever a small
+  // multiplier, never the deciding factor. Instead: shortlist the
+  // strongest 6h trends first, THEN pick the best vol/TVL ratio among just
+  // those. Trend now gates which pools are even in contention; ratio only
+  // breaks ties within that trend-qualified set.
+  // Missing 6h data (`?? -Infinity`) sorts to the bottom of the trend
+  // shortlist — never lets an unconfirmed trend take a slot from a
+  // confirmed one, though it can still surface if too few candidates exist.
+  const volTvlRatio = (p: MeteoraPair) => Number(p.trade_volume_24h) / Number(p.liquidity);
 
-  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters`);
-  return candidates;
+  const trendShortlist = candidates
+    .slice()
+    .sort((a, b) => (b.priceChange6hPct ?? -Infinity) - (a.priceChange6hPct ?? -Infinity))
+    .slice(0, TREND_SHORTLIST_SIZE);
+
+  trendShortlist.sort((a, b) => volTvlRatio(b) - volTvlRatio(a));
+
+  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters, top ${trendShortlist.length} shortlisted by trend then ratio`);
+  return trendShortlist;
 }
 
 /**
