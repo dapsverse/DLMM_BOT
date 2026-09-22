@@ -52,6 +52,8 @@ export interface MeteoraPair {
   /** Longer trend window than 1h — memecoin 1h moves are noisy, 6h is a steadier uptrend/downtrend signal. */
   priceChange6hPct?: number;
   priceChange24hPct?: number;
+  /** DexScreener's 5-minute volume — catches a pool whose 24h number looks fine but has basically gone dead right now. */
+  volumeM5Usd?: number;
 }
 
 /**
@@ -143,6 +145,7 @@ export interface ScannerConfig {
   minPoolAgeHours: number;
   requireUptrend: boolean;
   minPriceChange6hPct: number;
+  minRecentActivityRatio: number;
   blacklistPools: Map<string, number>; // poolAddress -> blacklisted-until (epoch ms)
 }
 
@@ -184,7 +187,7 @@ export async function fetchTopPools(): Promise<MeteoraPair[]> {
 
 interface DexScreenerPair {
   priceChange?: { h1?: number; h6?: number; h24?: number };
-  volume?: { h1?: number };
+  volume?: { m5?: number; h1?: number };
 }
 
 /** Trailing 1h USD volume for a token, used by riskManager's volume-drop hard-exit check. */
@@ -205,12 +208,12 @@ export async function getVolume1hUsd(mint: string): Promise<number | null> {
 }
 
 /**
- * Hydrates price-change fields (1h/6h/24h) from DexScreener for a short
- * candidate list (post TVL/volume filter, not the whole pair list — keeps
- * calls bounded). All three windows come back in the same response, no
- * extra request cost for the longer-window trend data. Best-effort: a
- * failed lookup just leaves the fields undefined, which the crash-guard
- * and uptrend filters both treat as "unknown, don't block".
+ * Hydrates price-change fields (1h/6h/24h) and 5-minute volume from
+ * DexScreener for a short candidate list (post TVL/volume filter, not the
+ * whole pair list — keeps calls bounded). Everything comes back in one
+ * response, no extra request cost. Best-effort: a failed lookup just
+ * leaves the fields undefined, which the crash-guard/uptrend/activity
+ * filters all treat as "unknown, don't block".
  */
 async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
   await mapWithConcurrency(pairs, DEXSCREENER_CONCURRENCY, async (pair) => {
@@ -219,10 +222,12 @@ async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
         () => axios.get<{ pairs?: DexScreenerPair[] }>(`${DEXSCREENER_TOKEN_URL}/${pair.mint_x}`, { timeout: 10_000 }),
         { maxRetries: 2, baseDelayMs: HTTP_RETRY_BASE_DELAY_MS, isRetryable: isRateLimitError, label: 'dexscreener:token' },
       );
-      const priceChange = res.data.pairs?.[0]?.priceChange;
+      const dexPair = res.data.pairs?.[0];
+      const priceChange = dexPair?.priceChange;
       if (typeof priceChange?.h1 === 'number') pair.priceChange1hPct = priceChange.h1;
       if (typeof priceChange?.h6 === 'number') pair.priceChange6hPct = priceChange.h6;
       if (typeof priceChange?.h24 === 'number') pair.priceChange24hPct = priceChange.h24;
+      if (typeof dexPair?.volume?.m5 === 'number') pair.volumeM5Usd = dexPair.volume.m5;
     } catch (err) {
       logger.debug(`[scanner] dexscreener hydration failed for ${pair.address}`, {
         error: err instanceof Error ? err.message : String(err),
@@ -299,6 +304,18 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
       return false;
     }
 
+    // Activity cascade: a healthy-looking 24h number can hide a pool that's
+    // basically dead RIGHT NOW (wash-traded/stale volume) — check that 1h
+    // and 5m pace haven't collapsed relative to the 24h average pace.
+    // 1h uses Meteora's own number (already fetched, no "unknown" case);
+    // 5m only exists via DexScreener, so a failed lookup doesn't block.
+    const vol24h = Number(pair.trade_volume_24h);
+    const avgHourlyUsd = vol24h / 24;
+    if (pair.volume1hUsd < avgHourlyUsd * config.minRecentActivityRatio) return false;
+
+    const avg5MinUsd = vol24h / 288;
+    if (pair.volumeM5Usd !== undefined && pair.volumeM5Usd < avg5MinUsd * config.minRecentActivityRatio) return false;
+
     if (config.requireMintAuthorityDisabled) {
       const memecoin = nonSolToken(pair);
       // fail-closed: unknown (RPC lookup failed) or still-active mint authority both block the pool
@@ -355,6 +372,7 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     minPoolAgeHours: env.MIN_POOL_AGE_HOURS,
     requireUptrend: env.REQUIRE_UPTREND,
     minPriceChange6hPct: env.MIN_PRICE_CHANGE_6H_PCT,
+    minRecentActivityRatio: env.MIN_RECENT_ACTIVITY_RATIO,
     blacklistPools,
   };
 }
