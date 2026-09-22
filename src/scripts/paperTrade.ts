@@ -55,10 +55,17 @@ const TICK_MS = 60_000; // matches MIN_SCAN_INTERVAL_MS — no point polling Met
 const DURATION_HOURS = Number(process.env.PAPER_TRADE_HOURS ?? 12);
 const DURATION_MS = DURATION_HOURS * 3_600_000;
 
+// PAPER_TRADE_LABEL lets multiple sims run side by side (e.g. different
+// strategy branches) without clobbering each other's state file — each
+// label gets its own paper-trade-state-<label>.json. Unset = legacy plain
+// filename, so an already-running unlabeled process (started before this
+// existed) keeps writing where it always has.
+const LABEL = process.env.PAPER_TRADE_LABEL?.trim() || null;
+
 fs.mkdirSync(env.LOG_DIR, { recursive: true });
 const runStartedAtMs = Date.now();
-const jsonlPath = path.join(env.LOG_DIR, `paper-trade-${runStartedAtMs}.jsonl`);
-const statePath = path.join(env.LOG_DIR, 'paper-trade-state.json');
+const jsonlPath = path.join(env.LOG_DIR, LABEL ? `paper-trade-${LABEL}-${runStartedAtMs}.jsonl` : `paper-trade-${runStartedAtMs}.jsonl`);
+const statePath = path.join(env.LOG_DIR, LABEL ? `paper-trade-state-${LABEL}.json` : 'paper-trade-state.json');
 const logStream = fs.createWriteStream(jsonlPath, { flags: 'a' });
 
 interface VirtualPosition {
@@ -90,6 +97,7 @@ interface PoolVisit {
 }
 
 interface RunSummary {
+  label: string;
   startedAtMs: number;
   startingCapitalUsd: number | null;
   poolsEntered: number;
@@ -103,6 +111,7 @@ let idleCapitalUsd = 0; // capital not currently in a position (between hard-exi
 let lastKnownSolPriceUsd = 0;
 const blacklist = new Map<string, number>();
 const summary: RunSummary = {
+  label: LABEL ?? 'volume-only (legacy)',
   startedAtMs: runStartedAtMs,
   startingCapitalUsd: null,
   poolsEntered: 0,
@@ -407,6 +416,7 @@ async function tick(): Promise<void> {
 async function main(): Promise<void> {
   logEvent({
     type: 'SIM_START',
+    label: summary.label,
     durationHours: DURATION_HOURS,
     initialLpCapitalSol: env.INITIAL_LP_CAPITAL_SOL,
     note: 'paper trading — no wallet, no real transactions',
