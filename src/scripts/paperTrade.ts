@@ -95,7 +95,8 @@ interface PoolVisit {
   enteredAtMs: number;
   entryCapitalUsd: number;
   exitedAtMs?: number;
-  exitType?: 'HARD_EXIT' | 'STILL_OPEN';
+  /** HARD_EXIT = risk-triggered (stop-loss/rebalance-count/volume-drop). LEFT_POOL = pool no longer passes the entry screen, not a violation. */
+  exitType?: 'HARD_EXIT' | 'LEFT_POOL';
   exitValueUsd?: number;
   exitReasons?: string[];
   rebalanceCount: number;
@@ -418,19 +419,20 @@ async function tick(): Promise<void> {
         // — leave with the compounded capital instead of forcing a reopen
         // here. Not a violation, so no blacklist (unlike HARD_EXIT) — the
         // next tick's scan is free to reconsider it later if it recovers.
+        const leaveReasons = [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening'];
         logEvent({
           type: 'LEAVE_POOL',
           pool: position.poolName,
-          reasons: [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening'],
+          reasons: leaveReasons,
           compoundedFromUsd: +position.capitalUsd.toFixed(2),
           finalValueUsd: +compoundedToUsd.toFixed(2),
           feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
         });
         if (visit) {
           visit.exitedAtMs = now;
-          visit.exitType = 'HARD_EXIT'; // reusing the report's exit-status field; distinguishable via jsonl LEAVE_POOL events
+          visit.exitType = 'LEFT_POOL';
           visit.exitValueUsd = +compoundedToUsd.toFixed(2);
-          visit.exitReasons = reasons;
+          visit.exitReasons = leaveReasons;
         }
         idleCapitalUsd = compoundedToUsd;
         position = null;
