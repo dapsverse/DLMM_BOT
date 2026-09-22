@@ -4,9 +4,11 @@ import { scanPools, defaultScannerConfig, getVolume1hUsd } from './services/mete
 import { openPool } from './services/meteoraDLMM.js';
 import {
   openInitialPosition,
-  executeAutoCompound,
+  compoundCycle,
   executeHardExit,
   getPositionHealthSnapshot,
+  getBinRangeStatus,
+  updateOutOfRangeTracking,
   isCooldownActive,
   estimateCycleGasCostSol,
   type PoolContext,
@@ -60,10 +62,12 @@ async function tick(): Promise<void> {
   }
 
   const ctx = currentPool;
-  const [{ currentValueSol, unclaimedFeesSol }, volume1hNowUsd] = await Promise.all([
+  const [{ currentValueSol, unclaimedFeesSol }, volume1hNowUsd, binStatus] = await Promise.all([
     getPositionHealthSnapshot(ctx),
     getVolume1hUsd(ctx.xIsSol ? ctx.mintY : ctx.mintX),
+    getBinRangeStatus(ctx),
   ]);
+  updateOutOfRangeTracking(ctx, binStatus.isOutOfRange);
 
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
   const { decision, reasons } = evaluatePosition({
@@ -74,6 +78,8 @@ async function tick(): Promise<void> {
     volume1hBaselineUsd: ctx.volume1hBaselineUsd,
     unclaimedFeesUsd: unclaimedFeesSol,
     estimatedGasCostUsd: gasCostSol,
+    isOutOfRange: binStatus.isOutOfRange,
+    outOfRangeSinceMs: ctx.outOfRangeSinceMs,
   });
 
   logger.info(`[index] pool ${ctx.poolAddress} health check`, {
@@ -81,6 +87,8 @@ async function tick(): Promise<void> {
     reasons,
     currentValueSol,
     unclaimedFeesSol,
+    isOutOfRange: binStatus.isOutOfRange,
+    currentBinId: binStatus.currentBinId,
   });
 
   if (decision === 'HARD_EXIT') {
@@ -98,7 +106,11 @@ async function tick(): Promise<void> {
       logger.info('[index] rebalance triggered but still in cooldown, holding');
       return;
     }
-    currentPool = await executeAutoCompound(ctx);
+    // compoundCycle re-checks whether this pool still passes the entry
+    // screen: null means it doesn't (capital converted to SOL, no
+    // reopen) — next tick's tryEnterPool() picks up from there.
+    currentPool = await compoundCycle(ctx, defaultScannerConfig(blacklistPools));
+    if (!currentPool) currentCapitalSol = Math.max((await getWalletSolBalance()) - env.MIN_GAS_RESERVE_SOL, 0);
     return;
   }
 

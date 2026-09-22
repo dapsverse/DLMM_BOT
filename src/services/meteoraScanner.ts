@@ -342,6 +342,22 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
 }
 
 /**
+ * Re-checks a single already-held pool against the full entry screen —
+ * used when an idle/out-of-range position needs to decide "stay in this
+ * pool (still qualifies) or leave and find a different one (no longer
+ * does)". Not subject to MIN_SCAN_INTERVAL_MS (that throttle guards the
+ * expensive full-market scan; this is one pool, called only when a
+ * rebalance is already happening, not on every tick).
+ */
+export async function isPoolStillEligible(poolAddress: string, config: ScannerConfig): Promise<boolean> {
+  const pairs = await fetchTopPools();
+  const pool = pairs.find((p) => p.address === poolAddress);
+  if (!pool) return false; // fell out of the top-200-by-volume window — treat as degraded
+  const passed = await filterAndRankPools([pool], config);
+  return passed.length > 0;
+}
+
+/**
  * Scans + filters candidate pools. Enforces a hard floor on poll frequency
  * (>= MIN_SCAN_INTERVAL_MS) regardless of caller cadence, so a misconfigured
  * caller can't hammer the API.

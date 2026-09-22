@@ -11,6 +11,7 @@ import {
 } from '../services/meteoraDLMM.js';
 import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from '../services/jupiterSwap.js';
 import { connection, wallet, getWalletSolBalance } from '../services/solana.js';
+import { isPoolStillEligible, type ScannerConfig } from '../services/meteoraScanner.js';
 import { addToBlacklist } from './riskManager.js';
 import { logger } from '../utils/logger.js';
 
@@ -33,6 +34,10 @@ export interface PoolContext {
   rebalanceTimestamps: number[];
   lastRebalanceAt: number;
   volume1hBaselineUsd: number;
+  /** Active bin id when the position was opened/last compounded. */
+  centerBinId: number | null;
+  /** When the position first went out-of-range (epoch ms) — null while in-range. */
+  outOfRangeSinceMs: number | null;
 }
 
 async function getTokenBalance(mint: string): Promise<BN> {
@@ -61,6 +66,32 @@ async function otherTokenValueInSol(ctx: PoolContext, otherAmount: BN): Promise<
 
 export function isCooldownActive(ctx: PoolContext, now = Date.now()): boolean {
   return now - ctx.lastRebalanceAt < env.REBALANCE_COOLDOWN_MS;
+}
+
+export interface BinRangeStatus {
+  currentBinId: number;
+  isOutOfRange: boolean;
+}
+
+/**
+ * Live bin-range check against the position's own DLMM pool object — reuses
+ * ctx.pool (already held, no wallet involved in this read) rather than
+ * spinning up a fresh DLMM instance like rpc.ts's getActiveBinId does for
+ * the wallet-free callers (paper-trade, scanner).
+ */
+export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatus> {
+  const activeBin = await getActiveBin(ctx.pool);
+  const isOutOfRange = ctx.centerBinId === null || Math.abs(activeBin.binId - ctx.centerBinId) > env.BIN_RANGE_RADIUS;
+  return { currentBinId: activeBin.binId, isOutOfRange };
+}
+
+/** Call once per health-check tick to keep ctx.outOfRangeSinceMs accurate (set on first out-of-range tick, cleared once back in range). */
+export function updateOutOfRangeTracking(ctx: PoolContext, isOutOfRange: boolean, now = Date.now()): void {
+  if (isOutOfRange && ctx.outOfRangeSinceMs === null) {
+    ctx.outOfRangeSinceMs = now;
+  } else if (!isOutOfRange) {
+    ctx.outOfRangeSinceMs = null;
+  }
 }
 
 export interface PositionHealthSnapshot {
@@ -93,25 +124,45 @@ export async function getPositionHealthSnapshot(ctx: PoolContext): Promise<Posit
 export { estimateCycleGasCostSol } from './costEstimate.js';
 
 /**
- * Full auto-compound cycle: close position (claim fees + reclaim rent),
- * rebalance token ratio 50:50, and reopen a fresh position sized to
- * whatever SOL-equivalent capital survives minus the gas reserve.
+ * Full compound cycle: close position (claim fees + reclaim rent), then
+ * either —
+ *  - the pool still passes the entry screen: rebalance 50:50 and reopen a
+ *    fresh position here at the new active bin (the normal auto-compound
+ *    path), or
+ *  - it no longer does (e.g. no longer trending, degraded liquidity):
+ *    convert everything to SOL and return null instead of reopening —
+ *    caller should treat this like a freed-up slot and scan for a
+ *    different pool next tick. Not a violation (no blacklist), the pool
+ *    just isn't the best home for this capital right now.
+ * This runs for BOTH a fee-threshold-triggered rebalance and an
+ * idle-forced one (out-of-range too long while in profit) — same
+ * mechanical action either way, `reasons` is just why riskManager decided
+ * to trigger it.
  */
-export async function executeAutoCompound(ctx: PoolContext): Promise<PoolContext> {
+export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConfig): Promise<PoolContext | null> {
   const [position] = await getUserPositions(ctx.pool);
   if (!position) throw new Error(`[rebalanceEngine] no open position found for pool ${ctx.poolAddress}`);
 
   logger.info('[rebalanceEngine] closing position for compound cycle', { pool: ctx.poolAddress });
   await closePositionFull(ctx.pool, position);
 
-  const [balX, balY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
-  const solBalance = await getWalletSolBalance();
+  const stillEligible = await isPoolStillEligible(ctx.poolAddress, scannerConfig);
 
+  const [balX, balY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
+  const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+  const otherAmount = ctx.xIsSol ? balY : balX;
+
+  if (!stillEligible) {
+    logger.info('[rebalanceEngine] pool no longer passes entry screen — converting to SOL for a fresh scan', {
+      pool: ctx.poolAddress,
+    });
+    if (otherAmount.gtn(0)) await emergencySwapAllToSol(otherMint, otherAmount);
+    return null;
+  }
+
+  const solBalance = await getWalletSolBalance();
   const reserveLamports = new BN(Math.round(env.MIN_GAS_RESERVE_SOL * LAMPORTS_PER_SOL));
   const solAmount = ctx.xIsSol ? balX : balY;
-  const otherAmount = ctx.xIsSol ? balY : balX;
-  const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
-
   const spendableSolLamports = BN.max(solAmount.sub(reserveLamports), new BN(0));
   const otherValueSol = await otherTokenValueInSol(ctx, otherAmount);
 
@@ -142,10 +193,11 @@ export async function executeAutoCompound(ctx: PoolContext): Promise<PoolContext
 
   await openPosition({ pool: ctx.pool, totalXAmount: depositX, totalYAmount: depositY, minBinId, maxBinId });
 
-  void otherMint; // kept for future USD-value logging/telemetry
   const now = Date.now();
   ctx.rebalanceTimestamps.push(now);
   ctx.lastRebalanceAt = now;
+  ctx.centerBinId = activeBin.binId;
+  ctx.outOfRangeSinceMs = null;
   logger.info('[rebalanceEngine] compound cycle complete', { pool: ctx.poolAddress });
   return ctx;
 }
@@ -169,6 +221,11 @@ export async function openInitialPosition(
   logger.info('[rebalanceEngine] opening initial position', { poolAddress, capitalSol });
   await swapExactIn(WSOL_MINT, otherMint, halfLamports);
 
+  const [balX, balY] = await Promise.all([getTokenBalance(mintX), getTokenBalance(mintY)]);
+  const activeBin = await getActiveBin(pool);
+  const minBinId = activeBin.binId - env.BIN_RANGE_RADIUS;
+  const maxBinId = activeBin.binId + env.BIN_RANGE_RADIUS;
+
   const ctx: PoolContext = {
     poolAddress,
     pool,
@@ -179,12 +236,9 @@ export async function openInitialPosition(
     rebalanceTimestamps: [],
     lastRebalanceAt: 0,
     volume1hBaselineUsd: 0,
+    centerBinId: activeBin.binId,
+    outOfRangeSinceMs: null,
   };
-
-  const [balX, balY] = await Promise.all([getTokenBalance(mintX), getTokenBalance(mintY)]);
-  const activeBin = await getActiveBin(pool);
-  const minBinId = activeBin.binId - env.BIN_RANGE_RADIUS;
-  const maxBinId = activeBin.binId + env.BIN_RANGE_RADIUS;
 
   await openPosition({ pool, totalXAmount: balX, totalYAmount: balY, minBinId, maxBinId });
   logger.info('[rebalanceEngine] initial position opened', { poolAddress });

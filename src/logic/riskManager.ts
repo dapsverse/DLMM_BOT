@@ -16,6 +16,10 @@ export interface PositionHealthInput {
   /** Fee/gas inputs for the rebalance-trigger threshold rule. */
   unclaimedFeesUsd: number;
   estimatedGasCostUsd: number;
+  /** Bin-range status — out-of-range means the position has stopped earning new fees (see idle-forced rebalance below). */
+  isOutOfRange?: boolean;
+  /** When the position first went out-of-range (epoch ms), null/undefined while in-range. */
+  outOfRangeSinceMs?: number | null;
 }
 
 export interface RiskEvaluation {
@@ -72,6 +76,23 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
     const r = [`unclaimed fees $${input.unclaimedFeesUsd.toFixed(2)} > threshold $${rebalanceThresholdUsd.toFixed(2)} (gas * ${env.FEE_GAS_MULTIPLIER})`];
     logger.info('[riskManager] REBALANCE', { reasons: r });
     return { decision: 'REBALANCE', reasons: r };
+  }
+
+  // Idle-forced rebalance: out-of-range means the position stopped earning
+  // new fees, so the fee-threshold check above can stall forever waiting on
+  // fees that no longer accrue. Capital shouldn't just sit there once it's
+  // been out of range "too long" while already profitable — force a
+  // compound cycle, which re-checks whether this pool still qualifies for
+  // re-entry or whether capital should go find a different one instead
+  // (decided by rebalanceEngine/paperTrade, not here).
+  if (input.isOutOfRange && input.outOfRangeSinceMs !== undefined && input.outOfRangeSinceMs !== null) {
+    const idleMinutes = (now - input.outOfRangeSinceMs) / 60_000;
+    const inProfit = input.currentValueUsd > input.initialDepositUsd;
+    if (idleMinutes >= env.MAX_IDLE_OUT_OF_RANGE_MINUTES && inProfit) {
+      const r = [`out of range idle ${idleMinutes.toFixed(1)}min while in profit — forcing rebalance instead of sitting idle`];
+      logger.info('[riskManager] REBALANCE (idle-forced)', { reasons: r });
+      return { decision: 'REBALANCE', reasons: r };
+    }
   }
 
   return { decision: 'HOLD', reasons: [] };

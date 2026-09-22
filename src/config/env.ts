@@ -85,6 +85,13 @@ export const env = {
   VOLUME_DROP_HARD_EXIT_PCT: num('VOLUME_DROP_HARD_EXIT_PCT', 60),
   BLACKLIST_DURATION_MS: num('BLACKLIST_DURATION_MS', 6 * 60 * 60_000),
 
+  // Don't let capital sit idle out-of-range forever waiting on a fee
+  // threshold that's stopped accruing — force a compound cycle after this
+  // many minutes out-of-range, but only while already in profit (never
+  // force-crystallize a loss). > REBALANCE_COOLDOWN_MS so it never fires
+  // faster than the normal cooldown allows anyway.
+  MAX_IDLE_OUT_OF_RANGE_MINUTES: num('MAX_IDLE_OUT_OF_RANGE_MINUTES', 10),
+
   // Swap / gas
   SLIPPAGE_BPS: num('SLIPPAGE_BPS', 100),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),

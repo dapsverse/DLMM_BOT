@@ -82,6 +82,8 @@ interface VirtualPosition {
   volume1hBaselineUsd: number;
   /** Active bin id when the position was opened/last compounded — null if the RPC read failed. */
   centerBinId: number | null;
+  /** When the position first went out-of-range (epoch ms) — null while in-range/unknown. */
+  outOfRangeSinceMs: number | null;
 }
 
 interface PoolVisit {
@@ -245,6 +247,7 @@ async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | nu
     entryMemePriceUsd: meme.priceUsd,
     volume1hBaselineUsd: chosen.volume1hUsd,
     centerBinId,
+    outOfRangeSinceMs: null,
   };
   position = entered;
   summary.poolsEntered++;
@@ -303,6 +306,9 @@ async function tick(): Promise<void> {
   const currentBinId = await getActiveBinId(position.poolAddress);
   const binsFromCenter = position.centerBinId !== null && currentBinId !== null ? currentBinId - position.centerBinId : null;
   const inRange = binsFromCenter === null ? null : Math.abs(binsFromCenter) <= env.BIN_RANGE_RADIUS;
+  const isOutOfRange = inRange === false; // null (unknown) is treated as "not (confirmed) out of range" — don't force on missing data
+  if (isOutOfRange && position.outOfRangeSinceMs === null) position.outOfRangeSinceMs = now;
+  else if (!isOutOfRange) position.outOfRangeSinceMs = null;
 
   // Fee accrual since last tick, pro-rata TVL share (see file header caveat).
   const elapsedHours = (now - position.lastFeeAccrualAtMs) / 3_600_000;
@@ -334,6 +340,8 @@ async function tick(): Promise<void> {
     volume1hBaselineUsd: position.volume1hBaselineUsd,
     unclaimedFeesUsd: position.feesEarnedUsd,
     estimatedGasCostUsd: gasCostUsd,
+    isOutOfRange,
+    outOfRangeSinceMs: position.outOfRangeSinceMs,
   });
 
   if (decision === 'HARD_EXIT') {
@@ -372,28 +380,58 @@ async function tick(): Promise<void> {
       logEvent({ type: 'HOLD', pool: position.poolName, note: 'rebalance triggered but still in cooldown', currentValueUsd: +currentValueUsd.toFixed(2), currentBinId, inRange });
     } else {
       const compoundedToUsd = Math.max(currentValueUsd - gasCostUsd, 0);
-      logEvent({
-        type: 'REBALANCE',
-        pool: position.poolName,
-        reasons,
-        compoundedFromUsd: +position.capitalUsd.toFixed(2),
-        compoundedToUsd: +compoundedToUsd.toFixed(2),
-        feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
-        rebalanceCostUsd: +gasCostUsd.toFixed(2),
-        oldCenterBinId: position.centerBinId,
-        newCenterBinId: currentBinId,
-      });
-      position.capitalUsd = compoundedToUsd;
-      position.feesEarnedUsd = 0;
-      position.entrySolPriceUsd = sol.priceUsd;
-      position.entryMemePriceUsd = meme.priceUsd;
-      position.volume1hBaselineUsd = live.volume1hUsd;
-      position.rebalanceTimestamps.push(now);
-      position.lastRebalanceAtMs = now;
-      position.centerBinId = currentBinId; // reopening re-centers the range on the current active bin
-      summary.rebalances++;
+      // Re-check the held pool against the full entry screen using the
+      // SAME fresh `live` data already fetched this tick (no extra
+      // request) — decides "reopen here" vs "leave for a fresh scan",
+      // instead of blindly reopening in whatever pool we happened to be in.
+      const stillEligible = (await filterAndRankPools([live], defaultScannerConfig(blacklist))).length > 0;
       const visit = summary.poolHistory[summary.poolHistory.length - 1];
-      if (visit) visit.rebalanceCount++;
+
+      if (stillEligible) {
+        logEvent({
+          type: 'REBALANCE',
+          pool: position.poolName,
+          reasons,
+          compoundedFromUsd: +position.capitalUsd.toFixed(2),
+          compoundedToUsd: +compoundedToUsd.toFixed(2),
+          feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
+          rebalanceCostUsd: +gasCostUsd.toFixed(2),
+          oldCenterBinId: position.centerBinId,
+          newCenterBinId: currentBinId,
+        });
+        position.capitalUsd = compoundedToUsd;
+        position.feesEarnedUsd = 0;
+        position.entrySolPriceUsd = sol.priceUsd;
+        position.entryMemePriceUsd = meme.priceUsd;
+        position.volume1hBaselineUsd = live.volume1hUsd;
+        position.rebalanceTimestamps.push(now);
+        position.lastRebalanceAtMs = now;
+        position.centerBinId = currentBinId; // reopening re-centers the range on the current active bin
+        position.outOfRangeSinceMs = null;
+        summary.rebalances++;
+        if (visit) visit.rebalanceCount++;
+      } else {
+        // Pool no longer passes the entry screen (e.g. no longer trending)
+        // — leave with the compounded capital instead of forcing a reopen
+        // here. Not a violation, so no blacklist (unlike HARD_EXIT) — the
+        // next tick's scan is free to reconsider it later if it recovers.
+        logEvent({
+          type: 'LEAVE_POOL',
+          pool: position.poolName,
+          reasons: [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening'],
+          compoundedFromUsd: +position.capitalUsd.toFixed(2),
+          finalValueUsd: +compoundedToUsd.toFixed(2),
+          feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
+        });
+        if (visit) {
+          visit.exitedAtMs = now;
+          visit.exitType = 'HARD_EXIT'; // reusing the report's exit-status field; distinguishable via jsonl LEAVE_POOL events
+          visit.exitValueUsd = +compoundedToUsd.toFixed(2);
+          visit.exitReasons = reasons;
+        }
+        idleCapitalUsd = compoundedToUsd;
+        position = null;
+      }
     }
   } else {
     logEvent({
