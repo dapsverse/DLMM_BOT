@@ -1,0 +1,37 @@
+{
+  "name": "meteora-dlmm-bot",
+  "version": "0.1.0",
+  "description": "Single-pool Meteora DLMM liquidity provider bot with auto-compound & risk management",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "scan": "tsx src/scripts/scanOnce.ts",
+    "paper-trade": "tsx src/scripts/paperTrade.ts",
+    "paper-trade:report": "tsx src/scripts/paperTradeReport.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jup-ag/api": "^6.0.48",
+    "@meteora-ag/dlmm": "^1.9.14",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.98.0",
+    "axios": "^1.7.9",
+    "bignumber.js": "^9.1.2",
+    "bn.js": "^5.2.1",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.7",
+    "winston": "^3.17.0"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.6",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
