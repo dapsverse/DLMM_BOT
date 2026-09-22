@@ -49,6 +49,9 @@ export interface MeteoraPair {
   tokenY: TokenMeta;
   /** Not part of the raw API — hydrated from DexScreener if available. */
   priceChange1hPct?: number;
+  /** Longer trend window than 1h — memecoin 1h moves are noisy, 6h is a steadier uptrend/downtrend signal. */
+  priceChange6hPct?: number;
+  priceChange24hPct?: number;
 }
 
 /**
@@ -138,6 +141,8 @@ export interface ScannerConfig {
   requireMintAuthorityDisabled: boolean;
   minBinStep: number;
   minPoolAgeHours: number;
+  requireUptrend: boolean;
+  minPriceChange6hPct: number;
   blacklistPools: Map<string, number>; // poolAddress -> blacklisted-until (epoch ms)
 }
 
@@ -178,7 +183,7 @@ export async function fetchTopPools(): Promise<MeteoraPair[]> {
 }
 
 interface DexScreenerPair {
-  priceChange?: { h1?: number };
+  priceChange?: { h1?: number; h6?: number; h24?: number };
   volume?: { h1?: number };
 }
 
@@ -200,20 +205,24 @@ export async function getVolume1hUsd(mint: string): Promise<number | null> {
 }
 
 /**
- * Hydrates `priceChange1hPct` from DexScreener for a short candidate list
- * (post TVL/volume filter, not the whole pair list — keeps calls bounded).
- * Best-effort: a failed lookup just leaves the field undefined, which the
- * crash-guard filter treats as "unknown, don't block".
+ * Hydrates price-change fields (1h/6h/24h) from DexScreener for a short
+ * candidate list (post TVL/volume filter, not the whole pair list — keeps
+ * calls bounded). All three windows come back in the same response, no
+ * extra request cost for the longer-window trend data. Best-effort: a
+ * failed lookup just leaves the fields undefined, which the crash-guard
+ * and uptrend filters both treat as "unknown, don't block".
  */
-async function hydratePriceChange1h(pairs: MeteoraPair[]): Promise<void> {
+async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
   await mapWithConcurrency(pairs, DEXSCREENER_CONCURRENCY, async (pair) => {
     try {
       const res = await withRetry(
         () => axios.get<{ pairs?: DexScreenerPair[] }>(`${DEXSCREENER_TOKEN_URL}/${pair.mint_x}`, { timeout: 10_000 }),
         { maxRetries: 2, baseDelayMs: HTTP_RETRY_BASE_DELAY_MS, isRetryable: isRateLimitError, label: 'dexscreener:token' },
       );
-      const h1 = res.data.pairs?.[0]?.priceChange?.h1;
-      if (typeof h1 === 'number') pair.priceChange1hPct = h1;
+      const priceChange = res.data.pairs?.[0]?.priceChange;
+      if (typeof priceChange?.h1 === 'number') pair.priceChange1hPct = priceChange.h1;
+      if (typeof priceChange?.h6 === 'number') pair.priceChange6hPct = priceChange.h6;
+      if (typeof priceChange?.h24 === 'number') pair.priceChange24hPct = priceChange.h24;
     } catch (err) {
       logger.debug(`[scanner] dexscreener hydration failed for ${pair.address}`, {
         error: err instanceof Error ? err.message : String(err),
@@ -272,13 +281,21 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     return true;
   });
 
-  await Promise.all([hydratePriceChange1h(preFiltered), hydrateMintAuthority(preFiltered)]);
+  await Promise.all([hydrateTrendData(preFiltered), hydrateMintAuthority(preFiltered)]);
 
   const candidates = preFiltered.filter((pair) => {
     if (
       pair.priceChange1hPct !== undefined &&
       pair.priceChange1hPct < PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT
     ) {
+      return false;
+    }
+
+    // Uptrend filter: good volume alone put a pool like JEANPHIL-SOL at #1
+    // even mid-downtrend. 6h is steadier than 1h for memecoin noise — same
+    // "unknown, don't block" policy as the crash-guard above (a failed
+    // DexScreener lookup shouldn't starve every candidate).
+    if (config.requireUptrend && pair.priceChange6hPct !== undefined && pair.priceChange6hPct < config.minPriceChange6hPct) {
       return false;
     }
 
@@ -290,8 +307,18 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     return true;
   });
 
-  // Best pool first: rank by vol/TVL ratio (capital efficiency proxy).
-  candidates.sort((a, b) => Number(b.trade_volume_24h) / Number(b.liquidity) - Number(a.trade_volume_24h) / Number(a.liquidity));
+  // Best pool first: vol/TVL ratio (capital efficiency) weighted up for
+  // stronger 6h uptrends — a merely-good pool that's also trending up
+  // should outrank an equally-good pool that's flat/drifting down within
+  // the filter's floor. Downtrends never boost the score (multiplier
+  // floors at 1x), they're just not filtered out unless requireUptrend
+  // already excluded them above.
+  const score = (p: MeteoraPair) => {
+    const volTvlRatio = Number(p.trade_volume_24h) / Number(p.liquidity);
+    const trendBoost = 1 + Math.max(0, p.priceChange6hPct ?? 0) / 100;
+    return volTvlRatio * trendBoost;
+  };
+  candidates.sort((a, b) => score(b) - score(a));
 
   logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters`);
   return candidates;
@@ -326,6 +353,8 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     requireMintAuthorityDisabled: env.REQUIRE_MINT_AUTHORITY_DISABLED,
     minBinStep: env.MIN_BIN_STEP,
     minPoolAgeHours: env.MIN_POOL_AGE_HOURS,
+    requireUptrend: env.REQUIRE_UPTREND,
+    minPriceChange6hPct: env.MIN_PRICE_CHANGE_6H_PCT,
     blacklistPools,
   };
 }

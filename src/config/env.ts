@@ -63,6 +63,11 @@ export const env = {
   MIN_BIN_STEP: num('MIN_BIN_STEP', 15),
   MIN_POOL_AGE_HOURS: num('MIN_POOL_AGE_HOURS', 2),
 
+  // Trend filter — good volume alone isn't enough; prefer tokens that are
+  // net up over the last 6h instead of a high-volume token mid-downtrend.
+  REQUIRE_UPTREND: bool('REQUIRE_UPTREND', true),
+  MIN_PRICE_CHANGE_6H_PCT: num('MIN_PRICE_CHANGE_6H_PCT', 0),
+
   // Position sizing
   BIN_RANGE_RADIUS: num('BIN_RANGE_RADIUS', 10),
 

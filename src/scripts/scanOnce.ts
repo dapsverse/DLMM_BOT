@@ -23,7 +23,9 @@ if (!candidates.length) {
     console.log(`   memecoin mint=${memecoin.address}`);
     console.log(`   binStep=${p.bin_step}  TVL=$${tvl.toLocaleString()}  Vol24h=$${vol.toLocaleString()}  Vol/TVL=${(vol / tvl).toFixed(2)}x  age=${ageHours.toFixed(1)}h`);
     console.log(`   marketCap=$${memecoin.marketCapUsd.toLocaleString()}  holders=${memecoin.holders}  freezeAuthorityDisabled=${memecoin.freezeAuthorityDisabled}  mintAuthorityRevoked=${memecoin.mintAuthorityRevoked}`);
-    if (p.priceChange1hPct !== undefined) console.log(`   priceChange1h=${p.priceChange1hPct}%`);
+    if (p.priceChange1hPct !== undefined || p.priceChange6hPct !== undefined || p.priceChange24hPct !== undefined) {
+      console.log(`   priceChange: 1h=${p.priceChange1hPct ?? '?'}%  6h=${p.priceChange6hPct ?? '?'}%  24h=${p.priceChange24hPct ?? '?'}%`);
+    }
     console.log('');
   });
 }
