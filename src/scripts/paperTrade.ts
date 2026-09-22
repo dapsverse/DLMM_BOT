@@ -116,7 +116,7 @@ let idleCapitalUsd = 0; // capital not currently in a position (between hard-exi
 let lastKnownSolPriceUsd = 0;
 const blacklist = new Map<string, number>();
 const summary: RunSummary = {
-  label: LABEL ?? 'volume-only (legacy)',
+  label: LABEL ?? 'default',
   startedAtMs: runStartedAtMs,
   startingCapitalUsd: null,
   poolsEntered: 0,
