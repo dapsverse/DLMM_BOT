@@ -13,6 +13,7 @@ import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from
 import { connection, wallet, getWalletSolBalance } from '../services/solana.js';
 import { isPoolStillEligible, type ScannerConfig } from '../services/meteoraScanner.js';
 import { addToBlacklist } from './riskManager.js';
+import { computeBinRadius } from './binRange.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -34,6 +35,8 @@ export interface PoolContext {
   rebalanceTimestamps: number[];
   lastRebalanceAt: number;
   volume1hBaselineUsd: number;
+  /** Pool's bin_step — constant for the pool's lifetime, used to derive the bin radius (see logic/binRange.ts). */
+  binStep: number;
   /** Active bin id when the position was opened/last compounded. */
   centerBinId: number | null;
   /** When the position first went out-of-range (epoch ms) — null while in-range. */
@@ -81,7 +84,8 @@ export interface BinRangeStatus {
  */
 export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatus> {
   const activeBin = await getActiveBin(ctx.pool);
-  const isOutOfRange = ctx.centerBinId === null || Math.abs(activeBin.binId - ctx.centerBinId) > env.BIN_RANGE_RADIUS;
+  const radius = computeBinRadius(ctx.binStep);
+  const isOutOfRange = ctx.centerBinId === null || Math.abs(activeBin.binId - ctx.centerBinId) > radius;
   return { currentBinId: activeBin.binId, isOutOfRange };
 }
 
@@ -185,8 +189,9 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   // Re-check balances after swap before reopening.
   const [freshX, freshY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
   const activeBin = await getActiveBin(ctx.pool);
-  const minBinId = activeBin.binId - env.BIN_RANGE_RADIUS;
-  const maxBinId = activeBin.binId + env.BIN_RANGE_RADIUS;
+  const radius = computeBinRadius(ctx.binStep);
+  const minBinId = activeBin.binId - radius;
+  const maxBinId = activeBin.binId + radius;
 
   const depositX = ctx.xIsSol ? BN.max(freshX.sub(reserveLamports), new BN(0)) : freshX;
   const depositY = ctx.xIsSol ? freshY : BN.max(freshY.sub(reserveLamports), new BN(0));
@@ -214,6 +219,7 @@ export async function openInitialPosition(
   mintY: string,
   xIsSol: boolean,
   capitalSol: number,
+  binStep: number,
 ): Promise<PoolContext> {
   const otherMint = xIsSol ? mintY : mintX;
   const halfLamports = new BN(Math.round((capitalSol * LAMPORTS_PER_SOL) / 2));
@@ -223,8 +229,9 @@ export async function openInitialPosition(
 
   const [balX, balY] = await Promise.all([getTokenBalance(mintX), getTokenBalance(mintY)]);
   const activeBin = await getActiveBin(pool);
-  const minBinId = activeBin.binId - env.BIN_RANGE_RADIUS;
-  const maxBinId = activeBin.binId + env.BIN_RANGE_RADIUS;
+  const radius = computeBinRadius(binStep);
+  const minBinId = activeBin.binId - radius;
+  const maxBinId = activeBin.binId + radius;
 
   const ctx: PoolContext = {
     poolAddress,
@@ -236,6 +243,7 @@ export async function openInitialPosition(
     rebalanceTimestamps: [],
     lastRebalanceAt: 0,
     volume1hBaselineUsd: 0,
+    binStep,
     centerBinId: activeBin.binId,
     outOfRangeSinceMs: null,
   };

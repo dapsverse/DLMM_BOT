@@ -143,10 +143,15 @@ export async function getUserPositions(pool: DlmmPool): Promise<LbPosition[]> {
 }
 
 /**
- * Opens a new DLMM position with a symmetric spot-strategy range around the
- * active bin ([activeBin - radius, activeBin + radius]) and deposits both
- * token amounts. Caller is responsible for pre-balancing X/Y 50:50 via
- * jupiterSwap.balanceTokenRatio before calling this.
+ * Opens a new DLMM position with a BidAsk-shaped range around the active
+ * bin ([activeBin - radius, activeBin + radius]) and deposits both token
+ * amounts. BidAsk concentrates liquidity at the range edges (like resting
+ * limit orders on both sides) — Meteora's own docs recommend it over Spot
+ * (even distribution) specifically for volatile pairs, since it captures
+ * more fee when price jumps across bins; Curve (concentrated at center) is
+ * explicitly NOT recommended for volatile pairs. Caller is responsible for
+ * pre-balancing X/Y 50:50 via jupiterSwap.balanceTokenRatio before calling
+ * this.
  */
 export async function openPosition(params: OpenPositionParams): Promise<OpenPositionResult> {
   const { pool, totalXAmount, totalYAmount, minBinId, maxBinId } = params;
@@ -157,7 +162,7 @@ export async function openPosition(params: OpenPositionParams): Promise<OpenPosi
     user: wallet.publicKey,
     totalXAmount,
     totalYAmount,
-    strategy: { minBinId, maxBinId, strategyType: StrategyType.Spot },
+    strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk },
   });
 
   await withPriorityFee(tx, [wallet.publicKey, positionKeypair.publicKey]);

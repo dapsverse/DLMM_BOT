@@ -42,6 +42,7 @@ async function tryEnterPool(): Promise<void> {
         candidate.mint_y,
         xIsSol,
         currentCapitalSol,
+        candidate.bin_step,
       );
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
       logger.info(`[index] entered pool ${candidate.address}`, { capitalSol: currentCapitalSol });

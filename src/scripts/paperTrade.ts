@@ -19,7 +19,7 @@
  *   pool.fees_24h prorated over the elapsed tick interval. This assumes
  *   our liquidity earns the SAME rate as the pool average. Real DLMM is
  *   concentrated (bins): a position held tight around the active bin
- *   (BIN_RANGE_RADIUS=10) usually captures MORE than a naive TVL-share
+ *   (radius derived per-pool from bin_step, see logic/binRange.ts) usually captures MORE than a naive TVL-share
  *   while price stays in range, and captures ZERO once price exits the
  *   range (liquidity goes idle, one-sided). This sim does not model bin
  *   exit — treat its fee number as a rough floor, not a ceiling.
@@ -48,6 +48,7 @@ import {
 } from '../services/meteoraScanner.js';
 import { evaluatePosition, addToBlacklist } from '../logic/riskManager.js';
 import { estimateCycleGasCostSol } from '../logic/costEstimate.js';
+import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
 import { env } from '../config/env.js';
 
@@ -80,6 +81,8 @@ interface VirtualPosition {
   entrySolPriceUsd: number;
   entryMemePriceUsd: number;
   volume1hBaselineUsd: number;
+  /** Pool's bin_step — constant for the pool's lifetime, used to derive the bin radius (see logic/binRange.ts). */
+  binStep: number;
   /** Active bin id when the position was opened/last compounded — null if the RPC read failed. */
   centerBinId: number | null;
   /** When the position first went out-of-range (epoch ms) — null while in-range/unknown. */
@@ -158,12 +161,11 @@ function writeState(currentValueUsd: number, currentBinId?: number | null, price
   let binInfo: Record<string, unknown> | null = null;
   if (position) {
     const center = position.centerBinId;
-    const rangeMinBinId = center === null ? null : center - env.BIN_RANGE_RADIUS;
-    const rangeMaxBinId = center === null ? null : center + env.BIN_RANGE_RADIUS;
+    const radius = computeBinRadius(position.binStep);
+    const rangeMinBinId = center === null ? null : center - radius;
+    const rangeMaxBinId = center === null ? null : center + radius;
     const inRange =
-      center !== null && currentBinId !== undefined && currentBinId !== null
-        ? Math.abs(currentBinId - center) <= env.BIN_RANGE_RADIUS
-        : null;
+      center !== null && currentBinId !== undefined && currentBinId !== null ? Math.abs(currentBinId - center) <= radius : null;
     const binsFromCenter = center !== null && currentBinId !== undefined && currentBinId !== null ? currentBinId - center : null;
 
     let priceRangeSol: { low: number; high: number; current: number } | null = null;
@@ -246,6 +248,7 @@ async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | nu
     entrySolPriceUsd: sol.priceUsd,
     entryMemePriceUsd: meme.priceUsd,
     volume1hBaselineUsd: chosen.volume1hUsd,
+    binStep: chosen.bin_step,
     centerBinId,
     outOfRangeSinceMs: null,
   };
@@ -269,7 +272,7 @@ async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | nu
     tvlUsd: Number(chosen.liquidity),
     vol24hUsd: chosen.trade_volume_24h,
     centerBinId,
-    binRange: centerBinId === null ? null : [centerBinId - env.BIN_RANGE_RADIUS, centerBinId + env.BIN_RANGE_RADIUS],
+    binRange: centerBinId === null ? null : [centerBinId - computeBinRadius(chosen.bin_step), centerBinId + computeBinRadius(chosen.bin_step)],
   });
   return entered;
 }
@@ -305,7 +308,7 @@ async function tick(): Promise<void> {
   const tvlUsd = Number(live.liquidity);
   const currentBinId = await getActiveBinId(position.poolAddress);
   const binsFromCenter = position.centerBinId !== null && currentBinId !== null ? currentBinId - position.centerBinId : null;
-  const inRange = binsFromCenter === null ? null : Math.abs(binsFromCenter) <= env.BIN_RANGE_RADIUS;
+  const inRange = binsFromCenter === null ? null : Math.abs(binsFromCenter) <= computeBinRadius(position.binStep);
   const isOutOfRange = inRange === false; // null (unknown) is treated as "not (confirmed) out of range" — don't force on missing data
   if (isOutOfRange && position.outOfRangeSinceMs === null) position.outOfRangeSinceMs = now;
   else if (!isOutOfRange) position.outOfRangeSinceMs = null;

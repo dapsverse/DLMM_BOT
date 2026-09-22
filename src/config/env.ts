@@ -74,8 +74,14 @@ export const env = {
   // looks fine but nothing's actually trading right now" (stale/wash-traded).
   MIN_RECENT_ACTIVITY_RATIO: num('MIN_RECENT_ACTIVITY_RATIO', 0.15),
 
-  // Position sizing
-  BIN_RANGE_RADIUS: num('BIN_RANGE_RADIUS', 10),
+  // Position sizing — bin radius is DERIVED per-pool from bin_step to hit
+  // this target price coverage (a fixed bin-count radius covers wildly
+  // different % price ranges across pools with different bin_step — e.g.
+  // radius=10 is ~±10% on bin_step=100 but only ~±1.6% on bin_step=15,
+  // both seen in real pools this bot has scanned). See logic/binRange.ts.
+  TARGET_RANGE_PCT: num('TARGET_RANGE_PCT', 15),
+  MIN_BIN_RADIUS: num('MIN_BIN_RADIUS', 5),
+  MAX_BIN_RADIUS: num('MAX_BIN_RADIUS', 50),
 
   // Risk management
   STOP_LOSS_PCT: num('STOP_LOSS_PCT', 25),
