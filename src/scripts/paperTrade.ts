@@ -568,7 +568,7 @@ async function tick(): Promise<void> {
         idleCapitalUsd = finalPositionValueUsd;
         position = null;
         const entered = await enterPool(candidate);
-        lastSwitchAtMs = opportunityNow;
+        if (entered) lastSwitchAtMs = opportunityNow;
         writeState(portfolioValueUsd(entered ? entered.capitalUsd : idleCapitalUsd));
         return;
       }
