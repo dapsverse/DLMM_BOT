@@ -439,6 +439,46 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
   return trendShortlist;
 }
 
+export interface OpportunityScanResult {
+  /** Top-ranked market candidate, if it's a genuinely different pool from the one currently held and one exists. Null if no candidate qualifies or the top candidate IS the currently-held pool. */
+  candidate: MeteoraPair | null;
+  candidateSpikeRatio: number;
+  currentSpikeRatio: number;
+}
+
+/**
+ * Full-market scan used by the opportunistic pool-switching feature: finds
+ * the best currently-available candidate and compares its volume-spike
+ * ratio against the currently-held pool's own live spike ratio, hydrated
+ * in the same pass for apples-to-apples freshness. Not subject to
+ * MIN_SCAN_INTERVAL_MS (that throttle guards the hot per-tick health-check
+ * path; this runs on its own much slower OPPORTUNITY_SCAN_INTERVAL_MS
+ * cadence, enforced by the caller in index.ts/paperTrade.ts, not here).
+ */
+export async function scanForBetterOpportunity(currentPoolAddress: string, config: ScannerConfig): Promise<OpportunityScanResult> {
+  const pairs = await fetchTopPools();
+  const currentPool = pairs.find((p) => p.address === currentPoolAddress) ?? null;
+  const shortlist = await filterAndRankPools(pairs, config);
+  const topCandidate = shortlist[0] ?? null;
+
+  // filterAndRankPools already hydrated every pool in `shortlist` in place
+  // (same object references as in `pairs`). The currently-held pool might
+  // not be in that shortlist (e.g. it's not top-3-by-trend right now, or
+  // it's temporarily blacklisted) — hydrate it separately if so, still just
+  // one extra batched HTTP call, not one-per-pool.
+  if (currentPool && currentPool.volumeH6Usd === undefined) {
+    await hydrateTrendData([currentPool]);
+  }
+
+  const currentSpikeRatio = currentPool ? volumeSpikeRatio(currentPool) : 0;
+  const candidateSpikeRatio = topCandidate ? volumeSpikeRatio(topCandidate) : 0;
+
+  if (!topCandidate || topCandidate.address === currentPoolAddress) {
+    return { candidate: null, candidateSpikeRatio: 0, currentSpikeRatio };
+  }
+  return { candidate: topCandidate, candidateSpikeRatio, currentSpikeRatio };
+}
+
 export interface PoolEligibility {
   eligible: boolean;
   /** Human-readable reasons the pool failed the screen — empty when eligible. */
