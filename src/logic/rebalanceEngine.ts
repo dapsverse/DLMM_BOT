@@ -42,6 +42,8 @@ export interface PoolContext {
   centerBinId: number | null;
   /** When the position first went out-of-range (epoch ms) — null while in-range. */
   outOfRangeSinceMs: number | null;
+  /** Highest unrealized profit % this position has ever reached, since openInitialPosition. Not reset on compoundCycle (initialDepositSol itself is never reset on compound either — this mirrors that existing basis). Reset only by starting a fresh PoolContext (new entry or switch). */
+  peakProfitPct: number;
 }
 
 async function getTokenBalance(mint: string): Promise<BN> {
@@ -263,6 +265,7 @@ export async function openInitialPosition(
     binStep,
     centerBinId: activeBin.binId,
     outOfRangeSinceMs: null,
+    peakProfitPct: 0,
   };
 
   await openPosition({ pool, totalXAmount: balX, totalYAmount: balY, minBinId, maxBinId });
@@ -271,14 +274,15 @@ export async function openInitialPosition(
 }
 
 /**
- * Hard-exit flow: close position, dump 100% of the non-SOL side to SOL,
- * blacklist the pool for BLACKLIST_DURATION_MS, and return the leftover SOL
- * capital available for the next pool.
+ * Closes the current position (claim fees + reclaim rent) and converts
+ * everything to SOL. Shared by executeHardExit (adds a blacklist after)
+ * and executeCleanExit (no blacklist - used by SWITCH and TAKE_PROFIT,
+ * neither of which are risk violations).
  */
-export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<string, number>): Promise<number> {
+async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promise<number> {
   const [position] = await getUserPositions(ctx.pool);
   if (position) {
-    logger.warn('[rebalanceEngine] HARD_EXIT: closing position', { pool: ctx.poolAddress });
+    logger.warn(`[rebalanceEngine] ${logPrefix}: closing position`, { pool: ctx.poolAddress });
     await closePositionFull(ctx.pool, position);
   }
 
@@ -288,10 +292,29 @@ export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<stri
     await emergencySwapAllToSol(otherMint, otherAmount);
   }
 
-  addToBlacklist(blacklistPools, ctx.poolAddress);
-
   const solBalance = await getWalletSolBalance();
   const nextCapital = Math.max(solBalance - env.MIN_GAS_RESERVE_SOL, 0);
-  logger.warn('[rebalanceEngine] HARD_EXIT complete', { pool: ctx.poolAddress, solBalance, nextCapital });
+  logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital });
   return nextCapital;
+}
+
+/**
+ * Hard-exit flow: close position, dump 100% of the non-SOL side to SOL,
+ * blacklist the pool for BLACKLIST_DURATION_MS, and return the leftover SOL
+ * capital available for the next pool.
+ */
+export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<string, number>): Promise<number> {
+  const nextCapital = await closeAndConvertToSol(ctx, 'HARD_EXIT');
+  addToBlacklist(blacklistPools, ctx.poolAddress);
+  return nextCapital;
+}
+
+/**
+ * Close position and convert to SOL WITHOUT blacklisting - used for both
+ * SWITCH (leaving to chase a better opportunity) and TAKE_PROFIT (locking
+ * in gains). Neither is a risk violation, so the pool stays a fully valid
+ * candidate for the very next scan.
+ */
+export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT'): Promise<number> {
+  return closeAndConvertToSol(ctx, reason);
 }
