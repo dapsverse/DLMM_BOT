@@ -304,9 +304,8 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promis
  * capital available for the next pool.
  */
 export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<string, number>): Promise<number> {
-  const nextCapital = await closeAndConvertToSol(ctx, 'HARD_EXIT');
   addToBlacklist(blacklistPools, ctx.poolAddress);
-  return nextCapital;
+  return closeAndConvertToSol(ctx, 'HARD_EXIT');
 }
 
 /**
