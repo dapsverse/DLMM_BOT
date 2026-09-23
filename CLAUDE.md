@@ -1,221 +1,331 @@
-# meteora-dlmm-bot — session context (2026-09-22)
+# meteora-dlmm-bot — session context (2026-09-23)
 
 Single-pool auto-compounding Meteora DLMM LP bot for Solana memecoin pools.
 5 SOL total budget (4.2 SOL working capital target, 0.8 SOL gas reserve in
-the general design; a separate 1 SOL validation run is in progress, see
-below). This file is the handoff — read it before doing anything else in a
-fresh session.
+the general design; current paper-trade validation runs are sized off
+`INITIAL_LP_CAPITAL_SOL=0.8`, see below). This file is the handoff — read it
+before doing anything else in a fresh session. Two full sessions of work are
+folded in here (2026-09-22 baseline + 2026-09-23 opportunistic-switching
+feature) — this file supersedes the previous version entirely.
 
 ## Where things stand right now
 
-- **Git**: repo just initialized this session. `main` has **zero commits on
-  purpose** (never commit directly to main — project rule). Real history
-  lives on branches:
-  - `chore/initial-import` — original baseline scaffold.
-  - `feature/trend-aware-entry` — **current branch, all active work is
-    here.** 8 commits on top of baseline (see `git log --oneline` for the
-    full list — trend-shortlist entry logic, activity cascade, anti-idle
-    rebalance, BidAsk shape, dynamic bin radius, two bookkeeping bugfixes).
-  - Nothing has been merged into `main` yet. No PR opened yet (no git
-    remote configured — this has all been local-only so far).
-- **A live paper-trade simulation is running right now** in the background
-  (started before context was cleared — check with `pgrep -fl
-  paperTrade.ts`; if it died, nothing is lost, `logs/paper-trade-state.json`
-  has the last snapshot). Started via:
-  `PAPER_TRADE_HOURS=24 nohup npm run paper-trade > logs/paper-trade-stdout.log 2>&1 &`
-  Check anytime with `npm run paper-trade:report` (auto-discovers every
-  `paper-trade-state*.json` in `logs/`, prints each + a comparison if more
-  than one).
-- **Real-money setup is prepped but NOT started.** `.env.live` exists
-  (gitignored, has a real Helius RPC key and a real wallet private key
-  already filled in by the user) sized for a 1 SOL validation run
-  (`INITIAL_LP_CAPITAL_SOL=0.7`, `MIN_GAS_RESERVE_SOL=0.3`). User was, as of
-  last message, on their way to buy SOL on an exchange and send it to that
-  wallet. **Nothing has been sent to the wallet yet as of this note** —
-  confirm balance before running `npm start` against `.env.live`.
+- **Git**: still local-only, `main` has **zero commits on purpose** (never
+  commit directly to main — project rule, enforced all session). All real
+  history is on `feature/trend-aware-entry` — **current branch, all active
+  work is here.** ~35 commits on top of the original baseline scaffold
+  (`chore/initial-import`). Working tree is clean as of this note. No PR
+  opened yet (no git remote configured).
+- **A live paper-trade simulation is running right now**, label
+  `switch-take-profit`, started fresh after every fix landed this session
+  (`PAPER_TRADE_LABEL=switch-take-profit PAPER_TRADE_HOURS=87600 nohup npm
+  run paper-trade > logs/paper-trade-switch-take-profit-stdout.log 2>&1 &`).
+  Check anytime with `npm run paper-trade:report` — it now **auto-detects
+  and deletes orphaned state files** (a run killed without its
+  `DURATION_HOURS` elapsing used to leave a `state-<label>.json` behind
+  forever showing "running" indefinitely; the report now probes the state
+  file's own `pid` field with `process.kill(pid, 0)` and cleans up dead
+  ones automatically — no more manual `rm` needed, that happened by hand
+  several times this session before the fix landed).
+- **Real-money setup is prepped but NOT started, unchanged since last
+  session.** `.env.live` exists (gitignored, real Helius RPC key + real
+  wallet private key already filled in by the user), sized for a small
+  validation run. **Nothing has been sent to the wallet as of this note** —
+  confirm balance before ever running `npm start` against `.env.live`. No
+  code this session touched real-money paths in a way that's been live-run
+  — everything was validated via paper-trade only, per standing project
+  policy (paper-trade first, real money only after hours/days of observed
+  paper-trade behavior).
 
-## Architecture (src/)
+## Architecture (src/) — updated for this session's additions
 
-- `config/env.ts` — all tunables, validated with sane defaults, a few
-  sanity-check throws (e.g. `MAX_CONCURRENT_POOLS` must be 1).
-- `config/constants.ts` — non-tunable constants (API URLs, WSOL mint, retry
-  counts, `TREND_SHORTLIST_SIZE`).
-- `services/rpc.ts` — **wallet-free** Solana RPC reads (connection,
-  `isMintAuthorityRevoked`, `getActiveBinId`, `getDynamicPriorityFeeMicroLamports`).
-  Deliberately split from `solana.ts` because that module decodes the
-  wallet's private key eagerly at import time — anything read-only
-  (scanner, paper-trade) must import from `rpc.ts`, never `solana.ts`, or
-  it'll require a real signing key just to run.
-- `services/solana.ts` — wallet + signing-adjacent helpers, re-exports
-  `rpc.ts`'s functions for convenience at real-bot call sites.
-- `services/meteoraScanner.ts` — fetches Meteora's pool list
-  (`dlmm.datapi.meteora.ag/pools` — the OLD `dlmm-api.meteora.ag/pair/all`
-  is dead, migrated mid-session), the full memecoin screen, and the
-  two-stage pool ranking (see below). Also exports `isPoolStillEligible`
-  (single-pool re-screen, used by the anti-idle/rebalance-eligibility
-  logic) and `getVolume1hUsd`.
-- `services/meteoraDLMM.ts` — DLMM SDK wrapper (open/close position, claim
-  fees). **Has two upstream packaging-bug workarounds documented inline**
-  — read the comment block at the top of the file before touching
-  anything DLMM-SDK-related:
-  1. The published `.d.ts` is corrupted (raw IDL JSON leaks into the
-     ambient declarations) — default export's TYPE resolves wrong. Fixed
-     with a hand-typed local interface + one cast.
-  2. The published ESM build (`dist/index.mjs`) crashes at import time
-     under plain Node/tsx — it does `import { BN } from "@coral-xyz/anchor"`
-     but that package's ESM entry doesn't actually export `BN`. Fixed by
-     loading via `createRequire` (forces the CJS build) instead of a
-     normal `import`. **This is a real bug that would have crashed the
-     live bot on its very first run** — only caught because paper-trade's
-     bin-range feature exercised this import path for the first time.
-- `services/jupiterSwap.ts` — Jupiter v6 swap wrapper (quote + swap +
-  balance-to-50:50 + emergency-dump-to-SOL).
-- `logic/riskManager.ts` — pure decision function `evaluatePosition()` →
-  `HOLD | REBALANCE | HARD_EXIT`. HARD_EXIT on stop-loss / >3
-  rebalances-per-hour / volume-drop. REBALANCE on fee-threshold (unclaimed
-  fees > gas×2.5) **or** the idle-forced rule (see below).
-- `logic/rebalanceEngine.ts` — the real bot's position lifecycle:
-  `openInitialPosition`, `compoundCycle` (rebalance, replaces the old
-  `executeAutoCompound`), `executeHardExit`, `getBinRangeStatus`,
-  `updateOutOfRangeTracking`. Prices everything in SOL terms (no external
-  price feed needed for its own decisions).
-- `logic/binRange.ts` — `computeBinRadius(binStep)`: derives the bin
-  radius from `TARGET_RANGE_PCT` (default 15%) instead of a fixed bin
-  count, clamped to `[MIN_BIN_RADIUS, MAX_BIN_RADIUS]`. Replaces the old
-  fixed `BIN_RANGE_RADIUS=10`, which covered wildly different % price
-  ranges depending on a pool's `bin_step` (confirmed with real scanned
-  data: same radius was ~±10% on one pool, ~±1.6% on another).
-- `logic/costEstimate.ts` — `estimateCycleGasCostSol(capitalSol)`: gas +
-  swap-slippage/DEX-fee estimate for the rebalance threshold check. **Was
-  a real bug earlier this session** — the original flat 0.0002 SOL
-  estimate didn't include slippage at all, so the fee-threshold triggered
-  on almost every tick (real bots would have over-traded/bled gas). Fixed
-  to include a slippage+fee component proportional to capital.
-- `scripts/paperTrade.ts` — the simulator. No wallet needed (imports only
-  `meteoraScanner.js` + `riskManager.js` + the pure logic modules, never
-  `solana.ts`/`meteoraDLMM.ts`/`jupiterSwap.ts`). Runs the same
-  scan→screen→decide loop as the real bot; approximates fee accrual
-  (pro-rata TVL share of `fees_24h`) and price PnL (constant-product IL
-  formula on the meme/SOL price ratio). **Read the file's header comment
-  block for the full list of modeling caveats** — it's directional, not a
-  precise backtest, and it explicitly does not model bin-exit fee-capture
-  effects. `PAPER_TRADE_LABEL=<name>` lets multiple sims run side by side
-  without clobbering each other's state file.
-- `scripts/scanOnce.ts` / `scripts/paperTradeReport.ts` — one-shot CLI
-  tools (`npm run scan`, `npm run paper-trade:report`).
-- `index.ts` — real bot's main loop. **Never actually run against real
-  funds or even devnet yet** — only runtime-smoke-tested (`node --import
-  tsx src/index.ts`), which confirms the whole module graph loads without
-  crashing and fails only at the expected point (dummy `PRIVATE_KEY` too
-  short to decode). The actual open-position/claim/close/swap transaction
-  code paths have zero real-world execution history.
+- `config/env.ts` — all tunables. Notable changes this session:
+  `MAX_TVL_USD` 1M→150k (a pool near $1M TVL dilutes this bot's small
+  capital's fee share to near-zero regardless of how active the pool
+  actually is — confirmed live), `PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT`
+  -20%→-12% (memecoins can dump 30-50%+ in minutes, -20% was closer to a
+  portfolio-level drawdown threshold, too loose for one volatile asset),
+  `MIN_PRICE_CHANGE_6H_PCT` -5%→0% (genuine uptrend requirement, not
+  merely "not crashing"), `MIN_TX_COUNT_M5` (new, absolute 5-minute
+  buy+sell-count floor — a pool can pass the *relative* activity-cascade
+  check with 0 real trades if its own 24h baseline is already weak),
+  plus 6 new vars for the opportunistic-switching/take-profit feature (see
+  below).
+- `config/constants.ts` — non-tunable constants. Added
+  `DEXSCREENER_TOKENS_BATCH_URL`/`DEXSCREENER_BATCH_MAX_ADDRESSES`/
+  `SOLANA_CHAIN_ID` for the batched-hydration fix (see below).
+- `services/rpc.ts` / `services/solana.ts` — unchanged this session, same
+  wallet-free vs. wallet-eager split as before.
+- `services/meteoraScanner.ts` — the biggest single file of churn this
+  session:
+  - **Batched DexScreener hydration** (was the root cause of repeated
+    429-storms): `hydrateTrendData` used to make one HTTP call per pool at
+    concurrency 5; now batches up to 30 addresses per call via
+    `/tokens/v1/{chainId}/{tokenAddresses}` (one request billed per batch
+    against DexScreener's documented 300/min limit). Also fixed a real
+    data-corruption bug found in the final review: the batch lookup used
+    to key results by *both* `baseToken.address` and `quoteToken.address`,
+    which let WSOL (quote-side on most pools) collide across pools —
+    now keys/requests by `nonSolToken(pair).address` only.
+  - `volumeSpikeRatio(pair)` (exported) — this-hour's volume pace vs. the
+    preceding 5h's pace (via DexScreener's 6h volume figure). Replaced
+    static vol/TVL ratio as the tie-break within the trend-shortlist, and
+    is the core comparison metric for the new opportunistic-switch feature.
+  - `poolRejectReasons(pair, config, opts?)` (exported) — diagnostic
+    function exposing exactly which filter check(s) a pool fails, instead
+    of the old opaque `true`/`false`. `isPoolStillEligible` now returns
+    `{ eligible, reasons }`.
+  - **Basic wash-trading heuristic**: reject if vol/TVL ratio is extreme
+    (>30x) *and* 1h price is nearly flat (<2%) — huge volume with no real
+    price movement is the signature of a self-trading loop.
+  - **`FilterOpts.skipSizingChecks`** (new, important): `filterAndRankPools`
+    /`poolRejectReasons` can now skip the checks that only make sense when
+    sizing *new* capital into a pool (`maxTvlUsd`, `minVolTvlRatio`,
+    `maxMemecoinMarketCapUsd`). Fixed a real bug found via live paper-trade
+    observation: `isPoolStillEligible` (used to decide "stay in this pool
+    vs. leave" when idle/out-of-range) used to run the *full* entry screen
+    — so a pool we're already holding that simply grew past `MAX_TVL_USD`
+    (i.e. **succeeded**) got force-ejected on its next re-screen. Confirmed
+    live: CRACKER-SOL entered at $132k TVL, grew to $213k, got kicked on
+    `tvl $213461 > max $150000`. `skipSizingChecks: true` is now set at the
+    two "should I keep holding" call sites (`isPoolStillEligible`,
+    paper-trade's inline out-of-range re-screen) — full entry-screen
+    behavior (`skipSizingChecks` unset/false) is unchanged for every fresh
+    multi-candidate scan (`scanPools`, `enterBestPool`, `scanForBetterOpportunity`).
+  - **`scanForBetterOpportunity(currentPoolAddress, config)`** (new) — the
+    opportunistic-switch feature's market scan: finds the best available
+    candidate and compares its live `volumeSpikeRatio` against the
+    currently-held pool's own, hydrated in the same batched pass.
+- `services/meteoraDLMM.ts` — unchanged this session; same two upstream
+  packaging-bug workarounds from last session still documented inline at
+  the top of the file (corrupted `.d.ts`, ESM build's missing `BN`
+  export) — read that comment block before touching anything DLMM-SDK-related.
+  `claimFees()` exists here and is now actually wired up (see
+  `rebalanceEngine.ts` below) — it was dead code as of last session.
+- `services/jupiterSwap.ts` — unchanged this session.
+- `logic/riskManager.ts` — `evaluatePosition()` now returns
+  `HOLD | REBALANCE | HARD_EXIT | TAKE_PROFIT` (was missing `TAKE_PROFIT`
+  last session). Decision-tree priority: `HARD_EXIT` (unchanged: stop-loss
+  / >3 rebalances-per-hour / volume-drop) → **`TAKE_PROFIT`** (new, see
+  below) → fee-threshold `REBALANCE` → idle-forced `REBALANCE` (see below)
+  → `HOLD`. Also new: `evaluateSwitchOpportunity()` (pure function, no
+  I/O — mirrors `evaluatePosition`'s shape) for the opportunistic-switch
+  decision (see "Two new features" below).
+  - **Idle-forced rebalance no longer requires profit first** (was: only
+    forced a compound after 10min out-of-range if *already in profit*,
+    silently leaving losing out-of-range capital idle forever otherwise).
+    Now fires regardless of profit/loss once idle — the existing
+    stop-loss (`HARD_EXIT`) already guards against forcing out a big
+    loss; anything reaching the idle-forced check is an acceptable
+    loss to crystallize in exchange for redeploying idle capital.
+- `logic/rebalanceEngine.ts`:
+  - `claimFeesOnly(ctx)` (new) — fee-threshold `REBALANCE` while still
+    in-range now just claims fees via the (previously dead) `claimFees()`
+    SDK call, instead of always doing a full close+reopen. Full
+    `compoundCycle` (close+reopen-or-leave) is now reserved for the
+    idle-forced (out-of-range) case or when the pool needs a fresh
+    eligibility check — a fee-threshold trigger while still in-range no
+    longer needlessly crystallizes unrealized price/IL PnL.
+  - `executeCleanExit(ctx, reason: 'SWITCH' | 'TAKE_PROFIT')` (new) — close
+    + convert-to-SOL, same mechanics as `executeHardExit` but **without
+    blacklisting** (extracted a shared `closeAndConvertToSol` helper
+    between the two). Neither a switch nor a profit-lock exit is a risk
+    violation, so the pool stays a fully valid candidate for the very
+    next scan.
+  - `PoolContext.peakProfitPct` (new field) — tracks the highest
+    unrealized profit % a position has ever reached, fed into
+    `evaluatePosition` for the `TAKE_PROFIT` check. **Deliberately never
+    reset on `compoundCycle`** — mirrors `initialDepositSol`'s own
+    pre-existing never-reset-on-compound basis in the real bot (unlike
+    paper-trade, see below).
+- `logic/binRange.ts` — unchanged this session. `computeBinRadius()` still
+  symmetric-only (±`TARGET_RANGE_PCT`, default 15%) — a user-reported
+  out-of-range-too-fast observation this session was investigated but the
+  evidence was inconclusive (two different price sources disagreeing,
+  likely just measurement noise during a fast pump, not a systematic range
+  problem) — **not changed, prior rejection of asymmetric/skewed ranges
+  from last session stands.**
+- `logic/costEstimate.ts` — added `estimateClaimCostSol()` (flat 1-tx cost,
+  no swap — used by the new `claimFeesOnly` path, much cheaper than the
+  existing 3-tx `estimateCycleGasCostSol` used for full compound cycles).
+- `scripts/paperTrade.ts` — mirrors every real-bot decision change above
+  (both features are real-bot-and-paper-trade-parity by design — a final
+  review this session caught and fixed a case where paper-trade's
+  simulated decisions had drifted out of parity with what the real bot
+  could actually do, see "Final review findings" below). Also new this
+  session, independent of the two big features:
+  - **SOL-denominated figures everywhere USD appears** — starting capital,
+    current value, every ENTER/REBALANCE/CLAIM_FEES/HARD_EXIT/TAKE_PROFIT/
+    LEAVE_POOL/SWITCH event and `poolHistory` entry now carries a `*Sol`
+    twin next to its `*Usd` field, converted at that event's own live
+    `sol.priceUsd`.
+  - **`totalFeesEarnedUsd`/`totalFeesEarnedSol`** (new, cumulative across
+    the whole run) — incremented every time `position.feesEarnedUsd` gets
+    cashed out (claim, compound, or any exit type). The report prints this
+    separately from total PnL so fee income vs. price/IL can be read apart
+    at a glance (`pnlUsd - totalFeesEarnedUsd` isolates the price-only
+    component) — this directly answers a real incident earlier in the
+    session where a position showed +$8.37 in fees but still had a net
+    *loss* because price/IL was worse than the fee income.
+  - `enterPool(chosen)` extracted out of `enterBestPool` (entry mechanics
+    for an already-chosen pool) — reused by the SWITCH execution path,
+    which enters a specific pre-validated candidate directly rather than
+    re-scanning from scratch.
+- `scripts/scanOnce.ts` — unchanged.
+- `scripts/paperTradeReport.ts` — now auto-cleans orphaned state files (see
+  "Where things stand" above) and prints the new SOL/fees/PnL fields.
+- `index.ts` — real bot's main loop. **Still never actually run against
+  real funds or even devnet** — same status as last session, only
+  runtime-smoke-tested. Now wires both new decisions (`TAKE_PROFIT`,
+  opportunistic `SWITCH`) into `tick()`, mirroring paper-trade.
 
-## Strategy design (current, on feature/trend-aware-entry)
+## Two new features added this session (opportunistic pool-switching + trailing take-profit)
 
-Entry selection is **two-stage**, not a blended score (the blended version
-let raw vol/TVL ratio dominate regardless of trend — fixed this session):
-1. Filter cascade (binary pass/fail): TVL $50k–$1M, 24h volume ≥$200k,
-   vol/TVL ratio ≥3x, `bin_step` ≥15, pool age ≥2h, memecoin-side market cap
-   ≤$50M, holders ≥300, freeze+mint authority both disabled (mint-authority
-   check is an on-chain RPC read — Meteora's API doesn't expose it),
-   1h crash-guard (≥-20%), 6h floor (≥-5%, loosened from an initial 0%
-   which starved the candidate list too hard), and an **activity cascade**
-   (1h and 5m volume must each be ≥15% of the pool's own 24h average pace
-   — catches a pool whose 24h number looks fine but has actually gone
-   quiet/stale right now).
-2. Among survivors: shortlist the top `TREND_SHORTLIST_SIZE` (3) by 6h
-   price change, then pick the best vol/TVL ratio **within that shortlist
-   only**. Trend gates which pools are in contention; ratio breaks ties.
+Full design history: `docs/superpowers/specs/2026-09-23-opportunistic-pool-switching-design.md`
+(the approved design) and `docs/superpowers/plans/2026-09-23-opportunistic-pool-switching.md`
+(the 10-task implementation plan, executed via subagent-driven-development
+— every task individually reviewed, plus a final whole-branch review that
+found and fixed 5 more real bugs). Ledger of every ruling made during
+execution: `.superpowers/sdd/2026-09-23-opportunistic-pool-switching/progress.md`
+(kept as a permanent record, not deleted — has the full list of decisions,
+including two spec gaps deliberately left unresolved, see below).
 
-Position: `StrategyType.BidAsk` (not Spot) — Meteora's own docs recommend
-BidAsk for volatile pairs specifically (liquidity concentrated at range
-edges, captures more fee on price jumps); Curve is explicitly not
-recommended for volatile pairs. Range radius is `computeBinRadius()`
-(above), not a fixed bin count.
+**Why:** the bot was single-pool and reactive — it only ever scanned the
+market for a new pool when it had no open position. While holding
+(sometimes for hours), it could not notice a token pumping hard elsewhere.
+Confirmed concretely: JEANPHIL-SOL ran from ~$80k TVL/$2M mcap to $269k
+TVL/$7.5M mcap while the bot's capital sat in an unrelated position — zero
+chance to act on it, not because the screening logic was bad, but because
+the bot structurally wasn't looking.
 
-Rebalance/exit: fee-threshold (unclaimed fees > gas-cost × 2.5) **or**
-idle-forced (out-of-range >`MAX_IDLE_OUT_OF_RANGE_MINUTES` (10) while
-*already in profit* — never force-crystallizes a loss). Either trigger
-runs the same `compoundCycle`: close → claim → re-check whether the held
-pool still passes the **full entry screen** (`isPoolStillEligible`,
-reusing the same filter code, not a new heuristic) → if yes, rebalance
-50:50 and reopen here at the new price; if no, convert everything to SOL
-and return null (no blacklist — not a violation, just re-scan for a
-different pool next tick).
+**1. Opportunistic pool-switching** — every `OPPORTUNITY_SCAN_INTERVAL_MS`
+(5 min, config) while holding a position, scans the full market
+(`scanForBetterOpportunity`) and switches into a candidate whose
+`volumeSpikeRatio` beats the current position's by `SWITCH_SPIKE_RATIO_MARGIN`
+(1.5x, config) — but only if current unrealized profit is below
+`SWITCH_PROFIT_GUARD_PCT` (30%, never abandon a proven winner) and it's
+been at least `SWITCH_COOLDOWN_MS` (15 min) since the last switch
+(anti-whipsaw). Execution: close current (no blacklist) → open directly
+into the already-validated candidate (no redundant re-scan).
 
-**Explicitly rejected after checking practitioner/community sources**:
-asymmetric/directionally-skewed ranges. Evidence was thin that this is
-real, common, or effective practice for memecoin LPing — not worth the
-complexity without a real signal it helps. Don't re-litigate this without
-new evidence.
+**2. Trailing take-profit** — tracks peak unrealized profit per position;
+once it reaches `TAKE_PROFIT_ARM_PCT` (30%), arms a trailing floor at
+(peak − `TAKE_PROFIT_GIVEBACK_PCT`) (25 percentage points — the user's
+original 50pp instinct was researched and found well outside the 15-30%
+range crypto-momentum practice converges on for volatile assets); if
+profit drops to/below that floor, exits and locks in the gain. **No
+blacklist** — this is profit protection, not a risk violation, so the pool
+stays a valid candidate if its run continues.
 
-## Important mechanics/insights surfaced this session (don't re-derive)
+**Final review findings (all fixed, commit `38acf43`):** 1 Critical — a
+DexScreener hydration failure (`currentSpikeRatio` reading as 0) forced a
+real paid switch instead of falling through to HOLD, the exact 429-adjacent
+failure mode this session already hit once; 4 Important — real bot's
+SWITCH path never set `volume1hBaselineUsd` (permanently disabling
+volume-drop protection on any switched-into position), paper-trade's
+`REBALANCE` branch didn't gate the opportunity-scan block (letting
+paper-trade attempt switches in ticks the real bot structurally cannot,
+breaking sim-vs-real parity), paper-trade's SWITCH exit didn't deduct gas
+cost (understating switching's real cost in exactly the metric being
+validated), and the DexScreener base/quote-token-collision bug described
+above; 1 Minor — TAKE_PROFIT and SWITCH exits were both logged
+indistinguishably as `LEFT_POOL` in pool history.
+
+**Two spec gaps found but deliberately NOT auto-patched — still open,
+your call:**
+1. `HARD_EXIT`'s anti-thrash (>3 rebalances/hr) and volume-drop sub-checks
+   have no profit-guard, unlike `TAKE_PROFIT`/`SWITCH` — a deeply
+   profitable position can still get blacklisted for 6h by either of
+   those two triggers. The spec's own claim that "HARD_EXIT and
+   TAKE_PROFIT can never fire in the same tick" is wrong (verified by the
+   final reviewer) — they're on different bases (loss-only vs.
+   profit-only for the STOP_LOSS/TAKE_PROFIT pair specifically, but
+   anti-thrash/volume-drop don't care about PnL at all).
+2. The 1.5x switch margin has no absolute floor — a candidate at 0.08x
+   spike beats a current position at 0.05x (margin technically met)
+   despite neither actually spiking. The Critical fix above only guards
+   the reachable zero/unknown-data case, not this softer degenerate tail.
+
+## Important mechanics/insights surfaced across both sessions (don't re-derive)
 
 - **DLMM out-of-range exit is asymmetric, not symmetric.** Price rising
-  past your range converts your position toward 100% SOL (fees stop, but
-  you're de-risked — the "bad" direction here is only opportunity cost).
-  Price falling past your range converts toward 100% memecoin (bag-holding
-  the depreciating asset — this is the genuinely dangerous direction).
-  This is *why* trend-aware entry matters structurally, not just
-  vibes-wise: entering an uptrending token biases which direction you're
-  more likely to exit-range toward (the safe one).
-- A `REBALANCE` decision does not mean "found a better token" — it means
-  "close + claim + reopen," and until this session's `compoundCycle`
-  refactor it always reopened in the *same* pool regardless of whether
-  that pool was still any good. That's the gap the idle-forced-rebalance +
-  re-eligibility-check feature closes.
-- Fee accrual stops entirely once a position goes out-of-range (no swaps
-  hit an idle bin range) — so a purely fee-threshold-based rebalance
-  trigger can stall forever waiting on fees that no longer accrue. That's
-  why the idle-forced rule exists.
+  past your range converts your position toward 100% SOL (de-risked,
+  opportunity-cost-only). Price falling past your range converts toward
+  100% memecoin (the genuinely dangerous direction, bag-holding). This is
+  *why* trend-aware entry matters structurally.
+- Fee accrual stops entirely once a position goes out-of-range — a purely
+  fee-threshold rebalance trigger can stall forever waiting on fees that
+  no longer accrue. That's why the idle-forced rule exists (now
+  profit-independent, see above).
 - Paper-trade's price-PnL model prices the position in the meme/SOL
   *ratio*, not the memecoin's absolute USD price — a real "why did I lose
-  money, the token looked stable" incident this session was actually SOL's
-  own price moving against the ratio, not the memecoin dropping. Worth
-  remembering when interpreting any future paper-trade loss.
+  money, the token looked stable" incident was actually SOL's own price
+  moving against the ratio, not the memecoin dropping.
+- **A DLMM position's fee income and price/IL move independently, and
+  fee income does NOT reliably cover IL.** Confirmed concretely twice this
+  session: JEANPHIL earned +$8.37 in fees but still net-lost -$3.00 because
+  price/IL was worse; this is exactly why `totalFeesEarnedUsd` was split
+  out from total PnL in the report — eyeball both, don't assume a
+  fee-positive exit is a profitable one.
+- **A pool's own `mint_x`/`mint_y` orientation is not reliable for
+  "which side is the memecoin"** — always use `nonSolToken(pair)`/
+  `solToken(pair)`, never assume `mint_x` is one or the other. The
+  DexScreener batch-hydration bug this session existed specifically
+  because code kept the entry side wrong for pools with `mint_x === WSOL`.
+- **Re-screening a pool you already hold is a different question from
+  screening a brand-new candidate.** Criteria that exist to size *fresh*
+  capital sensibly (TVL ceiling, vol/TVL ratio floor, market-cap ceiling)
+  actively penalize a held position simply succeeding and growing. See
+  `FilterOpts.skipSizingChecks` above — this is the general principle if
+  more "stay vs. enter" criteria splits are needed later.
+- **DexScreener's `/tokens/v1/{chainId}/{tokenAddresses}` batch endpoint**
+  (≤30 addresses/call, one request billed) exists and is what this bot
+  now uses — do not regress to one-call-per-pool, that was the confirmed
+  root cause of this session's 429-storms, not polling frequency.
 
 ## Known limitations / deliberately deferred (told to user, not silently skipped)
 
-- No LP-concentration/whale-dominance check on a pool (nontrivial with the
-  current API — no per-LP breakdown available).
-- No deployer-wallet-history / sniper-clustering / social-sentiment
-  screening — real gaps per research, but expensive to build; deferred
-  until the current strategy is validated as profitable.
-- Paper-trade fee model is a naive TVL-share pro-rata, not real bin-level
-  fee capture — could meaningfully understate real fee capture (BidAsk +
-  tight range in-range) or overstate it (doesn't model zero-fee
-  out-of-range periods precisely by amount of time, only by the
-  in-range/out-of-range boolean).
-- Public anonymous RPC (`api.mainnet-beta.solana.com`) gets heavily
-  rate-limited even for reads (429 storms observed repeatedly this
-  session) — real run uses a free registered Helius key instead
-  (`.env.live`).
+- No LP-concentration/whale-dominance check, no deployer-wallet-history /
+  sniper-clustering / social-sentiment screening — unchanged from last
+  session, still deferred until the current strategy is validated as
+  profitable.
+- Paper-trade fee model is still a naive TVL-share pro-rata, not real
+  bin-level fee capture — same caveat as last session, read
+  `paperTrade.ts`'s header comment block before trusting its numbers as a
+  precise backtest.
+- The two "spec gaps" listed above (HARD_EXIT missing a profit-guard on
+  anti-thrash/volume-drop; no absolute floor on switch spike-ratio margin).
+- `.env.example` was not updated with the 6 new opportunistic-switching/
+  take-profit env vars (a plan gap, not an implementer gap — cheap to add
+  later, just wasn't done).
+- No `switches` counter in the paper-trade run summary (only `poolsEntered`
+  currently increments) — minor observability gap for a feature that's
+  specifically being validated right now.
 
-## Next steps (what the user was mid-decision on)
+## Next steps
 
-1. Wait for the 1 SOL to land in the `.env.live` wallet.
-2. Check wallet balance (`getWalletSolBalance`-style check, or just
-   `solana balance <address>` — never need to see the private key for
-   this).
-3. Decide: run `npm start` directly against `.env.live` for a real first
-   cycle (no devnet dry-run — Meteora has no ready-made devnet pools,
-   confirmed via research; devnet would need self-deploying a test pool,
-   not a quick shortcut), watch the first cycle closely.
-4. Re-check the running paper-trade sim's cumulative result before
-   committing, if it's still running / hasn't been superseded.
+1. Let the current `switch-take-profit` paper-trade run keep going —
+   specifically watching for: does `SWITCH` fire sensibly (not too often,
+   not on garbage data)? Does `TAKE_PROFIT` ever actually arm and trigger
+   (needs a position to reach +30% first, hasn't happened yet in this
+   session's short observation window)? Does the `skipSizingChecks` fix
+   actually let a grown/successful position recenter in place instead of
+   getting LEFT_POOL'd?
+2. Decide on the two open spec gaps above (HARD_EXIT profit-guard,
+   absolute switch-margin floor) — both are one-line-ish changes once a
+   decision is made, intentionally left as decisions rather than
+   auto-patched.
+3. Once paper-trade behavior on the new features looks solid over a
+   longer window: re-check wallet balance on `.env.live`, decide on a
+   first real cycle (same "no devnet dry-run, watch the first cycle
+   closely" plan as last session — nothing about that has changed).
 
 ## Security notes (do not relax these)
 
 - Never print/echo the private key or the Helius API key to any tool
-  output — the user pasted the Helius key directly in chat once this
-  session; it was written to file via a script whose stdout never
-  contained the key, and never re-echoed afterward. Follow the same
-  pattern for any future secret handling.
-- `.env` and `.env.live` are both gitignored. `.env.live-1sol.example` (a
-  template, now deleted by the user) was NOT gitignored by name — if a
-  similar template file is ever recreated, keep its `PRIVATE_KEY=` blank
-  and double check `git status` shows it untracked before any `git add`.
-- `commit.gpgsign` is `true` in this machine's global git config; this
-  sandbox has no TTY for the passphrase prompt. `commit.gpgsign false` was
-  set **locally for this repo only** (not global) to unblock commits —
-  already done, don't redo/ask again unless a fresh clone needs it too.
+  output. `.env` and `.env.live` are both gitignored. Same pattern as last
+  session, nothing to add.
+- `commit.gpgsign` is `true` in this machine's global git config; set to
+  `false` **locally for this repo only** (not global) to unblock commits
+  in this sandbox (no TTY for the passphrase prompt) — already done,
+  don't redo/ask again unless a fresh clone needs it too.
