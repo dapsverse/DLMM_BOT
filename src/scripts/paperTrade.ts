@@ -206,6 +206,7 @@ function writeState(currentValueUsd: number, currentBinId?: number | null, price
     JSON.stringify(
       {
         ...summary,
+        pid: process.pid, // lets paperTradeReport.ts tell a live run apart from an orphaned state file (process killed without cleaning up)
         elapsedHours: +(elapsedMs / 3_600_000).toFixed(2),
         durationHours: DURATION_HOURS,
         finished: elapsedMs >= DURATION_MS,

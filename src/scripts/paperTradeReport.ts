@@ -16,9 +16,21 @@ function formatPrice(p: number, sigFigs = 4): string {
   return p.toFixed(Math.min(decimals, 18));
 }
 
+/** True if a process with this pid is actually still alive (signal 0 = liveness probe, doesn't kill it). */
+function isProcessAlive(pid: number | undefined): boolean {
+  if (!pid) return false; // state file predates the `pid` field, or malformed — treat as not verifiable/dead
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false; // ESRCH (no such process) or EPERM — either way, not a live run we own
+  }
+}
+
 function printRun(state: any): void {
   const sign = state.pnlUsd >= 0 ? '+' : '';
-  console.log(`\n═══ ${state.label ?? 'unlabeled'} (${state.finished ? 'FINISHED' : 'running'}) ═══`);
+  const status = state.finished ? 'FINISHED' : isProcessAlive(state.pid) ? 'running' : 'DEAD (stale)';
+  console.log(`\n═══ ${state.label ?? 'unlabeled'} (${status}) ═══`);
   console.log(`  Elapsed: ${state.elapsedHours}h / ${state.durationHours}h`);
   console.log(`  Starting capital: $${state.startingCapitalUsd?.toFixed(2) ?? 'n/a'} (${state.startingCapitalSol ?? 'n/a'} SOL)`);
   console.log(`  Current value:    $${state.currentValueUsd} [${state.currentValueSol ?? 'n/a'} SOL]`);
@@ -70,7 +82,24 @@ if (!files.length) {
   process.exit(1);
 }
 
-const runs = files.map((f) => JSON.parse(fs.readFileSync(path.join(env.LOG_DIR, f), 'utf8')));
+// Auto-clean orphaned state files: a run that was killed (not stopped via its
+// own DURATION_HOURS elapsing) leaves its state-<label>.json behind forever,
+// showing "running" indefinitely since nothing ever marks it finished.
+// process.kill(pid, 0) is a liveness probe here, not an actual kill.
+const runs: any[] = [];
+for (const f of files) {
+  const filePath = path.join(env.LOG_DIR, f);
+  const state = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  if (!state.finished && !isProcessAlive(state.pid)) {
+    fs.rmSync(filePath, { force: true });
+    const label = state.label && state.label !== 'default' ? state.label : undefined;
+    const stdoutLog = path.join(env.LOG_DIR, label ? `paper-trade-${label}-stdout.log` : 'paper-trade-stdout.log');
+    fs.rmSync(stdoutLog, { force: true });
+    console.log(`(removed stale state for "${state.label ?? 'unlabeled'}" — process ${state.pid ?? '?'} not running)`);
+    continue;
+  }
+  runs.push(state);
+}
 runs.forEach(printRun);
 
 if (runs.length > 1) {
