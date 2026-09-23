@@ -7,6 +7,7 @@ import {
   compoundCycle,
   claimFeesOnly,
   executeHardExit,
+  executeCleanExit,
   getPositionHealthSnapshot,
   getBinRangeStatus,
   updateOutOfRangeTracking,
@@ -71,6 +72,9 @@ async function tick(): Promise<void> {
   ]);
   updateOutOfRangeTracking(ctx, binStatus.isOutOfRange);
 
+  const currentProfitPct = ctx.initialDepositSol > 0 ? ((currentValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
+  ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
+
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
   const { decision, reasons } = evaluatePosition({
     initialDepositUsd: ctx.initialDepositSol,
@@ -82,6 +86,7 @@ async function tick(): Promise<void> {
     estimatedGasCostUsd: gasCostSol,
     isOutOfRange: binStatus.isOutOfRange,
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
+    peakProfitPct: ctx.peakProfitPct,
   });
 
   logger.info(`[index] pool ${ctx.poolAddress} health check`, {
@@ -95,6 +100,12 @@ async function tick(): Promise<void> {
 
   if (decision === 'HARD_EXIT') {
     currentCapitalSol = await executeHardExit(ctx, blacklistPools);
+    currentPool = null;
+    return;
+  }
+
+  if (decision === 'TAKE_PROFIT') {
+    currentCapitalSol = await executeCleanExit(ctx, 'TAKE_PROFIT');
     currentPool = null;
     return;
   }
