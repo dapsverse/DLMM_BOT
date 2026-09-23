@@ -20,12 +20,12 @@ function printRun(state: any): void {
   const sign = state.pnlUsd >= 0 ? '+' : '';
   console.log(`\n═══ ${state.label ?? 'unlabeled'} (${state.finished ? 'FINISHED' : 'running'}) ═══`);
   console.log(`  Elapsed: ${state.elapsedHours}h / ${state.durationHours}h`);
-  console.log(`  Starting capital: $${state.startingCapitalUsd?.toFixed(2) ?? 'n/a'}`);
-  console.log(`  Current value:    $${state.currentValueUsd} (${sign}${state.pnlUsd} / ${sign}${state.pnlPct}%)`);
+  console.log(`  Starting capital: $${state.startingCapitalUsd?.toFixed(2) ?? 'n/a'} (${state.startingCapitalSol ?? 'n/a'} SOL)`);
+  console.log(`  Current value:    $${state.currentValueUsd} (${sign}${state.pnlUsd} / ${sign}${state.pnlPct}%)  [${state.currentValueSol ?? 'n/a'} SOL]`);
   console.log(`  Pools entered: ${state.poolsEntered}  Rebalances: ${state.rebalances}  Hard exits: ${state.hardExits}`);
   if (state.currentPosition) {
     console.log(`  Currently in: ${state.currentPosition.pool} (${state.currentPosition.address})`);
-    console.log(`    capital=$${state.currentPosition.capitalUsd}  unclaimed fees=$${state.currentPosition.feesEarnedUsd}`);
+    console.log(`    capital=$${state.currentPosition.capitalUsd} (${state.currentPosition.capitalSol ?? 'n/a'} SOL)  unclaimed fees=$${state.currentPosition.feesEarnedUsd}`);
     const bin = state.currentPosition.bin;
     if (bin) {
       if (bin.currentBinId === null || bin.centerBinId === null) {
@@ -47,9 +47,10 @@ function printRun(state: any): void {
     console.log('  Pool history (cross-check these on DexScreener/Meteora):');
     history.forEach((v: any, i: number) => {
       const pnl = v.exitValueUsd !== undefined ? v.exitValueUsd - v.entryCapitalUsd : null;
-      const status = v.exitedAtMs ? `exited ${v.exitType} @ $${v.exitValueUsd} (${pnl! >= 0 ? '+' : ''}${pnl!.toFixed(2)})` : 'still open';
+      const solPart = v.exitValueSol !== undefined ? `, ${v.exitValueSol} SOL` : '';
+      const status = v.exitedAtMs ? `exited ${v.exitType} @ $${v.exitValueUsd}${solPart} (${pnl! >= 0 ? '+' : ''}${pnl!.toFixed(2)})` : 'still open';
       console.log(`    ${i + 1}. ${v.pool}  (${v.address})`);
-      console.log(`       entry=$${v.entryCapitalUsd}  rebalances=${v.rebalanceCount}  ${status}`);
+      console.log(`       entry=$${v.entryCapitalUsd} (${v.entryCapitalSol ?? 'n/a'} SOL)  rebalances=${v.rebalanceCount}  ${status}`);
       if (v.exitReasons?.length) console.log(`       exit reason: ${v.exitReasons.join('; ')}`);
     });
   }

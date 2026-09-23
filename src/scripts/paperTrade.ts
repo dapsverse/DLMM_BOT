@@ -98,10 +98,12 @@ interface PoolVisit {
   address: string;
   enteredAtMs: number;
   entryCapitalUsd: number;
+  entryCapitalSol: number;
   exitedAtMs?: number;
   /** HARD_EXIT = risk-triggered (stop-loss/rebalance-count/volume-drop). LEFT_POOL = pool no longer passes the entry screen, not a violation. TAKE_PROFIT = profit-protection exit. SWITCHED = opportunistic pool-switch exit. */
   exitType?: 'HARD_EXIT' | 'LEFT_POOL' | 'TAKE_PROFIT' | 'SWITCHED';
   exitValueUsd?: number;
+  exitValueSol?: number;
   exitReasons?: string[];
   rebalanceCount: number;
 }
@@ -110,6 +112,8 @@ interface RunSummary {
   label: string;
   startedAtMs: number;
   startingCapitalUsd: number | null;
+  /** Constant — this is just env.INITIAL_LP_CAPITAL_SOL, the config value itself, not derived. */
+  startingCapitalSol: number;
   poolsEntered: number;
   rebalances: number;
   hardExits: number;
@@ -128,6 +132,7 @@ const summary: RunSummary = {
   label: LABEL ?? 'default',
   startedAtMs: runStartedAtMs,
   startingCapitalUsd: null,
+  startingCapitalSol: env.INITIAL_LP_CAPITAL_SOL,
   poolsEntered: 0,
   rebalances: 0,
   hardExits: 0,
@@ -202,6 +207,7 @@ function writeState(currentValueUsd: number, currentBinId?: number | null, price
         durationHours: DURATION_HOURS,
         finished: elapsedMs >= DURATION_MS,
         currentValueUsd: +currentValueUsd.toFixed(2),
+        currentValueSol: lastKnownSolPriceUsd > 0 ? +(currentValueUsd / lastKnownSolPriceUsd).toFixed(4) : null,
         pnlUsd: +pnlUsd.toFixed(2),
         pnlPct: +pnlPct.toFixed(2),
         currentPosition: position
@@ -209,6 +215,7 @@ function writeState(currentValueUsd: number, currentBinId?: number | null, price
               pool: position.poolName,
               address: position.poolAddress,
               capitalUsd: +position.capitalUsd.toFixed(2),
+              capitalSol: lastKnownSolPriceUsd > 0 ? +(position.capitalUsd / lastKnownSolPriceUsd).toFixed(4) : null,
               feesEarnedUsd: +position.feesEarnedUsd.toFixed(2),
               bin: binInfo,
             }
@@ -265,11 +272,13 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
   };
   position = entered;
   summary.poolsEntered++;
+  const capitalAfterEntryCostSol = capitalAfterEntryCostUsd / sol.priceUsd;
   summary.poolHistory.push({
     pool: chosen.name,
     address: chosen.address,
     enteredAtMs: now,
     entryCapitalUsd: +capitalAfterEntryCostUsd.toFixed(2),
+    entryCapitalSol: +capitalAfterEntryCostSol.toFixed(4),
     rebalanceCount: 0,
   });
   logEvent({
@@ -277,6 +286,7 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
     pool: chosen.name,
     address: chosen.address,
     capitalUsd: +capitalAfterEntryCostUsd.toFixed(2),
+    capitalSol: +capitalAfterEntryCostSol.toFixed(4),
     entryCostUsd: +entryCostUsd.toFixed(2),
     solPriceUsd: sol.priceUsd,
     memePriceUsd: meme.priceUsd,
@@ -380,13 +390,16 @@ async function tick(): Promise<void> {
 
   if (decision === 'HARD_EXIT') {
     const exitValueAfterCostUsd = Math.max(currentValueUsd - gasCostUsd, 0);
+    const exitValueAfterCostSol = exitValueAfterCostUsd / sol.priceUsd;
     logEvent({
       type: 'HARD_EXIT',
       pool: position.poolName,
       reasons,
       finalValueUsd: +exitValueAfterCostUsd.toFixed(2),
+      finalValueSol: +exitValueAfterCostSol.toFixed(4),
       exitCostUsd: +gasCostUsd.toFixed(2),
       capitalAtEntryUsd: +position.capitalUsd.toFixed(2),
+      capitalAtEntrySol: +(position.capitalUsd / sol.priceUsd).toFixed(4),
       centerBinId: position.centerBinId,
       currentBinId,
       binsFromCenter,
@@ -398,6 +411,7 @@ async function tick(): Promise<void> {
       visit.exitedAtMs = now;
       visit.exitType = 'HARD_EXIT';
       visit.exitValueUsd = +exitValueAfterCostUsd.toFixed(2);
+      visit.exitValueSol = +exitValueAfterCostSol.toFixed(4);
       visit.exitReasons = reasons;
     }
     idleCapitalUsd = exitValueAfterCostUsd;
@@ -408,13 +422,16 @@ async function tick(): Promise<void> {
 
   if (decision === 'TAKE_PROFIT') {
     const exitValueAfterCostUsd = Math.max(currentValueUsd - gasCostUsd, 0);
+    const exitValueAfterCostSol = exitValueAfterCostUsd / sol.priceUsd;
     logEvent({
       type: 'TAKE_PROFIT',
       pool: position.poolName,
       reasons,
       finalValueUsd: +exitValueAfterCostUsd.toFixed(2),
+      finalValueSol: +exitValueAfterCostSol.toFixed(4),
       exitCostUsd: +gasCostUsd.toFixed(2),
       capitalAtEntryUsd: +position.capitalUsd.toFixed(2),
+      capitalAtEntrySol: +(position.capitalUsd / sol.priceUsd).toFixed(4),
       peakProfitPct: +position.peakProfitPct.toFixed(2),
     });
     // No blacklist - profit-protection exit, not a violation. Matches LEAVE_POOL's policy.
@@ -423,6 +440,7 @@ async function tick(): Promise<void> {
       visit.exitedAtMs = now;
       visit.exitType = 'TAKE_PROFIT';
       visit.exitValueUsd = +exitValueAfterCostUsd.toFixed(2);
+      visit.exitValueSol = +exitValueAfterCostSol.toFixed(4);
       visit.exitReasons = reasons;
     }
     idleCapitalUsd = exitValueAfterCostUsd;
@@ -451,8 +469,10 @@ async function tick(): Promise<void> {
         pool: position.poolName,
         reasons,
         feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
+        feesClaimedSol: +(position.feesEarnedUsd / sol.priceUsd).toFixed(4),
         claimCostUsd: +claimCostUsd.toFixed(2),
         netHarvestedUsd: +netHarvestedUsd.toFixed(2),
+        netHarvestedSol: +(netHarvestedUsd / sol.priceUsd).toFixed(4),
       });
       summary.harvestedFeesUsd += netHarvestedUsd;
       finalPositionValueUsd = currentValueUsd - position.feesEarnedUsd; // = lpPrincipalUsd — fees just moved out to harvestedFeesUsd
@@ -477,8 +497,11 @@ async function tick(): Promise<void> {
           pool: position.poolName,
           reasons,
           compoundedFromUsd: +position.capitalUsd.toFixed(2),
+          compoundedFromSol: +(position.capitalUsd / sol.priceUsd).toFixed(4),
           compoundedToUsd: +compoundedToUsd.toFixed(2),
+          compoundedToSol: +(compoundedToUsd / sol.priceUsd).toFixed(4),
           feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
+          feesClaimedSol: +(position.feesEarnedUsd / sol.priceUsd).toFixed(4),
           rebalanceCostUsd: +gasCostUsd.toFixed(2),
           oldCenterBinId: position.centerBinId,
           newCenterBinId: currentBinId,
@@ -508,13 +531,17 @@ async function tick(): Promise<void> {
           pool: position.poolName,
           reasons: leaveReasons,
           compoundedFromUsd: +position.capitalUsd.toFixed(2),
+          compoundedFromSol: +(position.capitalUsd / sol.priceUsd).toFixed(4),
           finalValueUsd: +compoundedToUsd.toFixed(2),
+          finalValueSol: +(compoundedToUsd / sol.priceUsd).toFixed(4),
           feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
+          feesClaimedSol: +(position.feesEarnedUsd / sol.priceUsd).toFixed(4),
         });
         if (visit) {
           visit.exitedAtMs = now;
           visit.exitType = 'LEFT_POOL';
           visit.exitValueUsd = +compoundedToUsd.toFixed(2);
+          visit.exitValueSol = +(compoundedToUsd / sol.priceUsd).toFixed(4);
           visit.exitReasons = leaveReasons;
         }
         idleCapitalUsd = compoundedToUsd;
@@ -561,7 +588,9 @@ async function tick(): Promise<void> {
           toPool: candidate.name,
           reason: switchEval.reason,
           compoundedFromUsd: +position.capitalUsd.toFixed(2),
+          compoundedFromSol: +(position.capitalUsd / sol.priceUsd).toFixed(4),
           exitValueUsd: +switchExitValueUsd.toFixed(2),
+          exitValueSol: +(switchExitValueUsd / sol.priceUsd).toFixed(4),
           exitCostUsd: +gasCostUsd.toFixed(2),
         });
         const visit = summary.poolHistory[summary.poolHistory.length - 1];
@@ -569,6 +598,7 @@ async function tick(): Promise<void> {
           visit.exitedAtMs = opportunityNow;
           visit.exitType = 'SWITCHED';
           visit.exitValueUsd = +switchExitValueUsd.toFixed(2);
+          visit.exitValueSol = +(switchExitValueUsd / sol.priceUsd).toFixed(4);
           visit.exitReasons = [switchEval.reason];
         }
         idleCapitalUsd = switchExitValueUsd;
