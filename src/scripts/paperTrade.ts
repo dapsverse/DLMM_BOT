@@ -88,6 +88,8 @@ interface VirtualPosition {
   centerBinId: number | null;
   /** When the position first went out-of-range (epoch ms) — null while in-range/unknown. */
   outOfRangeSinceMs: number | null;
+  /** Highest unrealized profit % since entry/last-compound. Reset to 0 whenever capitalUsd/entrySolPriceUsd/entryMemePriceUsd reset (compound or switch) - unlike the real bot, paper-trade's profit basis DOES reset on every compound (position.capitalUsd = compoundedToUsd), so the peak must reset with it to stay consistent. */
+  peakProfitPct: number;
 }
 
 interface PoolVisit {
@@ -222,13 +224,8 @@ function ilMultiplier(r: number): number {
   return (2 * Math.sqrt(r)) / (1 + r);
 }
 
-async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | null> {
-  const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist));
-  if (!candidates.length) {
-    logEvent({ type: 'NO_CANDIDATE', note: 'no pool passes screen this tick' });
-    return null;
-  }
-  const chosen = candidates[0]!;
+/** Entry mechanics for an already-chosen pool - shared by enterBestPool (fresh full-market pick) and the upcoming SWITCH path (a specific pre-validated candidate from scanForBetterOpportunity, no re-pick needed). */
+async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
   const sol = solToken(chosen);
   const meme = nonSolToken(chosen);
   if (!sol || !meme) return null; // shouldn't happen post-screen, defensive
@@ -261,6 +258,7 @@ async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | nu
     binStep: chosen.bin_step,
     centerBinId,
     outOfRangeSinceMs: null,
+    peakProfitPct: 0,
   };
   position = entered;
   summary.poolsEntered++;
@@ -285,6 +283,15 @@ async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | nu
     binRange: centerBinId === null ? null : [centerBinId - computeBinRadius(chosen.bin_step), centerBinId + computeBinRadius(chosen.bin_step)],
   });
   return entered;
+}
+
+async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | null> {
+  const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist));
+  if (!candidates.length) {
+    logEvent({ type: 'NO_CANDIDATE', note: 'no pool passes screen this tick' });
+    return null;
+  }
+  return enterPool(candidates[0]!);
 }
 
 async function tick(): Promise<void> {
@@ -350,6 +357,9 @@ async function tick(): Promise<void> {
   // Only the branches below that actually touch the position override this.
   let finalPositionValueUsd = currentValueUsd;
 
+  const currentProfitPct = position.capitalUsd > 0 ? ((currentValueUsd - position.capitalUsd) / position.capitalUsd) * 100 : 0;
+  position.peakProfitPct = Math.max(position.peakProfitPct, currentProfitPct);
+
   const gasCostSol = estimateCycleGasCostSol(position.capitalUsd / sol.priceUsd);
   const gasCostUsd = gasCostSol * sol.priceUsd;
   const { decision, reasons } = evaluatePosition({
@@ -362,6 +372,7 @@ async function tick(): Promise<void> {
     estimatedGasCostUsd: gasCostUsd,
     isOutOfRange,
     outOfRangeSinceMs: position.outOfRangeSinceMs,
+    peakProfitPct: position.peakProfitPct,
   });
 
   if (decision === 'HARD_EXIT') {
@@ -383,6 +394,31 @@ async function tick(): Promise<void> {
     if (visit) {
       visit.exitedAtMs = now;
       visit.exitType = 'HARD_EXIT';
+      visit.exitValueUsd = +exitValueAfterCostUsd.toFixed(2);
+      visit.exitReasons = reasons;
+    }
+    idleCapitalUsd = exitValueAfterCostUsd;
+    position = null;
+    writeState(portfolioValueUsd(idleCapitalUsd));
+    return;
+  }
+
+  if (decision === 'TAKE_PROFIT') {
+    const exitValueAfterCostUsd = Math.max(currentValueUsd - gasCostUsd, 0);
+    logEvent({
+      type: 'TAKE_PROFIT',
+      pool: position.poolName,
+      reasons,
+      finalValueUsd: +exitValueAfterCostUsd.toFixed(2),
+      exitCostUsd: +gasCostUsd.toFixed(2),
+      capitalAtEntryUsd: +position.capitalUsd.toFixed(2),
+      peakProfitPct: +position.peakProfitPct.toFixed(2),
+    });
+    // No blacklist - profit-protection exit, not a violation. Matches LEAVE_POOL's policy.
+    const visit = summary.poolHistory[summary.poolHistory.length - 1];
+    if (visit) {
+      visit.exitedAtMs = now;
+      visit.exitType = 'LEFT_POOL';
       visit.exitValueUsd = +exitValueAfterCostUsd.toFixed(2);
       visit.exitReasons = reasons;
     }
@@ -445,6 +481,7 @@ async function tick(): Promise<void> {
         finalPositionValueUsd = compoundedToUsd;
         position.entrySolPriceUsd = sol.priceUsd;
         position.entryMemePriceUsd = meme.priceUsd;
+        position.peakProfitPct = 0;
         position.volume1hBaselineUsd = live.volume1hUsd;
         position.rebalanceTimestamps.push(now);
         position.lastRebalanceAtMs = now;
