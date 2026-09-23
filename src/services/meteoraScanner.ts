@@ -85,6 +85,17 @@ export interface MeteoraPair {
   volumeH6Usd?: number;
   /** DexScreener's 5-minute buy+sell count — $ volume can look fine while literally 0 trades happened just now; this catches that directly. */
   txCountM5?: number;
+  /**
+   * True when this pool's whole DexScreener batch call failed (429/timeout/etc) —
+   * distinct from a pool that DexScreener simply has no data for. Every
+   * unknown-tolerant check above ("unknown, don't block") stays permissive for a
+   * genuinely-missing field, but a hydration FAILURE means we don't actually know
+   * whether this pool would pass those checks — fresh entries treat it as a reject
+   * (see filterAndRankPools) rather than silently letting bad data slip through as
+   * "unknown". See STONK10 incident: batch hydration failed, txCountM5 stayed
+   * undefined, pool entered with real 5m tx count of 4 (min is 20).
+   */
+  dexHydrationFailed?: boolean;
 }
 
 /**
@@ -294,6 +305,7 @@ async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
         addresses,
         error: err instanceof Error ? err.message : String(err),
       });
+      for (const pair of batch) pair.dexHydrationFailed = true;
     }
   }
 }
@@ -366,6 +378,13 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
   await Promise.all([hydrateTrendData(preFiltered), hydrateMintAuthority(preFiltered)]);
 
   const candidates = preFiltered.filter((pair) => {
+    // A whole-batch DexScreener failure leaves every unknown-tolerant check
+    // below permissive by default — fine for re-screening a pool we already
+    // hold (a transient 429 shouldn't force-exit it), but a fresh entry
+    // should never commit capital on data we know is missing, not just
+    // absent. See dexHydrationFailed doc comment / STONK10 incident.
+    if (!opts.skipSizingChecks && pair.dexHydrationFailed) return false;
+
     if (
       pair.priceChange1hPct !== undefined &&
       pair.priceChange1hPct < PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT
@@ -514,6 +533,7 @@ export interface PoolEligibility {
 export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts: FilterOpts = {}): string[] {
   const reasons: string[] = [];
   if (isBlacklisted(pair.address, config.blacklistPools)) reasons.push('blacklisted');
+  if (!opts.skipSizingChecks && pair.dexHydrationFailed) reasons.push('dexscreener batch hydration failed (unknown trend/tx data)');
 
   const tvl = Number(pair.liquidity);
   const vol24h = Number(pair.trade_volume_24h);

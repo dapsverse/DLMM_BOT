@@ -13,20 +13,21 @@ feature) — this file supersedes the previous version entirely.
 - **Git**: still local-only, `main` has **zero commits on purpose** (never
   commit directly to main — project rule, enforced all session). All real
   history is on `feature/trend-aware-entry` — **current branch, all active
-  work is here.** ~35 commits on top of the original baseline scaffold
-  (`chore/initial-import`). Working tree is clean as of this note. No PR
-  opened yet (no git remote configured).
+  work is here.** ~36 commits on top of the original baseline scaffold
+  (`chore/initial-import`), latest being the `dexHydrationFailed` fix below.
+  Working tree is clean as of this note. No PR opened yet (no git remote
+  configured).
 - **A live paper-trade simulation is running right now**, label
-  `switch-take-profit`, started fresh after every fix landed this session
-  (`PAPER_TRADE_LABEL=switch-take-profit PAPER_TRADE_HOURS=87600 nohup npm
-  run paper-trade > logs/paper-trade-switch-take-profit-stdout.log 2>&1 &`).
-  Check anytime with `npm run paper-trade:report` — it now **auto-detects
-  and deletes orphaned state files** (a run killed without its
-  `DURATION_HOURS` elapsing used to leave a `state-<label>.json` behind
-  forever showing "running" indefinitely; the report now probes the state
+  `dex-hydration-fix`, started fresh after the `dexHydrationFailed` fix
+  landed (superseded the prior `switch-take-profit` run, killed before it
+  reached any TAKE_PROFIT arm — see git log for the exact command/timestamp
+  if needed). Check anytime with `npm run paper-trade:report` — it
+  **auto-detects and deletes orphaned state files** (a run killed without
+  its `DURATION_HOURS` elapsing used to leave a `state-<label>.json` behind
+  forever showing "running" indefinitely; the report probes the state
   file's own `pid` field with `process.kill(pid, 0)` and cleans up dead
   ones automatically — no more manual `rm` needed, that happened by hand
-  several times this session before the fix landed).
+  several times last session before the fix landed).
 - **Real-money setup is prepped but NOT started, unchanged since last
   session.** `.env.live` exists (gitignored, real Helius RPC key + real
   wallet private key already filled in by the user), sized for a small
@@ -96,6 +97,29 @@ feature) — this file supersedes the previous version entirely.
     opportunistic-switch feature's market scan: finds the best available
     candidate and compares its live `volumeSpikeRatio` against the
     currently-held pool's own, hydrated in the same batched pass.
+  - **`MeteoraPair.dexHydrationFailed`** (new, 2026-09-23 follow-up fix) —
+    user noticed STONK10-SOL entered with only ~4-6 real trades in the last
+    5 minutes despite `MIN_TX_COUNT_M5=20`. Root cause: `hydrateTrendData`'s
+    batch call (up to 30 pools/request) failed outright that scan cycle
+    (429/timeout) and the `catch` only logged it — every pool in that batch
+    kept `txCountM5`/`priceChange*`/`volumeM5Usd` as `undefined`, and every
+    "unknown, don't block" check (crash-guard, uptrend, activity-cascade,
+    tx-count floor, wash-trade) is deliberately permissive on `undefined`
+    so the whole batch sailed through as if verified-safe. Confirmed live
+    via DexScreener direct query on STONK10's pool address:
+    `txns.m5 = {buys: 4, sells: 0}`, well under the 20 floor. Fix: batch
+    `catch` now sets `pair.dexHydrationFailed = true` on every pool in that
+    failed batch; `filterAndRankPools`'s candidate filter and
+    `poolRejectReasons` both reject on that flag — but **only when
+    `!opts.skipSizingChecks`**, i.e. only on fresh entries (`scanPools`,
+    `enterBestPool`, `scanForBetterOpportunity`). Re-screening an
+    already-held pool (`isPoolStillEligible`, always
+    `skipSizingChecks: true`) stays permissive on purpose — a transient
+    DexScreener 429 shouldn't force-exit a healthy position, same
+    reasoning as the `skipSizingChecks` split above. Self-check:
+    `src/scripts/checkDexHydrationGate.ts` (no test framework in this repo;
+    plain `assert`, run via `tsx`) — verifies the gate fires for fresh
+    entries and not for re-screens.
 - `services/meteoraDLMM.ts` — unchanged this session; same two upstream
   packaging-bug workarounds from last session still documented inline at
   the top of the file (corrupted `.d.ts`, ESM build's missing `BN`
@@ -304,13 +328,15 @@ your call:**
 
 ## Next steps
 
-1. Let the current `switch-take-profit` paper-trade run keep going —
-   specifically watching for: does `SWITCH` fire sensibly (not too often,
-   not on garbage data)? Does `TAKE_PROFIT` ever actually arm and trigger
-   (needs a position to reach +30% first, hasn't happened yet in this
-   session's short observation window)? Does the `skipSizingChecks` fix
-   actually let a grown/successful position recenter in place instead of
-   getting LEFT_POOL'd?
+1. Let the current `dex-hydration-fix` paper-trade run keep going —
+   watching everything the prior `switch-take-profit` run was (does
+   `SWITCH` fire sensibly? does `TAKE_PROFIT` ever arm/trigger? does
+   `skipSizingChecks` let a grown position recenter instead of getting
+   LEFT_POOL'd?), plus the new fix specifically: entries should no longer
+   happen on a pool whose DexScreener batch hydration failed that cycle —
+   watch `poolRejectReasons`/debug logs for `dexscreener batch hydration
+   failed` showing up and blocking an entry that would've slipped through
+   before.
 2. Decide on the two open spec gaps above (HARD_EXIT profit-guard,
    absolute switch-margin floor) — both are one-line-ish changes once a
    decision is made, intentionally left as decisions rather than
