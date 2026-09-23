@@ -6,6 +6,7 @@ import {
   getUserPositions,
   openPosition,
   closePositionFull,
+  claimFees,
   getActiveBin,
   type DlmmPool,
 } from '../services/meteoraDLMM.js';
@@ -125,7 +126,23 @@ export async function getPositionHealthSnapshot(ctx: PoolContext): Promise<Posit
   return { currentValueSol, unclaimedFeesSol };
 }
 
-export { estimateCycleGasCostSol } from './costEstimate.js';
+export { estimateCycleGasCostSol, estimateClaimCostSol } from './costEstimate.js';
+
+/**
+ * Fee-threshold REBALANCE while still in-range: just claim, don't close.
+ * No need to re-center a range that isn't out of range, and closing would
+ * only crystallize whatever unrealized price/IL PnL exists right now for
+ * no reason — the position keeps earning from where it already is.
+ * Reserve compoundCycle (full close+reopen) for when the range/pool
+ * actually needs to change: out-of-range (idle-forced) or no longer
+ * eligible.
+ */
+export async function claimFeesOnly(ctx: PoolContext): Promise<void> {
+  const [position] = await getUserPositions(ctx.pool);
+  if (!position) throw new Error(`[rebalanceEngine] no open position found for pool ${ctx.poolAddress}`);
+  logger.info('[rebalanceEngine] claiming fees without closing (still in-range)', { pool: ctx.poolAddress });
+  await claimFees(ctx.pool, position);
+}
 
 /**
  * Full compound cycle: close position (claim fees + reclaim rent), then
@@ -138,10 +155,9 @@ export { estimateCycleGasCostSol } from './costEstimate.js';
  *    caller should treat this like a freed-up slot and scan for a
  *    different pool next tick. Not a violation (no blacklist), the pool
  *    just isn't the best home for this capital right now.
- * This runs for BOTH a fee-threshold-triggered rebalance and an
- * idle-forced one (out-of-range too long while in profit) — same
- * mechanical action either way, `reasons` is just why riskManager decided
- * to trigger it.
+ * Only called for the idle-forced case (out-of-range too long) or when the
+ * pool needs a fresh screen check — a fee-threshold rebalance while still
+ * in-range goes through claimFeesOnly instead (see above), never here.
  */
 export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConfig): Promise<PoolContext | null> {
   const [position] = await getUserPositions(ctx.pool);
@@ -150,7 +166,7 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   logger.info('[rebalanceEngine] closing position for compound cycle', { pool: ctx.poolAddress });
   await closePositionFull(ctx.pool, position);
 
-  const stillEligible = await isPoolStillEligible(ctx.poolAddress, scannerConfig);
+  const { eligible: stillEligible, reasons: rejectionReasons } = await isPoolStillEligible(ctx.poolAddress, scannerConfig);
 
   const [balX, balY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
   const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
@@ -159,6 +175,7 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   if (!stillEligible) {
     logger.info('[rebalanceEngine] pool no longer passes entry screen — converting to SOL for a fresh scan', {
       pool: ctx.poolAddress,
+      reasons: rejectionReasons,
     });
     if (otherAmount.gtn(0)) await emergencySwapAllToSol(otherMint, otherAmount);
     return null;

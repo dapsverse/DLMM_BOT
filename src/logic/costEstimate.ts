@@ -22,3 +22,13 @@ export function estimateCycleGasCostSol(capitalSol: number): number {
   const swapCostSol = swapAmountSol * ((env.SLIPPAGE_BPS + 30) / 10_000); // slippage budget + ~0.3% DEX fee
   return priorityFeeSol + swapCostSol;
 }
+
+/**
+ * Cost (SOL) of claiming fees WITHOUT closing the position — one tx, no
+ * swap. Used when a fee-threshold REBALANCE fires while still in-range: no
+ * need to re-center a range that isn't out of range, so skip the
+ * close+swap+reopen cycle entirely and just harvest.
+ */
+export function estimateClaimCostSol(): number {
+  return 0.0005; // 1 tx
+}

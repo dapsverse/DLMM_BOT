@@ -21,6 +21,30 @@ import { logger } from '../utils/logger.js';
 const DEXSCREENER_CONCURRENCY = 5;
 const RPC_HYDRATION_CONCURRENCY = 4;
 
+// ponytail: first-cut wash-trading heuristic, hardcoded not env-configurable
+// — no calibration data yet to justify exposing knobs. Revisit if false
+// positives/negatives show up in practice.
+const WASH_TRADE_VOL_TVL_RATIO_THRESHOLD = 30;
+const WASH_TRADE_FLAT_PRICE_BAND_PCT = 2;
+
+/**
+ * This hour's volume vs. the preceding 5h's average pace (via DexScreener's
+ * 6h volume figure) — a ratio well above 1 means volume just surged above
+ * its own recent baseline, not just "the pool has been busy over the last
+ * 24h" (which a static vol/TVL ratio can't distinguish from stale/decaying
+ * activity). Returns 0 (never wins a tie-break) when 6h data never
+ * hydrated; caps at a large-but-finite number instead of Infinity when the
+ * prior baseline is ~0 so sorting stays well-defined.
+ */
+function volumeSpikeRatio(p: MeteoraPair): number {
+  const h6 = p.volumeH6Usd;
+  const h1 = p.volume1hUsd;
+  if (h6 === undefined) return 0;
+  const priorPace = (h6 - h1) / 5;
+  if (priorPace <= 0) return h1 > 0 ? 1_000 : 0;
+  return h1 / priorPace;
+}
+
 /** Metadata used only for the memecoin screen (not needed once a pool is picked). */
 export interface TokenMeta {
   address: string;
@@ -55,6 +79,10 @@ export interface MeteoraPair {
   priceChange24hPct?: number;
   /** DexScreener's 5-minute volume — catches a pool whose 24h number looks fine but has basically gone dead right now. */
   volumeM5Usd?: number;
+  /** DexScreener's 6h volume — baseline window for volume-spike detection (see volumeSpikeRatio). */
+  volumeH6Usd?: number;
+  /** DexScreener's 5-minute buy+sell count — $ volume can look fine while literally 0 trades happened just now; this catches that directly. */
+  txCountM5?: number;
 }
 
 /**
@@ -147,6 +175,8 @@ export interface ScannerConfig {
   requireUptrend: boolean;
   minPriceChange6hPct: number;
   minRecentActivityRatio: number;
+  /** Absolute floor on 5-minute buy+sell count — a relative-to-24h-average ratio can still pass with 0 real trades if the pool's own baseline is already weak; this is a hard, non-relative "is anyone actually trading right now" check. */
+  minTxCountM5: number;
   blacklistPools: Map<string, number>; // poolAddress -> blacklisted-until (epoch ms)
 }
 
@@ -188,7 +218,8 @@ export async function fetchTopPools(): Promise<MeteoraPair[]> {
 
 interface DexScreenerPair {
   priceChange?: { h1?: number; h6?: number; h24?: number };
-  volume?: { m5?: number; h1?: number };
+  volume?: { m5?: number; h1?: number; h6?: number };
+  txns?: { m5?: { buys?: number; sells?: number } };
 }
 
 /** Trailing 1h USD volume for a token, used by riskManager's volume-drop hard-exit check. */
@@ -229,6 +260,9 @@ async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
       if (typeof priceChange?.h6 === 'number') pair.priceChange6hPct = priceChange.h6;
       if (typeof priceChange?.h24 === 'number') pair.priceChange24hPct = priceChange.h24;
       if (typeof dexPair?.volume?.m5 === 'number') pair.volumeM5Usd = dexPair.volume.m5;
+      if (typeof dexPair?.volume?.h6 === 'number') pair.volumeH6Usd = dexPair.volume.h6;
+      const m5Txns = dexPair?.txns?.m5;
+      if (typeof m5Txns?.buys === 'number' && typeof m5Txns?.sells === 'number') pair.txCountM5 = m5Txns.buys + m5Txns.sells;
     } catch (err) {
       logger.debug(`[scanner] dexscreener hydration failed for ${pair.address}`, {
         error: err instanceof Error ? err.message : String(err),
@@ -317,6 +351,27 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     const avg5MinUsd = vol24h / 288;
     if (pair.volumeM5Usd !== undefined && pair.volumeM5Usd < avg5MinUsd * config.minRecentActivityRatio) return false;
 
+    // Absolute floor, not relative: a pool with a weak 24h average already
+    // has a low bar for the ratio check above, so it can still pass with 0
+    // trades in the last 5 minutes. This just asks "did anyone actually
+    // trade in the last 5 minutes" directly.
+    if (pair.txCountM5 !== undefined && pair.txCountM5 < config.minTxCountM5) return false;
+
+    // Basic wash-trading tell: huge volume relative to TVL with price barely
+    // moving is what a self-trading loop (buy/sell back and forth, same
+    // wallet(s)) looks like — real directional buying pressure moves price.
+    // Not a guarantee (organic high-ratio pools with flat price exist too),
+    // just a red flag cheap to check with data already on hand. "unknown,
+    // don't block" if 1h price data never hydrated.
+    const volTvlRatioNow = Number(pair.trade_volume_24h) / Number(pair.liquidity);
+    if (
+      volTvlRatioNow > WASH_TRADE_VOL_TVL_RATIO_THRESHOLD &&
+      pair.priceChange1hPct !== undefined &&
+      Math.abs(pair.priceChange1hPct) < WASH_TRADE_FLAT_PRICE_BAND_PCT
+    ) {
+      return false;
+    }
+
     if (config.requireMintAuthorityDisabled) {
       const memecoin = nonSolToken(pair);
       // fail-closed: unknown (RPC lookup failed) or still-active mint authority both block the pool
@@ -329,23 +384,106 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
   // vol/TVL ratio dominate (e.g. a 27x-ratio pool with flat/negative 6h
   // still won over a genuinely-trending one) — trend was only ever a small
   // multiplier, never the deciding factor. Instead: shortlist the
-  // strongest 6h trends first, THEN pick the best vol/TVL ratio among just
-  // those. Trend now gates which pools are even in contention; ratio only
-  // breaks ties within that trend-qualified set.
+  // strongest 6h trends first, THEN pick within just those. Trend gates
+  // which pools are even in contention; the tie-break only ranks within
+  // that trend-qualified set.
   // Missing 6h data (`?? -Infinity`) sorts to the bottom of the trend
   // shortlist — never lets an unconfirmed trend take a slot from a
   // confirmed one, though it can still surface if too few candidates exist.
-  const volTvlRatio = (p: MeteoraPair) => Number(p.trade_volume_24h) / Number(p.liquidity);
-
+  //
+  // Tie-break is volume-SPIKE ratio (this hour's pace vs. the preceding 5h's
+  // pace, via DexScreener's 6h volume), not static vol/TVL ratio. A high
+  // vol/TVL ratio can just mean a pool that's always been busy — it doesn't
+  // tell you interest is fresh RIGHT NOW. A spike (current hour running well
+  // above its own recent baseline) does, and combined with the trend gate
+  // above ("uptrend + volume spike") is a real breakout-confirmation
+  // pattern, not just "was active at some point in the last 24h."
   const trendShortlist = candidates
     .slice()
     .sort((a, b) => (b.priceChange6hPct ?? -Infinity) - (a.priceChange6hPct ?? -Infinity))
     .slice(0, TREND_SHORTLIST_SIZE);
 
-  trendShortlist.sort((a, b) => volTvlRatio(b) - volTvlRatio(a));
+  trendShortlist.sort((a, b) => volumeSpikeRatio(b) - volumeSpikeRatio(a));
 
-  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters, top ${trendShortlist.length} shortlisted by trend then ratio`);
+  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters, top ${trendShortlist.length} shortlisted by trend then volume spike`);
   return trendShortlist;
+}
+
+export interface PoolEligibility {
+  eligible: boolean;
+  /** Human-readable reasons the pool failed the screen — empty when eligible. */
+  reasons: string[];
+}
+
+/**
+ * Diagnostic-only: recomputes which specific filterAndRankPools check(s) a
+ * pool fails, for logging when a re-screen says "no" and it's not obvious
+ * why. Deliberately duplicates filterAndRankPools' checks instead of
+ * threading a reasons-array through it — this only runs for one
+ * already-held pool on a rebalance, not the hot multi-pool scan path, so a
+ * small duplicated checklist here is cheaper than restructuring the hot
+ * path's filter for a rarely-needed explanation.
+ * Assumes `pair` has already been through filterAndRankPools (or at least
+ * hydrateTrendData/hydrateMintAuthority) so priceChange1hPct, priceChange6hPct,
+ * volumeM5Usd, mintAuthorityRevoked are populated where available; fields left
+ * `undefined` (hydration never ran, e.g. pair failed the pre-hydration
+ * checks first) are silently skipped, not reported as failures.
+ */
+export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig): string[] {
+  const reasons: string[] = [];
+  if (isBlacklisted(pair.address, config.blacklistPools)) reasons.push('blacklisted');
+
+  const tvl = Number(pair.liquidity);
+  const vol24h = Number(pair.trade_volume_24h);
+  if (!Number.isFinite(tvl) || !Number.isFinite(vol24h) || tvl <= 0) {
+    reasons.push('invalid tvl/volume data');
+  } else {
+    if (tvl < config.minTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} < min $${config.minTvlUsd}`);
+    if (tvl > config.maxTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} > max $${config.maxTvlUsd}`);
+    if (vol24h < config.minVolume24hUsd) reasons.push(`vol24h $${vol24h.toFixed(0)} < min $${config.minVolume24hUsd}`);
+    if (vol24h / tvl < config.minVolTvlRatio) reasons.push(`vol/tvl ${(vol24h / tvl).toFixed(2)}x < min ${config.minVolTvlRatio}x`);
+  }
+  if (pair.bin_step < config.minBinStep) reasons.push(`bin_step ${pair.bin_step} < min ${config.minBinStep}`);
+  const ageHours = (Date.now() - pair.createdAtMs) / 3_600_000;
+  if (ageHours < config.minPoolAgeHours) reasons.push(`pool age ${ageHours.toFixed(1)}h < min ${config.minPoolAgeHours}h`);
+
+  const memecoin = nonSolToken(pair);
+  if (!memecoin) {
+    reasons.push('no non-SOL side found');
+  } else {
+    if (memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) reasons.push(`market cap $${memecoin.marketCapUsd.toFixed(0)} > max $${config.maxMemecoinMarketCapUsd}`);
+    if (memecoin.holders < config.minTokenHolders) reasons.push(`holders ${memecoin.holders} < min ${config.minTokenHolders}`);
+    if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) reasons.push('freeze authority not disabled');
+    if (config.requireMintAuthorityDisabled && memecoin.mintAuthorityRevoked !== true) reasons.push('mint authority not confirmed revoked');
+  }
+
+  if (pair.priceChange1hPct !== undefined && pair.priceChange1hPct < PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT) {
+    reasons.push(`1h crash guard ${pair.priceChange1hPct.toFixed(2)}% < ${PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT}%`);
+  }
+  if (config.requireUptrend && pair.priceChange6hPct !== undefined && pair.priceChange6hPct < config.minPriceChange6hPct) {
+    reasons.push(`6h trend ${pair.priceChange6hPct.toFixed(2)}% < min ${config.minPriceChange6hPct}%`);
+  }
+  const avgHourlyUsd = vol24h / 24;
+  if (pair.volume1hUsd < avgHourlyUsd * config.minRecentActivityRatio) {
+    reasons.push(`1h activity $${pair.volume1hUsd.toFixed(0)} < ${(config.minRecentActivityRatio * 100).toFixed(0)}% of its own 24h pace ($${avgHourlyUsd.toFixed(0)})`);
+  }
+  const avg5MinUsd = vol24h / 288;
+  if (pair.volumeM5Usd !== undefined && pair.volumeM5Usd < avg5MinUsd * config.minRecentActivityRatio) {
+    reasons.push(`5m activity $${pair.volumeM5Usd.toFixed(0)} < ${(config.minRecentActivityRatio * 100).toFixed(0)}% of its own 24h pace ($${avg5MinUsd.toFixed(0)})`);
+  }
+  if (pair.txCountM5 !== undefined && pair.txCountM5 < config.minTxCountM5) {
+    reasons.push(`5m tx count ${pair.txCountM5} < min ${config.minTxCountM5}`);
+  }
+  const volTvlRatioNow = tvl > 0 ? vol24h / tvl : 0;
+  if (
+    volTvlRatioNow > WASH_TRADE_VOL_TVL_RATIO_THRESHOLD &&
+    pair.priceChange1hPct !== undefined &&
+    Math.abs(pair.priceChange1hPct) < WASH_TRADE_FLAT_PRICE_BAND_PCT
+  ) {
+    reasons.push(`possible wash trading: vol/tvl ${volTvlRatioNow.toFixed(1)}x with flat 1h price ${pair.priceChange1hPct.toFixed(2)}%`);
+  }
+
+  return reasons;
 }
 
 /**
@@ -356,12 +494,13 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
  * expensive full-market scan; this is one pool, called only when a
  * rebalance is already happening, not on every tick).
  */
-export async function isPoolStillEligible(poolAddress: string, config: ScannerConfig): Promise<boolean> {
+export async function isPoolStillEligible(poolAddress: string, config: ScannerConfig): Promise<PoolEligibility> {
   const pairs = await fetchTopPools();
   const pool = pairs.find((p) => p.address === poolAddress);
-  if (!pool) return false; // fell out of the top-200-by-volume window — treat as degraded
+  if (!pool) return { eligible: false, reasons: ['pool fell out of the top-200-by-volume window'] };
   const passed = await filterAndRankPools([pool], config);
-  return passed.length > 0;
+  const eligible = passed.length > 0;
+  return { eligible, reasons: eligible ? [] : poolRejectReasons(pool, config) };
 }
 
 /**
@@ -396,6 +535,7 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     requireUptrend: env.REQUIRE_UPTREND,
     minPriceChange6hPct: env.MIN_PRICE_CHANGE_6H_PCT,
     minRecentActivityRatio: env.MIN_RECENT_ACTIVITY_RATIO,
+    minTxCountM5: env.MIN_TX_COUNT_M5,
     blacklistPools,
   };
 }

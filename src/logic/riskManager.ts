@@ -81,15 +81,16 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
   // Idle-forced rebalance: out-of-range means the position stopped earning
   // new fees, so the fee-threshold check above can stall forever waiting on
   // fees that no longer accrue. Capital shouldn't just sit there once it's
-  // been out of range "too long" while already profitable — force a
-  // compound cycle, which re-checks whether this pool still qualifies for
-  // re-entry or whether capital should go find a different one instead
-  // (decided by rebalanceEngine/paperTrade, not here).
+  // been out of range "too long" — force a compound cycle regardless of
+  // profit/loss (loss already would have HARD_EXIT'd above at STOP_LOSS_PCT,
+  // so anything reaching here is an acceptable loss to crystallize in
+  // exchange for redeploying idle capital). compoundCycle re-checks whether
+  // this pool still qualifies for re-entry or whether capital should go find
+  // a different one instead (decided by rebalanceEngine/paperTrade, not here).
   if (input.isOutOfRange && input.outOfRangeSinceMs !== undefined && input.outOfRangeSinceMs !== null) {
     const idleMinutes = (now - input.outOfRangeSinceMs) / 60_000;
-    const inProfit = input.currentValueUsd > input.initialDepositUsd;
-    if (idleMinutes >= env.MAX_IDLE_OUT_OF_RANGE_MINUTES && inProfit) {
-      const r = [`out of range idle ${idleMinutes.toFixed(1)}min while in profit — forcing rebalance instead of sitting idle`];
+    if (idleMinutes >= env.MAX_IDLE_OUT_OF_RANGE_MINUTES) {
+      const r = [`out of range idle ${idleMinutes.toFixed(1)}min — forcing rebalance instead of sitting idle`];
       logger.info('[riskManager] REBALANCE (idle-forced)', { reasons: r });
       return { decision: 'REBALANCE', reasons: r };
     }

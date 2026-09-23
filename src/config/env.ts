@@ -48,7 +48,13 @@ export const env = {
 
   // Pool scanner filters
   MIN_TVL_USD: num('MIN_TVL_USD', 50_000),
-  MAX_TVL_USD: num('MAX_TVL_USD', 1_000_000),
+  // Was 1_000_000 — with ~$490 (4.2 SOL) working capital, a pool anywhere
+  // near that TVL dilutes our pro-rata fee share to ~0.05%, near-zero $ fee
+  // regardless of how active the pool actually is (confirmed live: ALLINU-SOL,
+  // $476k TVL, $42k/1h volume — genuinely active pool, still only $0.40 fee
+  // in 46min). 150k keeps share in the same ballpark as past good entries
+  // (JEANPHIL $80k, QUEEF $56-134k) — ~0.3%+ instead of ~0.1%.
+  MAX_TVL_USD: num('MAX_TVL_USD', 150_000),
   MIN_24H_VOLUME_USD: num('MIN_24H_VOLUME_USD', 200_000),
   MIN_VOL_TVL_RATIO: num('MIN_VOL_TVL_RATIO', 3.0),
   POOL_SCAN_INTERVAL_MS: num('POOL_SCAN_INTERVAL_MS', 60_000),
@@ -63,16 +69,27 @@ export const env = {
   MIN_BIN_STEP: num('MIN_BIN_STEP', 15),
   MIN_POOL_AGE_HOURS: num('MIN_POOL_AGE_HOURS', 2),
 
-  // Trend filter — good volume alone isn't enough; prefer tokens that
-  // aren't actively dumping over the last 6h. -5 (not 0) so a token merely
-  // flat/drifting doesn't get excluded, only a real downtrend does.
+  // Trend filter — good volume alone isn't enough. Was -5 (merely "not
+  // crashing", let flat/slightly-bleeding tokens in); tightened to 0 to
+  // require genuine positive 6h momentum — real trend-following practice
+  // confirms positive momentum, not just "not down much", and this bot's
+  // own out-of-range-exit-direction logic only pays off if entry is a real
+  // uptrend, not a coin flip near flat.
   REQUIRE_UPTREND: bool('REQUIRE_UPTREND', true),
-  MIN_PRICE_CHANGE_6H_PCT: num('MIN_PRICE_CHANGE_6H_PCT', -5),
+  MIN_PRICE_CHANGE_6H_PCT: num('MIN_PRICE_CHANGE_6H_PCT', 0),
 
   // Activity cascade — 1h and 5m volume must each be at least this fraction
   // of the pool's own 24h average pace, or it's flagged as "24h number
   // looks fine but nothing's actually trading right now" (stale/wash-traded).
   MIN_RECENT_ACTIVITY_RATIO: num('MIN_RECENT_ACTIVITY_RATIO', 0.15),
+
+  // Absolute (not relative) floor: a pool with a weak 24h average can still
+  // pass the ratio-based activity cascade above with 0 real trades in the
+  // last 5 minutes, since 15% of an already-low baseline is a tiny number.
+  // This asks directly "did >= N trades happen in the last 5 minutes" —
+  // confirmed live via DexScreener's txns.m5 (buys+sells) that a pool can
+  // pass every other filter while sitting at literally 0 trades right now.
+  MIN_TX_COUNT_M5: num('MIN_TX_COUNT_M5', 20),
 
   // Position sizing — bin radius is DERIVED per-pool from bin_step to hit
   // this target price coverage (a fixed bin-count radius covers wildly

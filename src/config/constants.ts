@@ -15,10 +15,18 @@ export const DEXSCREENER_TOKEN_URL = 'https://api.dexscreener.com/latest/dex/tok
 /** Minimum allowed gap between pool-list polls, enforced regardless of config. */
 export const MIN_SCAN_INTERVAL_MS = 60_000;
 
-/** Price move over trailing 1h that disqualifies a candidate pool (crash guard). */
-export const PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT = -20;
+/**
+ * Price move over trailing 1h that disqualifies a candidate pool (crash
+ * guard). Was -20%; tightened to -12% — memecoins can dump 30-50%+ in
+ * minutes on a rug/large sell, and momentum-bot practice for high-volatility
+ * assets generally uses -10% to -15%/1h, not -20% (closer to a
+ * portfolio-level drawdown threshold, too loose for a single volatile
+ * asset). Research-backed, not a published memecoin-bot spec — treat as
+ * directional, revisit if it starves candidates too hard in practice.
+ */
+export const PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT = -12;
 
-/** How many of the strongest-6h-trend candidates to shortlist before picking the best vol/TVL ratio among them. */
+/** How many of the strongest-6h-trend candidates to shortlist before picking the best volume-spike ratio among them. */
 export const TREND_SHORTLIST_SIZE = 3;
 
 export const RPC_MAX_RETRIES = 5;

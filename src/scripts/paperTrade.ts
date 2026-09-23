@@ -44,10 +44,11 @@ import {
   defaultScannerConfig,
   nonSolToken,
   solToken,
+  poolRejectReasons,
   type MeteoraPair,
 } from '../services/meteoraScanner.js';
 import { evaluatePosition, addToBlacklist } from '../logic/riskManager.js';
-import { estimateCycleGasCostSol } from '../logic/costEstimate.js';
+import { estimateCycleGasCostSol, estimateClaimCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
 import { env } from '../config/env.js';
@@ -109,6 +110,8 @@ interface RunSummary {
   poolsEntered: number;
   rebalances: number;
   hardExits: number;
+  /** Fees claimed via the in-range claim-only path (net of claim cost) — cash outside the position, added into portfolio value. */
+  harvestedFeesUsd: number;
   poolHistory: PoolVisit[];
 }
 
@@ -123,8 +126,14 @@ const summary: RunSummary = {
   poolsEntered: 0,
   rebalances: 0,
   hardExits: 0,
+  harvestedFeesUsd: 0,
   poolHistory: [],
 };
+
+/** Total portfolio value = whatever's tied up right now + fees harvested-and-kept-as-cash so far. */
+function portfolioValueUsd(baseUsd: number): number {
+  return baseUsd + summary.harvestedFeesUsd;
+}
 
 function logEvent(event: Record<string, unknown>): void {
   const line = JSON.stringify({ ts: new Date().toISOString(), ...event });
@@ -289,14 +298,14 @@ async function tick(): Promise<void> {
       lastKnownSolPriceUsd = anySol.priceUsd;
     }
     const entered = await enterBestPool(pairs);
-    writeState(entered ? entered.capitalUsd : idleCapitalUsd);
+    writeState(portfolioValueUsd(entered ? entered.capitalUsd : idleCapitalUsd));
     return;
   }
 
   const live = pairs.find((p) => p.address === position!.poolAddress);
   if (!live) {
     logEvent({ type: 'STALE_POOL', pool: position.poolName, note: 'dropped out of top-200 volume window; holding last known value' });
-    writeState(position.capitalUsd + position.feesEarnedUsd);
+    writeState(portfolioValueUsd(position.capitalUsd + position.feesEarnedUsd));
     return;
   }
 
@@ -333,6 +342,13 @@ async function tick(): Promise<void> {
     0.5 * position.capitalUsd * (meme.priceUsd / position.entryMemePriceUsd);
   const lpPrincipalUsd = heldValueUsd * ilMultiplier(r);
   const currentValueUsd = lpPrincipalUsd + position.feesEarnedUsd;
+  // Default: nothing changes the position this tick, so the mark-to-market
+  // value IS currentValueUsd (includes live price/IL — position.capitalUsd
+  // is just the static entry/last-compound anchor and does NOT track price
+  // movement between compounds; using it directly for the final
+  // portfolio-value write silently drops IL until the next compound event).
+  // Only the branches below that actually touch the position override this.
+  let finalPositionValueUsd = currentValueUsd;
 
   const gasCostSol = estimateCycleGasCostSol(position.capitalUsd / sol.priceUsd);
   const gasCostUsd = gasCostSol * sol.priceUsd;
@@ -372,7 +388,7 @@ async function tick(): Promise<void> {
     }
     idleCapitalUsd = exitValueAfterCostUsd;
     position = null;
-    writeState(idleCapitalUsd);
+    writeState(portfolioValueUsd(idleCapitalUsd));
     return;
   }
 
@@ -382,6 +398,27 @@ async function tick(): Promise<void> {
       logEvent({ type: 'HOLD', pool: position.poolName, note: 'rebalance triggered but ENABLE_AUTO_COMPOUND=false', currentValueUsd: +currentValueUsd.toFixed(2), currentBinId, inRange });
     } else if (cooldownActive) {
       logEvent({ type: 'HOLD', pool: position.poolName, note: 'rebalance triggered but still in cooldown', currentValueUsd: +currentValueUsd.toFixed(2), currentBinId, inRange });
+    } else if (!isOutOfRange) {
+      // Fee-threshold trigger while still in-range: just claim, don't
+      // close/reopen — nothing about the range needs to change, and
+      // closing would only crystallize unrealized price/IL PnL for no
+      // reason. (Idle-forced REBALANCE only ever fires when isOutOfRange
+      // is true, so this branch is unreachable for that case — it only
+      // ever sees the fee-threshold trigger.)
+      const claimCostUsd = estimateClaimCostSol() * sol.priceUsd;
+      const netHarvestedUsd = Math.max(position.feesEarnedUsd - claimCostUsd, 0);
+      logEvent({
+        type: 'CLAIM_FEES',
+        pool: position.poolName,
+        reasons,
+        feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
+        claimCostUsd: +claimCostUsd.toFixed(2),
+        netHarvestedUsd: +netHarvestedUsd.toFixed(2),
+      });
+      summary.harvestedFeesUsd += netHarvestedUsd;
+      finalPositionValueUsd = currentValueUsd - position.feesEarnedUsd; // = lpPrincipalUsd — fees just moved out to harvestedFeesUsd
+      position.feesEarnedUsd = 0;
+      position.lastRebalanceAtMs = now; // respect cooldown before claiming again
     } else {
       const compoundedToUsd = Math.max(currentValueUsd - gasCostUsd, 0);
       // Re-check the held pool against the full entry screen using the
@@ -405,6 +442,7 @@ async function tick(): Promise<void> {
         });
         position.capitalUsd = compoundedToUsd;
         position.feesEarnedUsd = 0;
+        finalPositionValueUsd = compoundedToUsd;
         position.entrySolPriceUsd = sol.priceUsd;
         position.entryMemePriceUsd = meme.priceUsd;
         position.volume1hBaselineUsd = live.volume1hUsd;
@@ -419,7 +457,8 @@ async function tick(): Promise<void> {
         // — leave with the compounded capital instead of forcing a reopen
         // here. Not a violation, so no blacklist (unlike HARD_EXIT) — the
         // next tick's scan is free to reconsider it later if it recovers.
-        const leaveReasons = [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening'];
+        const rejectReasons = poolRejectReasons(live, defaultScannerConfig(blacklist));
+        const leaveReasons = [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening', ...rejectReasons];
         logEvent({
           type: 'LEAVE_POOL',
           pool: position.poolName,
@@ -453,7 +492,7 @@ async function tick(): Promise<void> {
     });
   }
 
-  writeState(position ? position.capitalUsd + position.feesEarnedUsd : idleCapitalUsd, currentBinId, priceCtx);
+  writeState(portfolioValueUsd(position ? finalPositionValueUsd : idleCapitalUsd), currentBinId, priceCtx);
 }
 
 async function main(): Promise<void> {
