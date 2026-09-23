@@ -45,9 +45,10 @@ import {
   nonSolToken,
   solToken,
   poolRejectReasons,
+  scanForBetterOpportunity,
   type MeteoraPair,
 } from '../services/meteoraScanner.js';
-import { evaluatePosition, addToBlacklist } from '../logic/riskManager.js';
+import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from '../logic/riskManager.js';
 import { estimateCycleGasCostSol, estimateClaimCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
@@ -120,6 +121,8 @@ interface RunSummary {
 let position: VirtualPosition | null = null;
 let idleCapitalUsd = 0; // capital not currently in a position (between hard-exit and next entry)
 let lastKnownSolPriceUsd = 0;
+let lastOpportunityScanAtMs = 0;
+let lastSwitchAtMs: number | null = null;
 const blacklist = new Map<string, number>();
 const summary: RunSummary = {
   label: LABEL ?? 'default',
@@ -527,6 +530,49 @@ async function tick(): Promise<void> {
       binsFromCenter,
       inRange,
     });
+  }
+
+  if (position) {
+    const opportunityNow = Date.now();
+    if (opportunityNow - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
+      lastOpportunityScanAtMs = opportunityNow;
+      const scanResult = await scanForBetterOpportunity(position.poolAddress, defaultScannerConfig(blacklist));
+      const currentProfitPctForSwitch = position.capitalUsd > 0 ? ((finalPositionValueUsd - position.capitalUsd) / position.capitalUsd) * 100 : 0;
+      const switchEval = evaluateSwitchOpportunity(
+        {
+          currentProfitPct: currentProfitPctForSwitch,
+          currentSpikeRatio: scanResult.currentSpikeRatio,
+          candidateSpikeRatio: scanResult.candidateSpikeRatio,
+          hasCandidate: scanResult.candidate !== null,
+          lastSwitchAtMs,
+        },
+        opportunityNow,
+      );
+      if (switchEval.shouldSwitch && scanResult.candidate) {
+        const candidate = scanResult.candidate;
+        logEvent({
+          type: 'SWITCH',
+          fromPool: position.poolName,
+          toPool: candidate.name,
+          reason: switchEval.reason,
+          compoundedFromUsd: +position.capitalUsd.toFixed(2),
+          exitValueUsd: +finalPositionValueUsd.toFixed(2),
+        });
+        const visit = summary.poolHistory[summary.poolHistory.length - 1];
+        if (visit) {
+          visit.exitedAtMs = opportunityNow;
+          visit.exitType = 'LEFT_POOL';
+          visit.exitValueUsd = +finalPositionValueUsd.toFixed(2);
+          visit.exitReasons = [switchEval.reason];
+        }
+        idleCapitalUsd = finalPositionValueUsd;
+        position = null;
+        const entered = await enterPool(candidate);
+        lastSwitchAtMs = opportunityNow;
+        writeState(portfolioValueUsd(entered ? entered.capitalUsd : idleCapitalUsd));
+        return;
+      }
+    }
   }
 
   writeState(portfolioValueUsd(position ? finalPositionValueUsd : idleCapitalUsd), currentBinId, priceCtx);
