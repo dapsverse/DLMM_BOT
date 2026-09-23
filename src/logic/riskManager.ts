@@ -113,6 +113,55 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
   return { decision: 'HOLD', reasons: [] };
 }
 
+export interface SwitchEvaluationInput {
+  /** Currently-held position's unrealized profit %, same sign convention as evaluatePosition (positive = profit). */
+  currentProfitPct: number;
+  currentSpikeRatio: number;
+  candidateSpikeRatio: number;
+  /** False if scanForBetterOpportunity found no distinct qualifying candidate this scan. */
+  hasCandidate: boolean;
+  /** Epoch ms of the last switch, or null if none has happened yet this run. */
+  lastSwitchAtMs: number | null;
+}
+
+export interface SwitchEvaluation {
+  shouldSwitch: boolean;
+  reason: string;
+}
+
+/**
+ * Pure decision function for the opportunistic pool-switching feature -
+ * mirrors evaluatePosition's shape (no I/O, caller already did the scan).
+ * Checked only at the caller's own OPPORTUNITY_SCAN_INTERVAL_MS cadence,
+ * not every tick.
+ */
+export function evaluateSwitchOpportunity(input: SwitchEvaluationInput, now = Date.now()): SwitchEvaluation {
+  if (!input.hasCandidate) {
+    return { shouldSwitch: false, reason: 'no qualifying candidate found this scan' };
+  }
+  if (input.currentProfitPct >= env.SWITCH_PROFIT_GUARD_PCT) {
+    return {
+      shouldSwitch: false,
+      reason: `current profit ${input.currentProfitPct.toFixed(2)}% >= SWITCH_PROFIT_GUARD_PCT ${env.SWITCH_PROFIT_GUARD_PCT}% - protecting winner`,
+    };
+  }
+  if (input.lastSwitchAtMs !== null && now - input.lastSwitchAtMs < env.SWITCH_COOLDOWN_MS) {
+    const remainingMin = ((env.SWITCH_COOLDOWN_MS - (now - input.lastSwitchAtMs)) / 60_000).toFixed(1);
+    return { shouldSwitch: false, reason: `switch cooldown active, ${remainingMin}min remaining` };
+  }
+  const requiredRatio = input.currentSpikeRatio * env.SWITCH_SPIKE_RATIO_MARGIN;
+  if (input.candidateSpikeRatio >= requiredRatio) {
+    return {
+      shouldSwitch: true,
+      reason: `candidate spike ${input.candidateSpikeRatio.toFixed(2)}x >= current ${input.currentSpikeRatio.toFixed(2)}x * margin ${env.SWITCH_SPIKE_RATIO_MARGIN} (required ${requiredRatio.toFixed(2)}x)`,
+    };
+  }
+  return {
+    shouldSwitch: false,
+    reason: `candidate spike ${input.candidateSpikeRatio.toFixed(2)}x < required ${requiredRatio.toFixed(2)}x`,
+  };
+}
+
 // ── Blacklist manager ───────────────────────────────────────────────────
 
 export function addToBlacklist(blacklistPools: Map<string, number>, poolAddress: string, now = Date.now()): void {

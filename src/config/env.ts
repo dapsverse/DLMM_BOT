@@ -128,6 +128,20 @@ export const env = {
   TAKE_PROFIT_ARM_PCT: num('TAKE_PROFIT_ARM_PCT', 30),
   TAKE_PROFIT_GIVEBACK_PCT: num('TAKE_PROFIT_GIVEBACK_PCT', 25),
 
+  // Opportunistic pool-switching: every OPPORTUNITY_SCAN_INTERVAL_MS while
+  // holding a position, compare it against the best market candidate via
+  // volumeSpikeRatio. Switch only if the candidate beats current by
+  // SWITCH_SPIKE_RATIO_MARGIN (1.5x - deliberately not a marginal win, since
+  // switching costs a full exit+re-entry cycle), UNLESS current unrealized
+  // profit is already >= SWITCH_PROFIT_GUARD_PCT (don't abandon a proven
+  // winner for an unproven candidate), and never more often than once per
+  // SWITCH_COOLDOWN_MS (anti-whipsaw, stacked on top of the scan interval
+  // itself).
+  OPPORTUNITY_SCAN_INTERVAL_MS: num('OPPORTUNITY_SCAN_INTERVAL_MS', 5 * 60_000),
+  SWITCH_SPIKE_RATIO_MARGIN: num('SWITCH_SPIKE_RATIO_MARGIN', 1.5),
+  SWITCH_PROFIT_GUARD_PCT: num('SWITCH_PROFIT_GUARD_PCT', 30),
+  SWITCH_COOLDOWN_MS: num('SWITCH_COOLDOWN_MS', 15 * 60_000),
+
   // Swap / gas
   SLIPPAGE_BPS: num('SLIPPAGE_BPS', 100),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),
