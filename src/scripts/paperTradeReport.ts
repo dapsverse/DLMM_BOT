@@ -21,7 +21,9 @@ function printRun(state: any): void {
   console.log(`\n═══ ${state.label ?? 'unlabeled'} (${state.finished ? 'FINISHED' : 'running'}) ═══`);
   console.log(`  Elapsed: ${state.elapsedHours}h / ${state.durationHours}h`);
   console.log(`  Starting capital: $${state.startingCapitalUsd?.toFixed(2) ?? 'n/a'} (${state.startingCapitalSol ?? 'n/a'} SOL)`);
-  console.log(`  Current value:    $${state.currentValueUsd} (${sign}${state.pnlUsd} / ${sign}${state.pnlPct}%)  [${state.currentValueSol ?? 'n/a'} SOL]`);
+  console.log(`  Current value:    $${state.currentValueUsd} [${state.currentValueSol ?? 'n/a'} SOL]`);
+  console.log(`  Total PNL (with fees): ${sign}$${state.pnlUsd} (${sign}${state.pnlPct}%)`);
+  console.log(`  Fees only:             $${state.totalFeesEarnedUsd?.toFixed(2) ?? 'n/a'} (${state.totalFeesEarnedSol ?? 'n/a'} SOL)`);
   console.log(`  Pools entered: ${state.poolsEntered}  Rebalances: ${state.rebalances}  Hard exits: ${state.hardExits}`);
   if (state.currentPosition) {
     console.log(`  Currently in: ${state.currentPosition.pool} (${state.currentPosition.address})`);

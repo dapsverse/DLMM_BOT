@@ -119,6 +119,8 @@ interface RunSummary {
   hardExits: number;
   /** Fees claimed via the in-range claim-only path (net of claim cost) — cash outside the position, added into portfolio value. */
   harvestedFeesUsd: number;
+  /** Cumulative fees earned across the whole run (gross, before claim/exit costs) — every claim, compound, and exit rolls its position.feesEarnedUsd in here before resetting/closing. Compare against pnlUsd to see how much of total PnL is fee income vs. price/IL. */
+  totalFeesEarnedUsd: number;
   poolHistory: PoolVisit[];
 }
 
@@ -137,6 +139,7 @@ const summary: RunSummary = {
   rebalances: 0,
   hardExits: 0,
   harvestedFeesUsd: 0,
+  totalFeesEarnedUsd: 0,
   poolHistory: [],
 };
 
@@ -208,8 +211,13 @@ function writeState(currentValueUsd: number, currentBinId?: number | null, price
         finished: elapsedMs >= DURATION_MS,
         currentValueUsd: +currentValueUsd.toFixed(2),
         currentValueSol: lastKnownSolPriceUsd > 0 ? +(currentValueUsd / lastKnownSolPriceUsd).toFixed(4) : null,
+        // pnlUsd/pnlPct are total PnL WITH fees already baked in (currentValueUsd
+        // already nets out price/IL + all fee effects) — totalFeesEarnedUsd (from
+        // ...summary above) is the fees-only slice of that total, so
+        // pnlUsd - totalFeesEarnedUsd isolates the price/IL-only component.
         pnlUsd: +pnlUsd.toFixed(2),
         pnlPct: +pnlPct.toFixed(2),
+        totalFeesEarnedSol: lastKnownSolPriceUsd > 0 ? +(summary.totalFeesEarnedUsd / lastKnownSolPriceUsd).toFixed(4) : null,
         currentPosition: position
           ? {
               pool: position.poolName,
@@ -414,6 +422,7 @@ async function tick(): Promise<void> {
       visit.exitValueSol = +exitValueAfterCostSol.toFixed(4);
       visit.exitReasons = reasons;
     }
+    summary.totalFeesEarnedUsd += position.feesEarnedUsd;
     idleCapitalUsd = exitValueAfterCostUsd;
     position = null;
     writeState(portfolioValueUsd(idleCapitalUsd));
@@ -443,6 +452,7 @@ async function tick(): Promise<void> {
       visit.exitValueSol = +exitValueAfterCostSol.toFixed(4);
       visit.exitReasons = reasons;
     }
+    summary.totalFeesEarnedUsd += position.feesEarnedUsd;
     idleCapitalUsd = exitValueAfterCostUsd;
     position = null;
     writeState(portfolioValueUsd(idleCapitalUsd));
@@ -475,6 +485,7 @@ async function tick(): Promise<void> {
         netHarvestedSol: +(netHarvestedUsd / sol.priceUsd).toFixed(4),
       });
       summary.harvestedFeesUsd += netHarvestedUsd;
+      summary.totalFeesEarnedUsd += position.feesEarnedUsd;
       finalPositionValueUsd = currentValueUsd - position.feesEarnedUsd; // = lpPrincipalUsd — fees just moved out to harvestedFeesUsd
       position.feesEarnedUsd = 0;
       position.lastRebalanceAtMs = now; // respect cooldown before claiming again
@@ -506,6 +517,7 @@ async function tick(): Promise<void> {
           oldCenterBinId: position.centerBinId,
           newCenterBinId: currentBinId,
         });
+        summary.totalFeesEarnedUsd += position.feesEarnedUsd;
         position.capitalUsd = compoundedToUsd;
         position.feesEarnedUsd = 0;
         finalPositionValueUsd = compoundedToUsd;
@@ -544,6 +556,7 @@ async function tick(): Promise<void> {
           visit.exitValueSol = +(compoundedToUsd / sol.priceUsd).toFixed(4);
           visit.exitReasons = leaveReasons;
         }
+        summary.totalFeesEarnedUsd += position.feesEarnedUsd;
         idleCapitalUsd = compoundedToUsd;
         position = null;
       }
@@ -601,6 +614,7 @@ async function tick(): Promise<void> {
           visit.exitValueSol = +(switchExitValueUsd / sol.priceUsd).toFixed(4);
           visit.exitReasons = [switchEval.reason];
         }
+        summary.totalFeesEarnedUsd += position.feesEarnedUsd;
         idleCapitalUsd = switchExitValueUsd;
         position = null;
         const entered = await enterPool(candidate);
