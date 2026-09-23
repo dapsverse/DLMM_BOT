@@ -1,6 +1,6 @@
 import { env } from './config/env.js';
 import { getWalletPubkey, getWalletSolBalance } from './services/solana.js';
-import { scanPools, defaultScannerConfig, getVolume1hUsd } from './services/meteoraScanner.js';
+import { scanPools, defaultScannerConfig, getVolume1hUsd, scanForBetterOpportunity } from './services/meteoraScanner.js';
 import { openPool } from './services/meteoraDLMM.js';
 import {
   openInitialPosition,
@@ -15,7 +15,7 @@ import {
   estimateCycleGasCostSol,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
-import { evaluatePosition } from './logic/riskManager.js';
+import { evaluatePosition, evaluateSwitchOpportunity } from './logic/riskManager.js';
 import { WSOL_MINT } from './services/jupiterSwap.js';
 import { logger } from './utils/logger.js';
 
@@ -24,6 +24,8 @@ const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than p
 const blacklistPools = new Map<string, number>();
 let currentPool: PoolContext | null = null;
 let currentCapitalSol = env.INITIAL_LP_CAPITAL_SOL;
+let lastOpportunityScanAtMs = 0;
+let lastSwitchAtMs: number | null = null;
 
 async function tryEnterPool(): Promise<void> {
   const candidates = await scanPools(defaultScannerConfig(blacklistPools));
@@ -133,6 +135,47 @@ async function tick(): Promise<void> {
     currentPool = await compoundCycle(ctx, defaultScannerConfig(blacklistPools));
     if (!currentPool) currentCapitalSol = Math.max((await getWalletSolBalance()) - env.MIN_GAS_RESERVE_SOL, 0);
     return;
+  }
+
+  const now = Date.now();
+  if (now - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
+    lastOpportunityScanAtMs = now;
+    const scanResult = await scanForBetterOpportunity(ctx.poolAddress, defaultScannerConfig(blacklistPools));
+    const switchEval = evaluateSwitchOpportunity(
+      {
+        currentProfitPct,
+        currentSpikeRatio: scanResult.currentSpikeRatio,
+        candidateSpikeRatio: scanResult.candidateSpikeRatio,
+        hasCandidate: scanResult.candidate !== null,
+        lastSwitchAtMs,
+      },
+      now,
+    );
+    logger.info('[index] opportunity scan', { decision: switchEval.shouldSwitch ? 'SWITCH' : 'HOLD', reason: switchEval.reason });
+    if (switchEval.shouldSwitch && scanResult.candidate) {
+      const candidate = scanResult.candidate;
+      currentCapitalSol = await executeCleanExit(ctx, 'SWITCH');
+      const xIsSol = candidate.mint_x === WSOL_MINT;
+      const yIsSol = candidate.mint_y === WSOL_MINT;
+      if (xIsSol || yIsSol) {
+        try {
+          const newPool = await openPool(candidate.address);
+          currentPool = await openInitialPosition(newPool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step);
+          lastSwitchAtMs = now;
+          logger.info('[index] SWITCH complete', { from: ctx.poolAddress, to: candidate.address });
+        } catch (err) {
+          logger.error('[index] SWITCH failed to open new position, capital left in SOL for next scan', {
+            candidate: candidate.address,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          currentPool = null;
+        }
+      } else {
+        // ponytail: engine only prices in SOL terms, same guard as tryEnterPool - shouldn't happen since filterAndRankPools already requires a SOL side via nonSolToken, but stay defensive.
+        currentPool = null;
+      }
+      return;
+    }
   }
 
   // HOLD — nothing to do.
