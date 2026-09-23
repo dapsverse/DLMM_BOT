@@ -1,7 +1,7 @@
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 
-export type RiskDecision = 'HOLD' | 'REBALANCE' | 'HARD_EXIT';
+export type RiskDecision = 'HOLD' | 'REBALANCE' | 'HARD_EXIT' | 'TAKE_PROFIT';
 
 export interface PositionHealthInput {
   /** USD value of capital deposited when the position was opened/last compounded. */
@@ -20,6 +20,8 @@ export interface PositionHealthInput {
   isOutOfRange?: boolean;
   /** When the position first went out-of-range (epoch ms), null/undefined while in-range. */
   outOfRangeSinceMs?: number | null;
+  /** Highest unrealized profit % this position has ever reached (caller-tracked, updated with THIS tick's profit before calling evaluatePosition — see rebalanceEngine.ts/paperTrade.ts). 0 for a fresh position. */
+  peakProfitPct: number;
 }
 
 export interface RiskEvaluation {
@@ -52,6 +54,7 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
   if (lossPct >= env.STOP_LOSS_PCT) {
     reasons.push(`unrealized loss ${lossPct.toFixed(2)}% >= STOP_LOSS_PCT ${env.STOP_LOSS_PCT}%`);
   }
+  const profitPct = -lossPct;
 
   const recentRebalances = countRecentRebalances(input.rebalanceTimestamps, now);
   if (recentRebalances > env.MAX_REBALANCE_PER_HOUR) {
@@ -69,6 +72,17 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
   if (reasons.length) {
     logger.warn('[riskManager] HARD_EXIT', { reasons });
     return { decision: 'HARD_EXIT', reasons };
+  }
+
+  if (input.peakProfitPct >= env.TAKE_PROFIT_ARM_PCT) {
+    const floorPct = input.peakProfitPct - env.TAKE_PROFIT_GIVEBACK_PCT;
+    if (profitPct <= floorPct) {
+      const r = [
+        `profit ${profitPct.toFixed(2)}% dropped to trailing floor ${floorPct.toFixed(2)}% (peak ${input.peakProfitPct.toFixed(2)}% - ${env.TAKE_PROFIT_GIVEBACK_PCT}pp giveback)`,
+      ];
+      logger.info('[riskManager] TAKE_PROFIT', { reasons: r });
+      return { decision: 'TAKE_PROFIT', reasons: r };
+    }
   }
 
   const rebalanceThresholdUsd = input.estimatedGasCostUsd * env.FEE_GAS_MULTIPLIER;

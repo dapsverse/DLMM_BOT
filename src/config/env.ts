@@ -115,6 +115,19 @@ export const env = {
   // faster than the normal cooldown allows anyway.
   MAX_IDLE_OUT_OF_RANGE_MINUTES: num('MAX_IDLE_OUT_OF_RANGE_MINUTES', 10),
 
+  // Trailing take-profit: once unrealized profit peaks at/above
+  // TAKE_PROFIT_ARM_PCT, a trailing floor is set at (peak -
+  // TAKE_PROFIT_GIVEBACK_PCT) percentage points; if profit drops to/below
+  // that floor, exit and lock in the remaining gain instead of riding it
+  // all the way back down. No blacklist on this exit (see riskManager.ts) -
+  // it's profit protection, not a risk violation, so the pool stays a
+  // valid candidate if its run continues. 25pp giveback (not the 50pp
+  // originally considered) matches the 15-30% range crypto-momentum
+  // practice converges on for volatile assets; a flat 50pp giveback was
+  // researched as too loose for Solana memecoin volatility specifically.
+  TAKE_PROFIT_ARM_PCT: num('TAKE_PROFIT_ARM_PCT', 30),
+  TAKE_PROFIT_GIVEBACK_PCT: num('TAKE_PROFIT_GIVEBACK_PCT', 25),
+
   // Swap / gas
   SLIPPAGE_BPS: num('SLIPPAGE_BPS', 100),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),
