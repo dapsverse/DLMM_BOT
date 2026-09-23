@@ -220,7 +220,6 @@ export async function fetchTopPools(): Promise<MeteoraPair[]> {
 
 interface DexScreenerPair {
   baseToken?: { address?: string };
-  quoteToken?: { address?: string };
   priceChange?: { h1?: number; h6?: number; h24?: number };
   volume?: { m5?: number; h1?: number; h6?: number };
   txns?: { m5?: { buys?: number; sells?: number } };
@@ -273,7 +272,7 @@ function applyDexScreenerFields(pair: MeteoraPair, dexPair: DexScreenerPair): vo
 async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
   for (let i = 0; i < pairs.length; i += DEXSCREENER_BATCH_MAX_ADDRESSES) {
     const batch = pairs.slice(i, i + DEXSCREENER_BATCH_MAX_ADDRESSES);
-    const addresses = batch.map((p) => p.mint_x).join(',');
+    const addresses = batch.map((p) => nonSolToken(p)!.address).join(',');
     try {
       const res = await withRetry(
         () => axios.get<DexScreenerPair[]>(`${DEXSCREENER_TOKENS_BATCH_URL}/${SOLANA_CHAIN_ID}/${addresses}`, { timeout: 10_000 }),
@@ -282,14 +281,12 @@ async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
       const byMint = new Map<string, DexScreenerPair>();
       for (const dexPair of res.data) {
         const base = dexPair.baseToken?.address;
-        const quote = dexPair.quoteToken?.address;
         // First match wins per mint — same "take pairs[0]" behavior the old
         // per-pool call already had when a mint has multiple DEX pairs.
         if (base && !byMint.has(base)) byMint.set(base, dexPair);
-        if (quote && !byMint.has(quote)) byMint.set(quote, dexPair);
       }
       for (const pair of batch) {
-        const dexPair = byMint.get(pair.mint_x);
+        const dexPair = byMint.get(nonSolToken(pair)!.address);
         if (dexPair) applyDexScreenerFields(pair, dexPair);
       }
     } catch (err) {

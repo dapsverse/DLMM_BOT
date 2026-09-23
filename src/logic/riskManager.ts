@@ -149,6 +149,9 @@ export function evaluateSwitchOpportunity(input: SwitchEvaluationInput, now = Da
     const remainingMin = ((env.SWITCH_COOLDOWN_MS - (now - input.lastSwitchAtMs)) / 60_000).toFixed(1);
     return { shouldSwitch: false, reason: `switch cooldown active, ${remainingMin}min remaining` };
   }
+  if (!(input.currentSpikeRatio > 0)) {
+    return { shouldSwitch: false, reason: 'current pool spike ratio unknown or zero - no valid comparison, holding' };
+  }
   const requiredRatio = input.currentSpikeRatio * env.SWITCH_SPIKE_RATIO_MARGIN;
   if (input.candidateSpikeRatio >= requiredRatio) {
     return {

@@ -99,8 +99,8 @@ interface PoolVisit {
   enteredAtMs: number;
   entryCapitalUsd: number;
   exitedAtMs?: number;
-  /** HARD_EXIT = risk-triggered (stop-loss/rebalance-count/volume-drop). LEFT_POOL = pool no longer passes the entry screen, not a violation. */
-  exitType?: 'HARD_EXIT' | 'LEFT_POOL';
+  /** HARD_EXIT = risk-triggered (stop-loss/rebalance-count/volume-drop). LEFT_POOL = pool no longer passes the entry screen, not a violation. TAKE_PROFIT = profit-protection exit. SWITCHED = opportunistic pool-switch exit. */
+  exitType?: 'HARD_EXIT' | 'LEFT_POOL' | 'TAKE_PROFIT' | 'SWITCHED';
   exitValueUsd?: number;
   exitReasons?: string[];
   rebalanceCount: number;
@@ -421,7 +421,7 @@ async function tick(): Promise<void> {
     const visit = summary.poolHistory[summary.poolHistory.length - 1];
     if (visit) {
       visit.exitedAtMs = now;
-      visit.exitType = 'LEFT_POOL';
+      visit.exitType = 'TAKE_PROFIT';
       visit.exitValueUsd = +exitValueAfterCostUsd.toFixed(2);
       visit.exitReasons = reasons;
     }
@@ -532,7 +532,7 @@ async function tick(): Promise<void> {
     });
   }
 
-  if (position) {
+  if (position && decision !== 'REBALANCE') {
     const opportunityNow = Date.now();
     if (opportunityNow - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
       lastOpportunityScanAtMs = opportunityNow;
@@ -550,22 +550,24 @@ async function tick(): Promise<void> {
       );
       if (switchEval.shouldSwitch && scanResult.candidate) {
         const candidate = scanResult.candidate;
+        const switchExitValueUsd = Math.max(finalPositionValueUsd - gasCostUsd, 0);
         logEvent({
           type: 'SWITCH',
           fromPool: position.poolName,
           toPool: candidate.name,
           reason: switchEval.reason,
           compoundedFromUsd: +position.capitalUsd.toFixed(2),
-          exitValueUsd: +finalPositionValueUsd.toFixed(2),
+          exitValueUsd: +switchExitValueUsd.toFixed(2),
+          exitCostUsd: +gasCostUsd.toFixed(2),
         });
         const visit = summary.poolHistory[summary.poolHistory.length - 1];
         if (visit) {
           visit.exitedAtMs = opportunityNow;
-          visit.exitType = 'LEFT_POOL';
-          visit.exitValueUsd = +finalPositionValueUsd.toFixed(2);
+          visit.exitType = 'SWITCHED';
+          visit.exitValueUsd = +switchExitValueUsd.toFixed(2);
           visit.exitReasons = [switchEval.reason];
         }
-        idleCapitalUsd = finalPositionValueUsd;
+        idleCapitalUsd = switchExitValueUsd;
         position = null;
         const entered = await enterPool(candidate);
         if (entered) lastSwitchAtMs = opportunityNow;

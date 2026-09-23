@@ -161,6 +161,7 @@ async function tick(): Promise<void> {
         try {
           const newPool = await openPool(candidate.address);
           currentPool = await openInitialPosition(newPool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step);
+          currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
           lastSwitchAtMs = now;
           logger.info('[index] SWITCH complete', { from: ctx.poolAddress, to: candidate.address });
         } catch (err) {
