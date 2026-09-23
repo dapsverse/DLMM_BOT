@@ -312,6 +312,21 @@ async function hydrateMintAuthority(pairs: MeteoraPair[]): Promise<void> {
   });
 }
 
+export interface FilterOpts {
+  /**
+   * Skip the checks that only make sense when SIZING new capital into a
+   * pool (maxTvlUsd, minVolTvlRatio, maxMemecoinMarketCapUsd) — a pool
+   * growing past these ceilings is a symptom of the position SUCCEEDING
+   * (price/liquidity up), not of it going bad. Used when re-screening a
+   * pool we're already holding to decide "stay" vs "leave" — genuine
+   * health/danger checks (min TVL floor, min volume, holders, mint/freeze
+   * authority, crash-guard, trend floor, activity cascade, tx count,
+   * wash-trade guard) still apply either way. Never set true for a fresh
+   * multi-candidate market scan — that's exactly where these checks matter.
+   */
+  skipSizingChecks?: boolean;
+}
+
 /**
  * Applies the full memecoin screen (TVL/volume/ratio/age/mcap/holders/
  * freeze+mint authority/crash-guard) to an already-fetched pair list and
@@ -320,7 +335,7 @@ async function hydrateMintAuthority(pairs: MeteoraPair[]): Promise<void> {
  * refreshing its held pool every tick) can re-filter without an extra
  * network round-trip.
  */
-export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerConfig): Promise<MeteoraPair[]> {
+export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerConfig, opts: FilterOpts = {}): Promise<MeteoraPair[]> {
   const preFiltered = pairs.filter((pair) => {
     if (isBlacklisted(pair.address, config.blacklistPools)) return false;
 
@@ -329,9 +344,9 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     if (!Number.isFinite(tvl) || !Number.isFinite(vol24h) || tvl <= 0) return false;
 
     if (tvl < config.minTvlUsd) return false;
-    if (tvl > config.maxTvlUsd) return false;
+    if (!opts.skipSizingChecks && tvl > config.maxTvlUsd) return false;
     if (vol24h < config.minVolume24hUsd) return false;
-    if (vol24h / tvl < config.minVolTvlRatio) return false;
+    if (!opts.skipSizingChecks && vol24h / tvl < config.minVolTvlRatio) return false;
     if (pair.bin_step < config.minBinStep) return false;
 
     const ageHours = (Date.now() - pair.createdAtMs) / 3_600_000;
@@ -341,7 +356,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // pass market-cap ceiling / holder floor / freeze-authority checks.
     const memecoin = nonSolToken(pair);
     if (!memecoin) return false;
-    if (memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) return false;
+    if (!opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) return false;
     if (memecoin.holders < config.minTokenHolders) return false;
     if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) return false;
 
@@ -496,7 +511,7 @@ export interface PoolEligibility {
  * `undefined` (hydration never ran, e.g. pair failed the pre-hydration
  * checks first) are silently skipped, not reported as failures.
  */
-export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig): string[] {
+export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts: FilterOpts = {}): string[] {
   const reasons: string[] = [];
   if (isBlacklisted(pair.address, config.blacklistPools)) reasons.push('blacklisted');
 
@@ -506,9 +521,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig): str
     reasons.push('invalid tvl/volume data');
   } else {
     if (tvl < config.minTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} < min $${config.minTvlUsd}`);
-    if (tvl > config.maxTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} > max $${config.maxTvlUsd}`);
+    if (!opts.skipSizingChecks && tvl > config.maxTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} > max $${config.maxTvlUsd}`);
     if (vol24h < config.minVolume24hUsd) reasons.push(`vol24h $${vol24h.toFixed(0)} < min $${config.minVolume24hUsd}`);
-    if (vol24h / tvl < config.minVolTvlRatio) reasons.push(`vol/tvl ${(vol24h / tvl).toFixed(2)}x < min ${config.minVolTvlRatio}x`);
+    if (!opts.skipSizingChecks && vol24h / tvl < config.minVolTvlRatio) reasons.push(`vol/tvl ${(vol24h / tvl).toFixed(2)}x < min ${config.minVolTvlRatio}x`);
   }
   if (pair.bin_step < config.minBinStep) reasons.push(`bin_step ${pair.bin_step} < min ${config.minBinStep}`);
   const ageHours = (Date.now() - pair.createdAtMs) / 3_600_000;
@@ -518,7 +533,7 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig): str
   if (!memecoin) {
     reasons.push('no non-SOL side found');
   } else {
-    if (memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) reasons.push(`market cap $${memecoin.marketCapUsd.toFixed(0)} > max $${config.maxMemecoinMarketCapUsd}`);
+    if (!opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) reasons.push(`market cap $${memecoin.marketCapUsd.toFixed(0)} > max $${config.maxMemecoinMarketCapUsd}`);
     if (memecoin.holders < config.minTokenHolders) reasons.push(`holders ${memecoin.holders} < min ${config.minTokenHolders}`);
     if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) reasons.push('freeze authority not disabled');
     if (config.requireMintAuthorityDisabled && memecoin.mintAuthorityRevoked !== true) reasons.push('mint authority not confirmed revoked');
@@ -554,20 +569,25 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig): str
 }
 
 /**
- * Re-checks a single already-held pool against the full entry screen —
- * used when an idle/out-of-range position needs to decide "stay in this
- * pool (still qualifies) or leave and find a different one (no longer
- * does)". Not subject to MIN_SCAN_INTERVAL_MS (that throttle guards the
- * expensive full-market scan; this is one pool, called only when a
- * rebalance is already happening, not on every tick).
+ * Re-checks a single already-held pool against the entry screen — used
+ * when an idle/out-of-range position needs to decide "stay in this pool
+ * (still qualifies) or leave and find a different one (no longer does)".
+ * Always skips the capital-sizing checks (maxTvlUsd/minVolTvlRatio/
+ * maxMemecoinMarketCapUsd, see FilterOpts) — this is a "should I keep
+ * holding" decision, not a "should new capital go here" decision, so a
+ * pool that simply grew past those ceilings (i.e. succeeded) shouldn't
+ * get force-exited for it. Not subject to MIN_SCAN_INTERVAL_MS (that
+ * throttle guards the expensive full-market scan; this is one pool,
+ * called only when a rebalance is already happening, not on every tick).
  */
 export async function isPoolStillEligible(poolAddress: string, config: ScannerConfig): Promise<PoolEligibility> {
   const pairs = await fetchTopPools();
   const pool = pairs.find((p) => p.address === poolAddress);
   if (!pool) return { eligible: false, reasons: ['pool fell out of the top-200-by-volume window'] };
-  const passed = await filterAndRankPools([pool], config);
+  const opts: FilterOpts = { skipSizingChecks: true };
+  const passed = await filterAndRankPools([pool], config, opts);
   const eligible = passed.length > 0;
-  return { eligible, reasons: eligible ? [] : poolRejectReasons(pool, config) };
+  return { eligible, reasons: eligible ? [] : poolRejectReasons(pool, config, opts) };
 }
 
 /**

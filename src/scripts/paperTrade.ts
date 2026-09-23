@@ -460,11 +460,15 @@ async function tick(): Promise<void> {
       position.lastRebalanceAtMs = now; // respect cooldown before claiming again
     } else {
       const compoundedToUsd = Math.max(currentValueUsd - gasCostUsd, 0);
-      // Re-check the held pool against the full entry screen using the
-      // SAME fresh `live` data already fetched this tick (no extra
-      // request) — decides "reopen here" vs "leave for a fresh scan",
-      // instead of blindly reopening in whatever pool we happened to be in.
-      const stillEligible = (await filterAndRankPools([live], defaultScannerConfig(blacklist))).length > 0;
+      // Re-check the held pool against the entry screen using the SAME
+      // fresh `live` data already fetched this tick (no extra request) —
+      // decides "reopen here" vs "leave for a fresh scan". Skips the
+      // capital-sizing checks (TVL ceiling/vol-TVL-ratio/mcap ceiling) —
+      // this is a "should I keep holding" decision; a pool that simply
+      // grew past those ceilings succeeded, it didn't go bad. See
+      // FilterOpts in meteoraScanner.ts.
+      const reScreenOpts = { skipSizingChecks: true };
+      const stillEligible = (await filterAndRankPools([live], defaultScannerConfig(blacklist), reScreenOpts)).length > 0;
       const visit = summary.poolHistory[summary.poolHistory.length - 1];
 
       if (stillEligible) {
@@ -497,7 +501,7 @@ async function tick(): Promise<void> {
         // — leave with the compounded capital instead of forcing a reopen
         // here. Not a violation, so no blacklist (unlike HARD_EXIT) — the
         // next tick's scan is free to reconsider it later if it recovers.
-        const rejectReasons = poolRejectReasons(live, defaultScannerConfig(blacklist));
+        const rejectReasons = poolRejectReasons(live, defaultScannerConfig(blacklist), reScreenOpts);
         const leaveReasons = [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening', ...rejectReasons];
         logEvent({
           type: 'LEAVE_POOL',
