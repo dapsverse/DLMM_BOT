@@ -11,6 +11,13 @@ export const METEORA_POOLS_URL = 'https://dlmm.datapi.meteora.ag/pools';
 /** How many top-by-volume pools to pull per scan (there are 100k+ pools total; we only care about the top slice anyway since MIN_24H_VOLUME_USD already floors out the long tail). */
 export const METEORA_POOLS_PAGE_SIZE = 200;
 export const DEXSCREENER_TOKEN_URL = 'https://api.dexscreener.com/latest/dex/tokens';
+// Batch endpoint: up to 30 comma-separated token addresses per call, billed
+// as ONE request against DexScreener's 300/min limit — the fix for this
+// week's 429 storms, which were caused by one-call-per-pool concurrency,
+// not by polling too often. https://docs.dexscreener.com/api/reference
+export const DEXSCREENER_TOKENS_BATCH_URL = 'https://api.dexscreener.com/tokens/v1';
+export const DEXSCREENER_BATCH_MAX_ADDRESSES = 30;
+export const SOLANA_CHAIN_ID = 'solana';
 
 /** Minimum allowed gap between pool-list polls, enforced regardless of config. */
 export const MIN_SCAN_INTERVAL_MS = 60_000;

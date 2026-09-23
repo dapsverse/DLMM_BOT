@@ -4,6 +4,9 @@ import {
   METEORA_POOLS_URL,
   METEORA_POOLS_PAGE_SIZE,
   DEXSCREENER_TOKEN_URL,
+  DEXSCREENER_TOKENS_BATCH_URL,
+  DEXSCREENER_BATCH_MAX_ADDRESSES,
+  SOLANA_CHAIN_ID,
   WSOL_MINT,
   MIN_SCAN_INTERVAL_MS,
   PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT,
@@ -15,10 +18,9 @@ import { isRateLimitError, withRetry, mapWithConcurrency } from '../utils/retry.
 import { isMintAuthorityRevoked } from './rpc.js';
 import { logger } from '../utils/logger.js';
 
-// ponytail: flat concurrency caps, not a real rate limiter — good enough to
-// keep public/free-tier APIs from 429-storming on every scan; tune down if
-// running against a free-tier RPC, up if on a paid one.
-const DEXSCREENER_CONCURRENCY = 5;
+// ponytail: flat concurrency cap for RPC hydration, not a real rate limiter —
+// good enough to keep public/free-tier RPC from 429-storming on every scan;
+// tune down if running against a free-tier RPC, up if on a paid one.
 const RPC_HYDRATION_CONCURRENCY = 4;
 
 // ponytail: first-cut wash-trading heuristic, hardcoded not env-configurable
@@ -36,7 +38,7 @@ const WASH_TRADE_FLAT_PRICE_BAND_PCT = 2;
  * hydrated; caps at a large-but-finite number instead of Infinity when the
  * prior baseline is ~0 so sorting stays well-defined.
  */
-function volumeSpikeRatio(p: MeteoraPair): number {
+export function volumeSpikeRatio(p: MeteoraPair): number {
   const h6 = p.volumeH6Usd;
   const h1 = p.volume1hUsd;
   if (h6 === undefined) return 0;
@@ -217,6 +219,8 @@ export async function fetchTopPools(): Promise<MeteoraPair[]> {
 }
 
 interface DexScreenerPair {
+  baseToken?: { address?: string };
+  quoteToken?: { address?: string };
   priceChange?: { h1?: number; h6?: number; h24?: number };
   volume?: { m5?: number; h1?: number; h6?: number };
   txns?: { m5?: { buys?: number; sells?: number } };
@@ -240,35 +244,61 @@ export async function getVolume1hUsd(mint: string): Promise<number | null> {
 }
 
 /**
- * Hydrates price-change fields (1h/6h/24h) and 5-minute volume from
- * DexScreener for a short candidate list (post TVL/volume filter, not the
- * whole pair list — keeps calls bounded). Everything comes back in one
- * response, no extra request cost. Best-effort: a failed lookup just
- * leaves the fields undefined, which the crash-guard/uptrend/activity
- * filters all treat as "unknown, don't block".
+ * Applies one hydrated DexScreener pair's fields onto our MeteoraPair —
+ * shared by the batch hydration below so the field-mapping logic exists
+ * in exactly one place.
+ */
+function applyDexScreenerFields(pair: MeteoraPair, dexPair: DexScreenerPair): void {
+  const priceChange = dexPair.priceChange;
+  if (typeof priceChange?.h1 === 'number') pair.priceChange1hPct = priceChange.h1;
+  if (typeof priceChange?.h6 === 'number') pair.priceChange6hPct = priceChange.h6;
+  if (typeof priceChange?.h24 === 'number') pair.priceChange24hPct = priceChange.h24;
+  if (typeof dexPair.volume?.m5 === 'number') pair.volumeM5Usd = dexPair.volume.m5;
+  if (typeof dexPair.volume?.h6 === 'number') pair.volumeH6Usd = dexPair.volume.h6;
+  const m5Txns = dexPair.txns?.m5;
+  if (typeof m5Txns?.buys === 'number' && typeof m5Txns?.sells === 'number') pair.txCountM5 = m5Txns.buys + m5Txns.sells;
+}
+
+/**
+ * Hydrates price-change fields (1h/6h/24h), volume (m5/h6), and 5-minute
+ * tx count from DexScreener for a candidate list, via the batched
+ * `/tokens/v1/{chainId}/{tokenAddresses}` endpoint (<=30 addresses/call,
+ * billed as ONE request each — see DEXSCREENER_TOKENS_BATCH_URL comment).
+ * Sequential batches, no concurrency wrapper needed (concurrency was only
+ * ever there to avoid slamming the one-call-per-pool endpoint; the batch
+ * endpoint removes the reason for it). Best-effort: a failed batch just
+ * leaves that batch's pools' DexScreener fields undefined, which every
+ * downstream filter already treats as "unknown, don't block".
  */
 async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
-  await mapWithConcurrency(pairs, DEXSCREENER_CONCURRENCY, async (pair) => {
+  for (let i = 0; i < pairs.length; i += DEXSCREENER_BATCH_MAX_ADDRESSES) {
+    const batch = pairs.slice(i, i + DEXSCREENER_BATCH_MAX_ADDRESSES);
+    const addresses = batch.map((p) => p.mint_x).join(',');
     try {
       const res = await withRetry(
-        () => axios.get<{ pairs?: DexScreenerPair[] }>(`${DEXSCREENER_TOKEN_URL}/${pair.mint_x}`, { timeout: 10_000 }),
-        { maxRetries: 2, baseDelayMs: HTTP_RETRY_BASE_DELAY_MS, isRetryable: isRateLimitError, label: 'dexscreener:token' },
+        () => axios.get<DexScreenerPair[]>(`${DEXSCREENER_TOKENS_BATCH_URL}/${SOLANA_CHAIN_ID}/${addresses}`, { timeout: 10_000 }),
+        { maxRetries: 2, baseDelayMs: HTTP_RETRY_BASE_DELAY_MS, isRetryable: isRateLimitError, label: 'dexscreener:tokens-batch' },
       );
-      const dexPair = res.data.pairs?.[0];
-      const priceChange = dexPair?.priceChange;
-      if (typeof priceChange?.h1 === 'number') pair.priceChange1hPct = priceChange.h1;
-      if (typeof priceChange?.h6 === 'number') pair.priceChange6hPct = priceChange.h6;
-      if (typeof priceChange?.h24 === 'number') pair.priceChange24hPct = priceChange.h24;
-      if (typeof dexPair?.volume?.m5 === 'number') pair.volumeM5Usd = dexPair.volume.m5;
-      if (typeof dexPair?.volume?.h6 === 'number') pair.volumeH6Usd = dexPair.volume.h6;
-      const m5Txns = dexPair?.txns?.m5;
-      if (typeof m5Txns?.buys === 'number' && typeof m5Txns?.sells === 'number') pair.txCountM5 = m5Txns.buys + m5Txns.sells;
+      const byMint = new Map<string, DexScreenerPair>();
+      for (const dexPair of res.data) {
+        const base = dexPair.baseToken?.address;
+        const quote = dexPair.quoteToken?.address;
+        // First match wins per mint — same "take pairs[0]" behavior the old
+        // per-pool call already had when a mint has multiple DEX pairs.
+        if (base && !byMint.has(base)) byMint.set(base, dexPair);
+        if (quote && !byMint.has(quote)) byMint.set(quote, dexPair);
+      }
+      for (const pair of batch) {
+        const dexPair = byMint.get(pair.mint_x);
+        if (dexPair) applyDexScreenerFields(pair, dexPair);
+      }
     } catch (err) {
-      logger.debug(`[scanner] dexscreener hydration failed for ${pair.address}`, {
+      logger.debug('[scanner] dexscreener batch hydration failed', {
+        addresses,
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  });
+  }
 }
 
 /**
