@@ -91,6 +91,17 @@ export const env = {
   // pass every other filter while sitting at literally 0 trades right now.
   MIN_TX_COUNT_M5: num('MIN_TX_COUNT_M5', 20),
 
+  // Entry-only overextension ceiling (2026-09-24) — mirror of the crash
+  // guard (PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT, constants.ts) but for the
+  // pump direction. The ranking already picks the strongest-accelerating
+  // candidate; without a ceiling that risks entering right at/near a local
+  // top for a memecoin that's about to mean-revert. Confirmed live:
+  // post-entry 20min windows routinely showed -8% to -28% troughs.
+  // Low-confidence starting guess, not yet validated — tune once entries
+  // start logging their own priceChange1hPct at decision time (see
+  // paperTrade.ts ENTER/SWITCH events).
+  MAX_PRICE_CHANGE_1H_PUMP_PCT: num('MAX_PRICE_CHANGE_1H_PUMP_PCT', 60),
+
   // Position sizing — bin radius is DERIVED per-pool from bin_step to hit
   // this target price coverage (a fixed bin-count radius covers wildly
   // different % price ranges across pools with different bin_step — e.g.

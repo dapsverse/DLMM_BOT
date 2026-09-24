@@ -1,6 +1,6 @@
 import { env } from './config/env.js';
 import { getWalletPubkey, getWalletSolBalance } from './services/solana.js';
-import { scanPools, defaultScannerConfig, getVolume1hUsd, scanForBetterOpportunity } from './services/meteoraScanner.js';
+import { scanPools, defaultScannerConfig, getVolume1hUsd, scanForBetterOpportunity, volumeSpikeRatio } from './services/meteoraScanner.js';
 import { openPool } from './services/meteoraDLMM.js';
 import {
   openInitialPosition,
@@ -49,7 +49,17 @@ async function tryEnterPool(): Promise<void> {
         candidate.bin_step,
       );
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
-      logger.info(`[index] entered pool ${candidate.address}`, { capitalSol: currentCapitalSol });
+      // Decision-context snapshot (2026-09-24) — same reasoning as
+      // paperTrade.ts's ENTER event: without this, after-the-fact "was this
+      // entry chasing an already-extended pump?" analysis has to guess.
+      logger.info(`[index] entered pool ${candidate.address}`, {
+        capitalSol: currentCapitalSol,
+        priceChange1hPct: candidate.priceChange1hPct ?? null,
+        priceChange6hPct: candidate.priceChange6hPct ?? null,
+        priceChange24hPct: candidate.priceChange24hPct ?? null,
+        volumeSpikeRatio: +volumeSpikeRatio(candidate).toFixed(3),
+        buyRatio1h: candidate.buyRatio1h ?? null,
+      });
       return;
     } catch (err) {
       logger.error(`[index] failed to enter pool ${candidate.address}, trying next candidate`, {
@@ -153,7 +163,14 @@ async function tick(): Promise<void> {
       },
       now,
     );
-    logger.info('[index] opportunity scan', { decision: switchEval.shouldSwitch ? 'SWITCH' : 'HOLD', reason: switchEval.reason });
+    logger.info('[index] opportunity scan', {
+      decision: switchEval.shouldSwitch ? 'SWITCH' : 'HOLD',
+      reason: switchEval.reason,
+      currentSpikeRatio: +scanResult.currentSpikeRatio.toFixed(3),
+      candidateSpikeRatio: +scanResult.candidateSpikeRatio.toFixed(3),
+      currentPriceTrendPct: scanResult.currentPriceTrendPct ?? null,
+      candidateBuyRatio1h: scanResult.candidateBuyRatio1h ?? null,
+    });
     if (switchEval.shouldSwitch && scanResult.candidate) {
       const candidate = scanResult.candidate;
       currentCapitalSol = await executeCleanExit(ctx, 'SWITCH');

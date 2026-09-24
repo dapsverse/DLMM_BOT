@@ -29,6 +29,11 @@ const RPC_HYDRATION_CONCURRENCY = 4;
 const WASH_TRADE_VOL_TVL_RATIO_THRESHOLD = 30;
 const WASH_TRADE_FLAT_PRICE_BAND_PCT = 2;
 
+// Same threshold/rationale as SWITCH_CANDIDATE_MIN_BUY_RATIO in
+// riskManager.ts — buys must be the majority for activity to count as a
+// genuine pump signal rather than a sell-off wearing the same $ number.
+const ENTRY_MIN_BUY_RATIO_1H = 0.5;
+
 /**
  * This hour's volume vs. the preceding 5h's average pace (via DexScreener's
  * 6h volume figure) — a ratio well above 1 means volume just surged above
@@ -192,6 +197,8 @@ export interface ScannerConfig {
   minRecentActivityRatio: number;
   /** Absolute floor on 5-minute buy+sell count — a relative-to-24h-average ratio can still pass with 0 real trades if the pool's own baseline is already weak; this is a hard, non-relative "is anyone actually trading right now" check. */
   minTxCountM5: number;
+  /** Entry-only ceiling on 1h price change — a pool already up more than this in the last hour is more likely near/past a local top than early in a move. See the overextension-ceiling check in filterAndRankPools. */
+  maxPriceChange1hPumpPct: number;
   blacklistPools: Map<string, number>; // poolAddress -> blacklisted-until (epoch ms)
 }
 
@@ -333,14 +340,16 @@ async function hydrateMintAuthority(pairs: MeteoraPair[]): Promise<void> {
 export interface FilterOpts {
   /**
    * Skip the checks that only make sense when SIZING new capital into a
-   * pool (maxTvlUsd, minVolTvlRatio, maxMemecoinMarketCapUsd) — a pool
-   * growing past these ceilings is a symptom of the position SUCCEEDING
-   * (price/liquidity up), not of it going bad. Used when re-screening a
-   * pool we're already holding to decide "stay" vs "leave" — genuine
-   * health/danger checks (min TVL floor, min volume, holders, mint/freeze
-   * authority, crash-guard, trend floor, activity cascade, tx count,
-   * wash-trade guard) still apply either way. Never set true for a fresh
-   * multi-candidate market scan — that's exactly where these checks matter.
+   * pool (maxTvlUsd, minVolTvlRatio, maxMemecoinMarketCapUsd,
+   * maxPriceChange1hPumpPct) — a pool growing past these ceilings, or
+   * pumping hard, is a symptom of the position SUCCEEDING (price/liquidity
+   * up), not of it going bad — don't force an exit on a held winner.
+   * Used when re-screening a pool we're already holding to decide "stay"
+   * vs "leave" — genuine health/danger checks (min TVL floor, min volume,
+   * holders, mint/freeze authority, crash-guard, trend floor, activity
+   * cascade, tx count, wash-trade guard, buy-ratio) still apply either
+   * way. Never set true for a fresh multi-candidate market scan — that's
+   * exactly where these checks matter.
    */
   skipSizingChecks?: boolean;
 }
@@ -398,6 +407,18 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
       return false;
     }
 
+    // Overextension ceiling — mirror of the crash guard above, but for the
+    // other direction. The ranking below picks the biggest-already-moved
+    // pool by design; without a ceiling that means chasing pools that just
+    // went parabolic, which is exactly when a memecoin is most likely to
+    // mean-revert hard. Confirmed live 2026-09-24: post-entry 20min windows
+    // routinely show -8% to -28% troughs shortly after entry. Entry-only
+    // (skipSizingChecks) — a HELD position pumping +50%+ in an hour is
+    // exactly the outcome this bot wants, not a reason to force an exit.
+    if (!opts.skipSizingChecks && pair.priceChange1hPct !== undefined && pair.priceChange1hPct > config.maxPriceChange1hPumpPct) {
+      return false;
+    }
+
     // Uptrend filter: good volume alone put a pool like JEANPHIL-SOL at #1
     // even mid-downtrend. 6h is steadier than 1h for memecoin noise — same
     // "unknown, don't block" policy as the crash-guard above (a failed
@@ -444,36 +465,67 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
       // fail-closed: unknown (RPC lookup failed) or still-active mint authority both block the pool
       if (!memecoin || memecoin.mintAuthorityRevoked !== true) return false;
     }
+
+    // A pool's $ volume number doesn't say who's trading which direction —
+    // require buys to actually dominate sells in the last hour before
+    // trusting the activity as a real "pump forming" signal, not a dump
+    // wearing the same $ number. Health check like the ones above, not a
+    // sizing check — applies to a re-screen too (buys flipping to
+    // sell-dominant while holding is itself a reason to reconsider, same
+    // as the wash-trade/crash-guard checks). Unknown (no DexScreener h1 tx
+    // data) doesn't block, same policy as the rest of this screen.
+    if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= ENTRY_MIN_BUY_RATIO_1H) return false;
+
     return true;
   });
 
-  // Two-stage pick, not a single blended score: a composite score let raw
-  // vol/TVL ratio dominate (e.g. a 27x-ratio pool with flat/negative 6h
-  // still won over a genuinely-trending one) — trend was only ever a small
-  // multiplier, never the deciding factor. Instead: shortlist the
-  // strongest 6h trends first, THEN pick within just those. Trend gates
-  // which pools are even in contention; the tie-break only ranks within
-  // that trend-qualified set.
-  // Missing 6h data (`?? -Infinity`) sorts to the bottom of the trend
-  // shortlist — never lets an unconfirmed trend take a slot from a
-  // confirmed one, though it can still surface if too few candidates exist.
-  //
-  // Tie-break is volume-SPIKE ratio (this hour's pace vs. the preceding 5h's
-  // pace, via DexScreener's 6h volume), not static vol/TVL ratio. A high
-  // vol/TVL ratio can just mean a pool that's always been busy — it doesn't
-  // tell you interest is fresh RIGHT NOW. A spike (current hour running well
-  // above its own recent baseline) does, and combined with the trend gate
-  // above ("uptrend + volume spike") is a real breakout-confirmation
-  // pattern, not just "was active at some point in the last 24h."
-  const trendShortlist = candidates
+  const spikeShortlist = rankCandidates(candidates);
+  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters, top ${spikeShortlist.length} shortlisted by volume spike then buy-dominance then freshness`);
+  return spikeShortlist;
+}
+
+/**
+ * Ranking rewritten 2026-09-24 to chase acceleration, not magnitude. The old
+ * primary sort was raw priceChange6hPct descending — literally "pick
+ * whoever already moved the most in 6h." For a mean-reverting memecoin that
+ * selects for pools near/past their local top, not pools about to start
+ * moving: confirmed live, post-entry 20min windows routinely showed -8% to
+ * -28% troughs right after entry. requireUptrend (elsewhere) already gates
+ * "must be positive over 6h" — that's enough of a qualifier; ranking on TOP
+ * of that by raw magnitude just doubles down on lateness.
+ *
+ * Three stages:
+ *  1. Shortlist by volumeSpikeRatio (this hour's pace vs. the preceding 5h's)
+ *     — a RATE signal, not a cumulative one. A pool up only +5% over 6h but
+ *     running 3x its own recent pace right now is plausibly earlier-stage
+ *     than one up +40% over 6h whose pace has already cooled back toward 1x
+ *     (i.e. already past its move).
+ *  2. Tie-break by buyRatio1h descending — among similarly-accelerating
+ *     candidates, prefer the one where buys actually dominate (genuine
+ *     accumulation) over one where the $ volume could just as well be
+ *     distribution. Missing data (`?? 0`) sorts last.
+ *  3. Tie-break by priceChange24hPct ascending — among otherwise similar
+ *     candidates, prefer the one whose 24h background is flatter (the move
+ *     is new) over one that's already a known multi-hour/day runner (most
+ *     of its gain happened before the last 6h). Missing data (`?? Infinity`)
+ *     sorts last.
+ *
+ * Pure/exported (no I/O) so it's independently testable without network —
+ * see src/scripts/checkRankCandidates.ts.
+ */
+export function rankCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
+  const shortlist = candidates
     .slice()
-    .sort((a, b) => (b.priceChange6hPct ?? -Infinity) - (a.priceChange6hPct ?? -Infinity))
+    .sort((a, b) => volumeSpikeRatio(b) - volumeSpikeRatio(a))
     .slice(0, TREND_SHORTLIST_SIZE);
 
-  trendShortlist.sort((a, b) => volumeSpikeRatio(b) - volumeSpikeRatio(a));
+  shortlist.sort((a, b) => {
+    const buyDiff = (b.buyRatio1h ?? 0) - (a.buyRatio1h ?? 0);
+    if (buyDiff !== 0) return buyDiff;
+    return (a.priceChange24hPct ?? Infinity) - (b.priceChange24hPct ?? Infinity);
+  });
 
-  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters, top ${trendShortlist.length} shortlisted by trend then volume spike`);
-  return trendShortlist;
+  return shortlist;
 }
 
 export interface OpportunityScanResult {
@@ -573,6 +625,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   if (pair.priceChange1hPct !== undefined && pair.priceChange1hPct < PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT) {
     reasons.push(`1h crash guard ${pair.priceChange1hPct.toFixed(2)}% < ${PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT}%`);
   }
+  if (!opts.skipSizingChecks && pair.priceChange1hPct !== undefined && pair.priceChange1hPct > config.maxPriceChange1hPumpPct) {
+    reasons.push(`1h overextension ${pair.priceChange1hPct.toFixed(2)}% > max ${config.maxPriceChange1hPumpPct}%`);
+  }
   if (config.requireUptrend && pair.priceChange6hPct !== undefined && pair.priceChange6hPct < config.minPriceChange6hPct) {
     reasons.push(`6h trend ${pair.priceChange6hPct.toFixed(2)}% < min ${config.minPriceChange6hPct}%`);
   }
@@ -594,6 +649,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
     Math.abs(pair.priceChange1hPct) < WASH_TRADE_FLAT_PRICE_BAND_PCT
   ) {
     reasons.push(`possible wash trading: vol/tvl ${volTvlRatioNow.toFixed(1)}x with flat 1h price ${pair.priceChange1hPct.toFixed(2)}%`);
+  }
+  if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= ENTRY_MIN_BUY_RATIO_1H) {
+    reasons.push(`1h buy ratio ${(pair.buyRatio1h * 100).toFixed(0)}% <= ${ENTRY_MIN_BUY_RATIO_1H * 100}% - sell-dominant, not a genuine pump signal`);
   }
 
   return reasons;
@@ -654,6 +712,7 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     minPriceChange6hPct: env.MIN_PRICE_CHANGE_6H_PCT,
     minRecentActivityRatio: env.MIN_RECENT_ACTIVITY_RATIO,
     minTxCountM5: env.MIN_TX_COUNT_M5,
+    maxPriceChange1hPumpPct: env.MAX_PRICE_CHANGE_1H_PUMP_PCT,
     blacklistPools,
   };
 }

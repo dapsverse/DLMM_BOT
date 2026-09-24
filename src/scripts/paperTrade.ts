@@ -46,6 +46,7 @@ import {
   solToken,
   poolRejectReasons,
   scanForBetterOpportunity,
+  volumeSpikeRatio,
   type MeteoraPair,
 } from '../services/meteoraScanner.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from '../logic/riskManager.js';
@@ -301,6 +302,14 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
     memePriceUsd: meme.priceUsd,
     tvlUsd: Number(chosen.liquidity),
     vol24hUsd: chosen.trade_volume_24h,
+    // Decision-context snapshot (2026-09-24) — without this, after-the-fact
+    // "was this entry chasing an already-extended pump?" analysis has to
+    // guess. See CLAUDE.md / SCREEN_RULE.MD for the P0-P4 tuning this fed into.
+    priceChange1hPct: chosen.priceChange1hPct ?? null,
+    priceChange6hPct: chosen.priceChange6hPct ?? null,
+    priceChange24hPct: chosen.priceChange24hPct ?? null,
+    volumeSpikeRatio: +volumeSpikeRatio(chosen).toFixed(3),
+    buyRatio1h: chosen.buyRatio1h ?? null,
     centerBinId,
     binRange: centerBinId === null ? null : [centerBinId - computeBinRadius(chosen.bin_step), centerBinId + computeBinRadius(chosen.bin_step)],
   });
@@ -608,6 +617,13 @@ async function tick(): Promise<void> {
           exitValueUsd: +switchExitValueUsd.toFixed(2),
           exitValueSol: +(switchExitValueUsd / sol.priceUsd).toFixed(4),
           exitCostUsd: +gasCostUsd.toFixed(2),
+          // Structured decision-context (2026-09-24), same reasoning as
+          // enterPool's log — `reason` already has these as text but not
+          // machine-parseable for later analysis.
+          currentSpikeRatio: +scanResult.currentSpikeRatio.toFixed(3),
+          candidateSpikeRatio: +scanResult.candidateSpikeRatio.toFixed(3),
+          currentPriceTrendPct: scanResult.currentPriceTrendPct ?? null,
+          candidateBuyRatio1h: scanResult.candidateBuyRatio1h ?? null,
         });
         const visit = summary.poolHistory[summary.poolHistory.length - 1];
         if (visit) {

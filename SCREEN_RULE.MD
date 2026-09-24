@@ -65,31 +65,53 @@ Survivors of stage 1 get hydrated (stage 2), then stage 3 runs.
 |---|---|---|---|
 | DexScreener hydration succeeded **[entry-only]** | — (`dexHydrationFailed` flag) | reject if batch fetch failed | N/A — this rule exists specifically to NOT be lenient on missing data. Skipped on re-screen (a transient 429 shouldn't force-exit a held position). |
 | 1h crash guard | `PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT` (constants.ts, not env) | reject if 1h price < -12% | Unknown → pass (don't block on a failed lookup). |
+| 1h overextension ceiling **[entry-only, P1]** | `MAX_PRICE_CHANGE_1H_PUMP_PCT` | reject if 1h price > 60% | Unknown → pass. Added 2026-09-24: mirror of the crash guard for the pump direction — ranking below picks the most-accelerating pool, so without a ceiling that risks entering right at/near a local top. Entry-only: a HELD position pumping hard is the outcome this bot wants, not a reason to exit. **Low-confidence default (60%), not yet validated live.** |
 | 6h uptrend floor | `REQUIRE_UPTREND` + `MIN_PRICE_CHANGE_6H_PCT` | true / 0% | Only enforced if `REQUIRE_UPTREND`. Unknown → pass. Was -5% (merely "not crashing"); tightened to require genuine positive momentum. |
 | 1h activity vs. own 24h pace | `MIN_RECENT_ACTIVITY_RATIO` | 0.15 (15%) | Meteora's own volume field, always present — no unknown case. |
 | 5m activity vs. own 24h pace | same `MIN_RECENT_ACTIVITY_RATIO` | 15% of `vol24h/288` | Unknown (`volumeM5Usd` undefined) → pass. |
 | 5m tx count absolute floor | `MIN_TX_COUNT_M5` | 20 trades (buys+sells) | Unknown → pass. Exists because a weak-24h-baseline pool can pass the ratio check above with 0 real trades. |
 | Wash-trade heuristic | `WASH_TRADE_VOL_TVL_RATIO_THRESHOLD` / `WASH_TRADE_FLAT_PRICE_BAND_PCT` (constants.ts) | reject if vol/TVL > 30x AND \|1h price change\| < 2% | Unknown 1h price → pass. Heuristic, not a guarantee — organic high-ratio/flat-price pools exist too. |
 | Mint authority revoked | `REQUIRE_MINT_AUTHORITY_DISABLED` | true (required) | **Fail-closed** — unlike every other unknown-tolerant rule above, unknown/failed RPC lookup here REJECTS the pool. |
+| 1h buy-ratio floor **[P2]** | `ENTRY_MIN_BUY_RATIO_1H` (meteoraScanner.ts constant, 0.5, not env) | reject if 1h buyRatio ≤ 50% | Unknown → pass. Added 2026-09-24: a $ volume number is the same whether it's genuine buying or a sell-off — require buys to dominate before trusting the activity as a real signal. **Applies in BOTH modes** (health check, not a sizing check — buys flipping sell-dominant while holding is itself a reason to reconsider). |
 
 ---
 
-## Ranking (after all filters pass)
+## Ranking (after all filters pass) — rewritten 2026-09-24 (P3 + P4)
 
-Not a filter — decides which surviving candidate(s) win, two-stage:
+Not a filter — decides which surviving candidate(s) win. **Old version**
+sorted by raw `priceChange6hPct` descending (biggest cumulative mover),
+tie-broken by `volumeSpikeRatio`. Confirmed live this picks pools near/past
+their local top for a mean-reverting memecoin — post-entry 20min windows
+routinely showed **-8% to -28% troughs** right after entry. New order
+chases acceleration instead of magnitude, three stages (`rankCandidates()`,
+exported + independently testable, see `src/scripts/checkRankCandidates.ts`):
 
-1. **Trend shortlist**: sort survivors by 6h price change descending, take
-   top `TREND_SHORTLIST_SIZE` (3, constants.ts). Missing 6h data sorts last
-   (never displaces a confirmed trend, but can still surface if too few
-   candidates exist).
-2. **Tie-break within the shortlist**: sort by `volumeSpikeRatio` descending
-   — this hour's volume pace vs. the preceding 5h's pace (via DexScreener's
-   6h volume figure). Not a raw vol/TVL ratio — a spike means volume is
-   running hot *right now* relative to the pool's own recent baseline, not
-   just "has always been busy."
+1. **Shortlist by `volumeSpikeRatio` descending** — this hour's pace vs.
+   the preceding 5h's (a RATE signal). A pool up only +5% over 6h but
+   running 3x its own recent pace right now is plausibly earlier-stage than
+   one up +40% over 6h whose pace already cooled back toward 1x. Take top
+   `TREND_SHORTLIST_SIZE` (3, constants.ts).
+2. **Tie-break by `buyRatio1h` descending [P2 reused as ranking, not just a
+   filter]** — among similarly-accelerating candidates, prefer genuine
+   buy-dominance over ambiguous $ volume. Missing data sorts last.
+3. **Tie-break by `priceChange24hPct` ascending [P4]** — prefer a flatter
+   24h background (the move is new) over an already-known multi-hour/day
+   runner (most of its gain happened before the last 6h). Missing data
+   sorts last.
+
+`requireUptrend`/`MIN_PRICE_CHANGE_6H_PCT` (Stage 3 above) still gates
+*qualification* ("must be positive over 6h") — only the *ranking* metric
+changed, from magnitude to acceleration.
 
 Top of the shortlist = what `scanPools`/`enterBestPool` enters, or what
 `scanForBetterOpportunity` compares against the currently-held pool.
+
+**[P0] Decision-context logging**: `ENTER`/`SWITCH` events (paper-trade
+JSONL) and `index.ts`'s equivalent `logger.info` calls now carry
+`priceChange1hPct`/`6hPct`/`24hPct`, `volumeSpikeRatio`, `buyRatio1h` at
+decision time — added specifically so a future "was this entry chasing an
+already-extended pump?" question can be answered from logged data instead
+of guessing (which is what this whole P0-P4 tuning round had to do).
 
 ---
 
