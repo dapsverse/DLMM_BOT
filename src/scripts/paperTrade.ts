@@ -80,7 +80,9 @@ interface VirtualPosition {
   lastRebalanceAtMs: number;
   lastFeeAccrualAtMs: number;
   rebalanceTimestamps: number[];
-  capitalUsd: number; // capital as of last entry/compound
+  capitalUsd: number; // capital as of last entry/compound — resets on every compound, needed as the price-ratio simulation basis (see heldValueUsd in tick())
+  /** USD value deposited at TRUE first entry into this pool — unlike capitalUsd, this does NOT reset on compound (only on a fresh entry or SWITCH into a different pool, i.e. only ever set inside enterPool()). Mirrors PoolContext.initialDepositSol in the real bot exactly — used for STOP_LOSS_PCT/TAKE_PROFIT/peakProfitPct so paper-trade's risk decisions have the same basis as production, not a basis that resets every compound. Bug found live 2026-09-24: instance A's take-profit never armed across a 35%->20% run-level swing because peakProfitPct (fed by this basis) kept getting wiped by frequent rebalances - the real bot would not have this problem. */
+  initialDepositUsd: number;
   feesEarnedUsd: number; // accrued since last entry/compound
   entrySolPriceUsd: number;
   entryMemePriceUsd: number;
@@ -93,7 +95,7 @@ interface VirtualPosition {
   outOfRangeSinceMs: number | null;
   /** When the position most recently came back in-range — null while out-of-range or fully settled in-range. Only used to debounce outOfRangeSinceMs resets, same as PoolContext.inRangeSinceMs. */
   inRangeSinceMs: number | null;
-  /** Highest unrealized profit % since entry/last-compound. Reset to 0 whenever capitalUsd/entrySolPriceUsd/entryMemePriceUsd reset (compound or switch) - unlike the real bot, paper-trade's profit basis DOES reset on every compound (position.capitalUsd = compoundedToUsd), so the peak must reset with it to stay consistent. */
+  /** Highest unrealized profit % this position has ever reached, since TRUE first entry (tracked off initialDepositUsd, not capitalUsd). Fixed 2026-09-24 to match the real bot's PoolContext.peakProfitPct exactly: does NOT reset on compound, only on a fresh entry or SWITCH. Previously reset to 0 on every compound (a paper-trade-only bug) — confirmed live it caused a 35%->20% run-level swing on instance A to never arm the take-profit floor, something the real bot would have caught. */
   peakProfitPct: number;
 }
 
@@ -274,6 +276,7 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
     lastFeeAccrualAtMs: now,
     rebalanceTimestamps: [],
     capitalUsd: capitalAfterEntryCostUsd,
+    initialDepositUsd: capitalAfterEntryCostUsd,
     feesEarnedUsd: 0,
     entrySolPriceUsd: sol.priceUsd,
     entryMemePriceUsd: meme.priceUsd,
@@ -396,13 +399,15 @@ async function tick(): Promise<void> {
   // Only the branches below that actually touch the position override this.
   let finalPositionValueUsd = currentValueUsd;
 
-  const currentProfitPct = position.capitalUsd > 0 ? ((currentValueUsd - position.capitalUsd) / position.capitalUsd) * 100 : 0;
+  // initialDepositUsd (NOT capitalUsd), matching index.ts's ctx.initialDepositSol
+  // exactly — see VirtualPosition.initialDepositUsd doc comment for why.
+  const currentProfitPct = position.initialDepositUsd > 0 ? ((currentValueUsd - position.initialDepositUsd) / position.initialDepositUsd) * 100 : 0;
   position.peakProfitPct = Math.max(position.peakProfitPct, currentProfitPct);
 
-  const gasCostSol = estimateCycleGasCostSol(position.capitalUsd / sol.priceUsd);
+  const gasCostSol = estimateCycleGasCostSol(position.initialDepositUsd / sol.priceUsd);
   const gasCostUsd = gasCostSol * sol.priceUsd;
   const { decision, reasons } = evaluatePosition({
-    initialDepositUsd: position.capitalUsd,
+    initialDepositUsd: position.initialDepositUsd,
     currentValueUsd,
     rebalanceTimestamps: position.rebalanceTimestamps,
     volume1hNowUsd: live.volume1hUsd,
@@ -541,7 +546,12 @@ async function tick(): Promise<void> {
         finalPositionValueUsd = compoundedToUsd;
         position.entrySolPriceUsd = sol.priceUsd;
         position.entryMemePriceUsd = meme.priceUsd;
-        position.peakProfitPct = 0;
+        // peakProfitPct/initialDepositUsd deliberately NOT reset here — this
+        // is an in-place compound within the SAME pool (mirrors
+        // rebalanceEngine.ts's compoundCycle, which never touches
+        // ctx.peakProfitPct/ctx.initialDepositSol either). Only entering a
+        // genuinely new position (enterPool(), fresh entry or SWITCH) resets
+        // them. See VirtualPosition.initialDepositUsd doc comment.
         position.volume1hBaselineUsd = live.volume1hUsd;
         position.rebalanceTimestamps.push(now);
         position.lastRebalanceAtMs = now;
@@ -600,7 +610,8 @@ async function tick(): Promise<void> {
     if (opportunityNow - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
       lastOpportunityScanAtMs = opportunityNow;
       const scanResult = await scanForBetterOpportunity(position.poolAddress, defaultScannerConfig(blacklist));
-      const currentProfitPctForSwitch = position.capitalUsd > 0 ? ((finalPositionValueUsd - position.capitalUsd) / position.capitalUsd) * 100 : 0;
+      // initialDepositUsd basis, matching index.ts's switch-eval currentProfitPct — same reasoning as the TAKE_PROFIT fix above.
+      const currentProfitPctForSwitch = position.initialDepositUsd > 0 ? ((finalPositionValueUsd - position.initialDepositUsd) / position.initialDepositUsd) * 100 : 0;
       const switchEval = evaluateSwitchOpportunity(
         {
           currentProfitPct: currentProfitPctForSwitch,

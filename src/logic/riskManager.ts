@@ -4,7 +4,7 @@ import { logger } from '../utils/logger.js';
 export type RiskDecision = 'HOLD' | 'REBALANCE' | 'HARD_EXIT' | 'TAKE_PROFIT';
 
 export interface PositionHealthInput {
-  /** USD value of capital deposited when the position was opened/last compounded. */
+  /** USD value of capital deposited when the position was FIRST opened — deliberately NOT updated on a compound/rebalance within the same pool (only a fresh entry or a SWITCH into a different pool resets this), so STOP_LOSS_PCT/TAKE_PROFIT track cumulative gain/loss since the original deposit, not since the last compound. Stale wording fixed 2026-09-24 — this docstring used to say "opened/last compounded", which didn't match either caller: index.ts always passes ctx.initialDepositSol (never reset on compound, see PoolContext's own doc comment), and paper-trade had a real bug where it WAS reset on compound (via position.capitalUsd) until this fix. */
   initialDepositUsd: number;
   /** Current USD value of principal + unclaimed fees in the position. */
   currentValueUsd: number;
