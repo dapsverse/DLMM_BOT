@@ -641,6 +641,23 @@ async function tick(): Promise<void> {
         writeState(portfolioValueUsd(entered ? entered.capitalUsd : idleCapitalUsd));
         return;
       }
+      // Log every opportunity-scan tick, not just the ones that switch —
+      // previously silent on HOLD, so there was no way to tell from the
+      // event log whether the scan ran and declined (and why: no
+      // candidate? blocked by a guard? cooldown?) or hadn't run at all.
+      // Mirrors index.ts's logger.info('[index] opportunity scan', ...),
+      // which already logged unconditionally.
+      logEvent({
+        type: 'OPPORTUNITY_SCAN',
+        pool: position.poolName,
+        decision: 'HOLD', // SWITCH outcome returns early above with its own 'SWITCH' event — reaching here means holding
+        reason: switchEval.reason,
+        currentSpikeRatio: +scanResult.currentSpikeRatio.toFixed(3),
+        candidateSpikeRatio: +scanResult.candidateSpikeRatio.toFixed(3),
+        currentPriceTrendPct: scanResult.currentPriceTrendPct ?? null,
+        candidateBuyRatio1h: scanResult.candidateBuyRatio1h ?? null,
+        candidate: scanResult.candidate?.name ?? null,
+      });
     }
   }
 
