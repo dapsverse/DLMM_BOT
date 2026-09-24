@@ -87,6 +87,8 @@ interface VirtualPosition {
   entrySolPriceUsd: number;
   entryMemePriceUsd: number;
   volume1hBaselineUsd: number;
+  /** Epoch-ms volume1hBaselineUsd was last set — mirrors PoolContext.volume1hBaselineSetAtMs, see env.VOLUME_BASELINE_REFRESH_MS/VOLUME_DROP_GRACE_MS. */
+  volume1hBaselineSetAtMs: number;
   /** Pool's bin_step — constant for the pool's lifetime, used to derive the bin radius (see logic/binRange.ts). */
   binStep: number;
   /** Active bin id when the position was opened/last compounded — null if the RPC read failed. */
@@ -281,6 +283,7 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
     entrySolPriceUsd: sol.priceUsd,
     entryMemePriceUsd: meme.priceUsd,
     volume1hBaselineUsd: chosen.volume1hUsd,
+    volume1hBaselineSetAtMs: now,
     binStep: chosen.bin_step,
     centerBinId,
     outOfRangeSinceMs: null,
@@ -404,6 +407,14 @@ async function tick(): Promise<void> {
   const currentProfitPct = position.initialDepositUsd > 0 ? ((currentValueUsd - position.initialDepositUsd) / position.initialDepositUsd) * 100 : 0;
   position.peakProfitPct = Math.max(position.peakProfitPct, currentProfitPct);
 
+  // Option A (VOLUME_BASELINE_REFRESH_MS, default 0/disabled) — reuses
+  // live.volume1hUsd already fetched this tick, no extra call. Mirrors
+  // index.ts exactly, see env.ts doc comment for rationale/trade-off.
+  if (env.VOLUME_BASELINE_REFRESH_MS > 0 && now - position.volume1hBaselineSetAtMs >= env.VOLUME_BASELINE_REFRESH_MS) {
+    position.volume1hBaselineUsd = live.volume1hUsd;
+    position.volume1hBaselineSetAtMs = now;
+  }
+
   const gasCostSol = estimateCycleGasCostSol(position.initialDepositUsd / sol.priceUsd);
   const gasCostUsd = gasCostSol * sol.priceUsd;
   const { decision, reasons } = evaluatePosition({
@@ -412,12 +423,13 @@ async function tick(): Promise<void> {
     rebalanceTimestamps: position.rebalanceTimestamps,
     volume1hNowUsd: live.volume1hUsd,
     volume1hBaselineUsd: position.volume1hBaselineUsd,
+    volume1hBaselineSetAtMs: position.volume1hBaselineSetAtMs,
     unclaimedFeesUsd: position.feesEarnedUsd,
     estimatedGasCostUsd: gasCostUsd,
     isOutOfRange,
     outOfRangeSinceMs: position.outOfRangeSinceMs,
     peakProfitPct: position.peakProfitPct,
-  });
+  }, now);
 
   if (decision === 'HARD_EXIT') {
     const exitValueAfterCostUsd = Math.max(currentValueUsd - gasCostUsd, 0);
@@ -553,6 +565,7 @@ async function tick(): Promise<void> {
         // genuinely new position (enterPool(), fresh entry or SWITCH) resets
         // them. See VirtualPosition.initialDepositUsd doc comment.
         position.volume1hBaselineUsd = live.volume1hUsd;
+        position.volume1hBaselineSetAtMs = now; // keep in sync with volume1hBaselineUsd above, whatever the reason it changed
         position.rebalanceTimestamps.push(now);
         position.lastRebalanceAtMs = now;
         position.centerBinId = currentBinId; // reopening re-centers the range on the current active bin

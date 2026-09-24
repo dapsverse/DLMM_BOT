@@ -49,6 +49,7 @@ async function tryEnterPool(): Promise<void> {
         candidate.bin_step,
       );
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
+      currentPool.volume1hBaselineSetAtMs = Date.now();
       // Decision-context snapshot (2026-09-24) — same reasoning as
       // paperTrade.ts's ENTER event: without this, after-the-fact "was this
       // entry chasing an already-extended pump?" analysis has to guess.
@@ -77,12 +78,21 @@ async function tick(): Promise<void> {
   }
 
   const ctx = currentPool;
+  const now = Date.now();
   const [{ currentValueSol, unclaimedFeesSol }, volume1hNowUsd, binStatus] = await Promise.all([
     getPositionHealthSnapshot(ctx),
     getVolume1hUsd(ctx.xIsSol ? ctx.mintY : ctx.mintX),
     getBinRangeStatus(ctx),
   ]);
   updateOutOfRangeTracking(ctx, binStatus.isOutOfRange);
+
+  // Option A (VOLUME_BASELINE_REFRESH_MS, default 0/disabled) — reuses the
+  // volume1hNowUsd already fetched above, no extra API call. See env.ts
+  // doc comment for the full rationale/trade-off.
+  if (env.VOLUME_BASELINE_REFRESH_MS > 0 && now - ctx.volume1hBaselineSetAtMs >= env.VOLUME_BASELINE_REFRESH_MS && volume1hNowUsd !== null) {
+    ctx.volume1hBaselineUsd = volume1hNowUsd;
+    ctx.volume1hBaselineSetAtMs = now;
+  }
 
   const currentProfitPct = ctx.initialDepositSol > 0 ? ((currentValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
   ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
@@ -94,12 +104,13 @@ async function tick(): Promise<void> {
     rebalanceTimestamps: ctx.rebalanceTimestamps,
     volume1hNowUsd: volume1hNowUsd ?? ctx.volume1hBaselineUsd,
     volume1hBaselineUsd: ctx.volume1hBaselineUsd,
+    volume1hBaselineSetAtMs: ctx.volume1hBaselineSetAtMs,
     unclaimedFeesUsd: unclaimedFeesSol,
     estimatedGasCostUsd: gasCostSol,
     isOutOfRange: binStatus.isOutOfRange,
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
     peakProfitPct: ctx.peakProfitPct,
-  });
+  }, now);
 
   logger.info(`[index] pool ${ctx.poolAddress} health check`, {
     decision,
@@ -147,7 +158,6 @@ async function tick(): Promise<void> {
     return;
   }
 
-  const now = Date.now();
   if (now - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
     lastOpportunityScanAtMs = now;
     const scanResult = await scanForBetterOpportunity(ctx.poolAddress, defaultScannerConfig(blacklistPools));
@@ -181,6 +191,7 @@ async function tick(): Promise<void> {
           const newPool = await openPool(candidate.address);
           currentPool = await openInitialPosition(newPool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step);
           currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
+          currentPool.volume1hBaselineSetAtMs = Date.now();
           lastSwitchAtMs = now;
           logger.info('[index] SWITCH complete', { from: ctx.poolAddress, to: candidate.address });
         } catch (err) {

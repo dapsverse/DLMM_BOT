@@ -13,6 +13,8 @@ export interface PositionHealthInput {
   /** Pool's trailing 1h volume, now vs. when the position was opened. */
   volume1hNowUsd: number;
   volume1hBaselineUsd: number;
+  /** Epoch-ms the baseline above was last set (fresh entry, switch, or an Option-A periodic refresh) — used to gate VOLUME_DROP_GRACE_MS (Option B). Undefined = no grace applied, same as the check always being active. */
+  volume1hBaselineSetAtMs?: number;
   /** Fee/gas inputs for the rebalance-trigger threshold rule. */
   unclaimedFeesUsd: number;
   estimatedGasCostUsd: number;
@@ -65,7 +67,16 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
     input.volume1hBaselineUsd > 0
       ? ((input.volume1hBaselineUsd - input.volume1hNowUsd) / input.volume1hBaselineUsd) * 100
       : 0;
-  if (volDropPct > env.VOLUME_DROP_HARD_EXIT_PCT) {
+  // Option B (VOLUME_DROP_GRACE_MS, default 0/disabled): a volume spike
+  // decaying back toward normal in the hours right after entry isn't
+  // necessarily a real problem — see env.ts doc comment. Confirmed live
+  // twice (same pool, two instances, 31s apart) that this false-positives
+  // a HARD_EXIT purely from expected spike decay.
+  const withinVolumeDropGrace =
+    env.VOLUME_DROP_GRACE_MS > 0 &&
+    input.volume1hBaselineSetAtMs !== undefined &&
+    now - input.volume1hBaselineSetAtMs < env.VOLUME_DROP_GRACE_MS;
+  if (volDropPct > env.VOLUME_DROP_HARD_EXIT_PCT && !withinVolumeDropGrace) {
     reasons.push(`1h volume dropped ${volDropPct.toFixed(2)}% > ${env.VOLUME_DROP_HARD_EXIT_PCT}%`);
   }
 

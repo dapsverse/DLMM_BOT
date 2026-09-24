@@ -139,6 +139,39 @@ export const env = {
   REBALANCE_COOLDOWN_MS: num('REBALANCE_COOLDOWN_MS', 5 * 60_000),
   FEE_GAS_MULTIPLIER: num('FEE_GAS_MULTIPLIER', 2.5),
   VOLUME_DROP_HARD_EXIT_PCT: num('VOLUME_DROP_HARD_EXIT_PCT', 60),
+
+  // Two independently toggleable fixes for the same root problem, added
+  // 2026-09-24 — confirmed live (twice, in both pumpguards-p0p4 and
+  // looser-entry, on the SAME WOW-SOL pool within 31s of each other) that
+  // volume1hBaselineUsd is captured ONCE at entry and never refreshed for
+  // the rest of the position's life (not even on compound, in the real
+  // bot — only paper-trade refreshes it, and only on a full compound).
+  // Entering during a volume spike (which the entry-spike-floor above now
+  // actively selects for) pins the baseline at an inflated level; normal
+  // spike decay over the following 1-3h then reads as a false-positive
+  // "volume dropped 60%+" HARD_EXIT even when nothing is actually wrong.
+  // Both default 0 (disabled) — this preserves the exact original
+  // behavior unless explicitly turned on, so existing runs aren't
+  // silently affected. Set either to a positive ms value to enable; set
+  // both to combine them. Low-confidence starting guesses if enabled,
+  // not yet validated — that's what the 3 comparison instances are for.
+  //
+  // Option A: refresh volume1hBaselineUsd every N ms while holding
+  // (reuses the volume figure already being fetched every tick — no
+  // extra API call). Root-cause fix: the "drop %" is measured against a
+  // moving recent reference instead of a frozen entry-time snapshot.
+  // Trade-off: too-frequent a refresh makes the check nearly blind to a
+  // genuinely fast real volume collapse, since the baseline "chases" the
+  // decline. 0 = never refresh (original behavior).
+  VOLUME_BASELINE_REFRESH_MS: num('VOLUME_BASELINE_REFRESH_MS', 0),
+  // Option B: suppress the volume-drop HARD_EXIT check for N ms after the
+  // baseline was last set (fresh entry, switch, or an Option-A refresh).
+  // Simpler than Option A, but only delays enforcement rather than fixing
+  // the underlying stale-baseline math — a position can still get
+  // exited for the same reason right after the grace window ends.
+  // 0 = no grace, check is always active (original behavior).
+  VOLUME_DROP_GRACE_MS: num('VOLUME_DROP_GRACE_MS', 0),
+
   BLACKLIST_DURATION_MS: num('BLACKLIST_DURATION_MS', 6 * 60 * 60_000),
 
   // Don't let capital sit idle out-of-range forever waiting on a fee

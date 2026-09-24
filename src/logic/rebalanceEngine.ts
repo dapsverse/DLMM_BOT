@@ -37,6 +37,8 @@ export interface PoolContext {
   rebalanceTimestamps: number[];
   lastRebalanceAt: number;
   volume1hBaselineUsd: number;
+  /** Epoch-ms volume1hBaselineUsd was last set (fresh entry, switch, or an Option-A periodic refresh — see env.VOLUME_BASELINE_REFRESH_MS/VOLUME_DROP_GRACE_MS). */
+  volume1hBaselineSetAtMs: number;
   /** Pool's bin_step — constant for the pool's lifetime, used to derive the bin radius (see logic/binRange.ts). */
   binStep: number;
   /** Active bin id when the position was opened/last compounded. */
@@ -264,6 +266,7 @@ export async function openInitialPosition(
     rebalanceTimestamps: [],
     lastRebalanceAt: 0,
     volume1hBaselineUsd: 0,
+    volume1hBaselineSetAtMs: 0, // placeholder — index.ts sets the real value right after this call, alongside volume1hBaselineUsd
     binStep,
     centerBinId: activeBin.binId,
     outOfRangeSinceMs: null,
