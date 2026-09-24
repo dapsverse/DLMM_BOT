@@ -15,6 +15,7 @@ import { connection, wallet, getWalletSolBalance } from '../services/solana.js';
 import { isPoolStillEligible, type ScannerConfig } from '../services/meteoraScanner.js';
 import { addToBlacklist } from './riskManager.js';
 import { computeBinRadius } from './binRange.js';
+import { computeOutOfRangeTracking } from './outOfRangeTracking.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -40,8 +41,10 @@ export interface PoolContext {
   binStep: number;
   /** Active bin id when the position was opened/last compounded. */
   centerBinId: number | null;
-  /** When the position first went out-of-range (epoch ms) — null while in-range. */
+  /** When the position first went out-of-range (epoch ms) — null while in-range (subject to OUT_OF_RANGE_RESET_GRACE_MS debounce, see updateOutOfRangeTracking). */
   outOfRangeSinceMs: number | null;
+  /** When the position most recently came BACK in-range (epoch ms) — null while out-of-range or while fully settled in-range. Only used to debounce outOfRangeSinceMs resets. */
+  inRangeSinceMs: number | null;
   /** Highest unrealized profit % this position has ever reached, since openInitialPosition. Not reset on compoundCycle (initialDepositSol itself is never reset on compound either — this mirrors that existing basis). Reset only by starting a fresh PoolContext (new entry or switch). */
   peakProfitPct: number;
 }
@@ -92,13 +95,11 @@ export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatu
   return { currentBinId: activeBin.binId, isOutOfRange };
 }
 
-/** Call once per health-check tick to keep ctx.outOfRangeSinceMs accurate (set on first out-of-range tick, cleared once back in range). */
+/** Call once per health-check tick to keep ctx.outOfRangeSinceMs/inRangeSinceMs accurate (debounced — see logic/outOfRangeTracking.ts, shared with paper-trade). */
 export function updateOutOfRangeTracking(ctx: PoolContext, isOutOfRange: boolean, now = Date.now()): void {
-  if (isOutOfRange && ctx.outOfRangeSinceMs === null) {
-    ctx.outOfRangeSinceMs = now;
-  } else if (!isOutOfRange) {
-    ctx.outOfRangeSinceMs = null;
-  }
+  const next = computeOutOfRangeTracking(ctx, isOutOfRange, now);
+  ctx.outOfRangeSinceMs = next.outOfRangeSinceMs;
+  ctx.inRangeSinceMs = next.inRangeSinceMs;
 }
 
 export interface PositionHealthSnapshot {
@@ -222,6 +223,7 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   ctx.lastRebalanceAt = now;
   ctx.centerBinId = activeBin.binId;
   ctx.outOfRangeSinceMs = null;
+  ctx.inRangeSinceMs = null;
   logger.info('[rebalanceEngine] compound cycle complete', { pool: ctx.poolAddress });
   return ctx;
 }
@@ -265,6 +267,7 @@ export async function openInitialPosition(
     binStep,
     centerBinId: activeBin.binId,
     outOfRangeSinceMs: null,
+    inRangeSinceMs: null,
     peakProfitPct: 0,
   };
 

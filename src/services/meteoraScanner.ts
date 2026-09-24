@@ -29,10 +29,13 @@ const RPC_HYDRATION_CONCURRENCY = 4;
 const WASH_TRADE_VOL_TVL_RATIO_THRESHOLD = 30;
 const WASH_TRADE_FLAT_PRICE_BAND_PCT = 2;
 
-// Same threshold/rationale as SWITCH_CANDIDATE_MIN_BUY_RATIO in
-// riskManager.ts — buys must be the majority for activity to count as a
-// genuine pump signal rather than a sell-off wearing the same $ number.
-const ENTRY_MIN_BUY_RATIO_1H = 0.5;
+// ENTRY_MIN_BUY_RATIO_1H / ENTRY_MIN_SPIKE_RATIO moved to ScannerConfig
+// (config.entryMinBuyRatio1h / config.entryMinSpikeRatio, env-tunable) —
+// see env.ts doc comments for full rationale. Confirmed live 2026-09-24 via
+// src/scripts/diagnoseRejections.ts: at their original defaults (0.5 / 1.0)
+// these two checks alone were rejecting 53%/80% of all real candidates,
+// stacked on top of an already-tight pre-existing screen — 0/123 pools
+// survived. Needed to be tunable, not hardcoded, to A/B different values.
 
 /**
  * This hour's volume vs. the preceding 5h's average pace (via DexScreener's
@@ -199,6 +202,10 @@ export interface ScannerConfig {
   minTxCountM5: number;
   /** Entry-only ceiling on 1h price change — a pool already up more than this in the last hour is more likely near/past a local top than early in a move. See the overextension-ceiling check in filterAndRankPools. */
   maxPriceChange1hPumpPct: number;
+  /** Floor on 1h buyRatio (buys/(buys+sells)) — below this, activity is treated as sell-dominant, not a genuine pump signal. Applies in both entry and re-screen modes. */
+  entryMinBuyRatio1h: number;
+  /** Entry-only floor on volumeSpikeRatio — below this, a pool isn't accelerating at all, regardless of how it ranks against other candidates. */
+  entryMinSpikeRatio: number;
   blacklistPools: Map<string, number>; // poolAddress -> blacklisted-until (epoch ms)
 }
 
@@ -293,7 +300,7 @@ function applyDexScreenerFields(pair: MeteoraPair, dexPair: DexScreenerPair): vo
  * leaves that batch's pools' DexScreener fields undefined, which every
  * downstream filter already treats as "unknown, don't block".
  */
-async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
+export async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
   for (let i = 0; i < pairs.length; i += DEXSCREENER_BATCH_MAX_ADDRESSES) {
     const batch = pairs.slice(i, i + DEXSCREENER_BATCH_MAX_ADDRESSES);
     const addresses = batch.map((p) => nonSolToken(p)!.address).join(',');
@@ -329,7 +336,7 @@ async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
  * Only called on the short pre-filtered list — this is an RPC round-trip
  * per pool, not something to run against the full pool universe.
  */
-async function hydrateMintAuthority(pairs: MeteoraPair[]): Promise<void> {
+export async function hydrateMintAuthority(pairs: MeteoraPair[]): Promise<void> {
   await mapWithConcurrency(pairs, RPC_HYDRATION_CONCURRENCY, async (pair) => {
     const memecoin = nonSolToken(pair);
     if (!memecoin) return;
@@ -341,15 +348,17 @@ export interface FilterOpts {
   /**
    * Skip the checks that only make sense when SIZING new capital into a
    * pool (maxTvlUsd, minVolTvlRatio, maxMemecoinMarketCapUsd,
-   * maxPriceChange1hPumpPct) — a pool growing past these ceilings, or
-   * pumping hard, is a symptom of the position SUCCEEDING (price/liquidity
-   * up), not of it going bad — don't force an exit on a held winner.
-   * Used when re-screening a pool we're already holding to decide "stay"
-   * vs "leave" — genuine health/danger checks (min TVL floor, min volume,
-   * holders, mint/freeze authority, crash-guard, trend floor, activity
-   * cascade, tx count, wash-trade guard, buy-ratio) still apply either
-   * way. Never set true for a fresh multi-candidate market scan — that's
-   * exactly where these checks matter.
+   * maxPriceChange1hPumpPct, entryMinSpikeRatio) — a pool growing past
+   * these ceilings, pumping hard, or having its spike cool off is a symptom
+   * of the position SUCCEEDING or just maturing, not of it going bad —
+   * don't force an exit on a held winner (trailing take-profit / the
+   * switch's trend-protect guard already cover "is this still worth
+   * holding"). Used when re-screening a pool we're already holding to
+   * decide "stay" vs "leave" — genuine health/danger checks (min TVL floor,
+   * min volume, holders, mint/freeze authority, crash-guard, trend floor,
+   * activity cascade, tx count, wash-trade guard, buy-ratio) still apply
+   * either way. Never set true for a fresh multi-candidate market scan —
+   * that's exactly where these checks matter.
    */
   skipSizingChecks?: boolean;
 }
@@ -474,7 +483,14 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // sell-dominant while holding is itself a reason to reconsider, same
     // as the wash-trade/crash-guard checks). Unknown (no DexScreener h1 tx
     // data) doesn't block, same policy as the rest of this screen.
-    if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= ENTRY_MIN_BUY_RATIO_1H) return false;
+    if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= config.entryMinBuyRatio1h) return false;
+
+    // Absolute spike floor for FRESH entries only — see ENTRY_MIN_SPIKE_RATIO
+    // doc comment. A held position's own spike cooling off is not itself a
+    // reason to force an exit (trailing take-profit / trend-protect already
+    // cover "is this position still worth holding"), so this only applies
+    // when sizing NEW capital into a pool.
+    if (!opts.skipSizingChecks && volumeSpikeRatio(pair) < config.entryMinSpikeRatio) return false;
 
     return true;
   });
@@ -650,8 +666,11 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   ) {
     reasons.push(`possible wash trading: vol/tvl ${volTvlRatioNow.toFixed(1)}x with flat 1h price ${pair.priceChange1hPct.toFixed(2)}%`);
   }
-  if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= ENTRY_MIN_BUY_RATIO_1H) {
-    reasons.push(`1h buy ratio ${(pair.buyRatio1h * 100).toFixed(0)}% <= ${ENTRY_MIN_BUY_RATIO_1H * 100}% - sell-dominant, not a genuine pump signal`);
+  if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= config.entryMinBuyRatio1h) {
+    reasons.push(`1h buy ratio ${(pair.buyRatio1h * 100).toFixed(0)}% <= ${config.entryMinBuyRatio1h * 100}% - sell-dominant, not a genuine pump signal`);
+  }
+  if (!opts.skipSizingChecks && volumeSpikeRatio(pair) < config.entryMinSpikeRatio) {
+    reasons.push(`volume spike ${volumeSpikeRatio(pair).toFixed(2)}x < entry floor ${config.entryMinSpikeRatio}x - not actually accelerating`);
   }
 
   return reasons;
@@ -713,6 +732,8 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     minRecentActivityRatio: env.MIN_RECENT_ACTIVITY_RATIO,
     minTxCountM5: env.MIN_TX_COUNT_M5,
     maxPriceChange1hPumpPct: env.MAX_PRICE_CHANGE_1H_PUMP_PCT,
+    entryMinBuyRatio1h: env.ENTRY_MIN_BUY_RATIO_1H,
+    entryMinSpikeRatio: env.ENTRY_MIN_SPIKE_RATIO,
     blacklistPools,
   };
 }

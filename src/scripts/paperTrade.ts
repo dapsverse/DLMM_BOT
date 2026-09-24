@@ -50,6 +50,7 @@ import {
   type MeteoraPair,
 } from '../services/meteoraScanner.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from '../logic/riskManager.js';
+import { computeOutOfRangeTracking } from '../logic/outOfRangeTracking.js';
 import { estimateCycleGasCostSol, estimateClaimCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
@@ -88,8 +89,10 @@ interface VirtualPosition {
   binStep: number;
   /** Active bin id when the position was opened/last compounded — null if the RPC read failed. */
   centerBinId: number | null;
-  /** When the position first went out-of-range (epoch ms) — null while in-range/unknown. */
+  /** When the position first went out-of-range (epoch ms) — null while in-range/unknown. Debounced, see computeOutOfRangeTracking (rebalanceEngine.ts). */
   outOfRangeSinceMs: number | null;
+  /** When the position most recently came back in-range — null while out-of-range or fully settled in-range. Only used to debounce outOfRangeSinceMs resets, same as PoolContext.inRangeSinceMs. */
+  inRangeSinceMs: number | null;
   /** Highest unrealized profit % since entry/last-compound. Reset to 0 whenever capitalUsd/entrySolPriceUsd/entryMemePriceUsd reset (compound or switch) - unlike the real bot, paper-trade's profit basis DOES reset on every compound (position.capitalUsd = compoundedToUsd), so the peak must reset with it to stay consistent. */
   peakProfitPct: number;
 }
@@ -278,6 +281,7 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
     binStep: chosen.bin_step,
     centerBinId,
     outOfRangeSinceMs: null,
+    inRangeSinceMs: null,
     peakProfitPct: 0,
   };
   position = entered;
@@ -358,8 +362,12 @@ async function tick(): Promise<void> {
   const binsFromCenter = position.centerBinId !== null && currentBinId !== null ? currentBinId - position.centerBinId : null;
   const inRange = binsFromCenter === null ? null : Math.abs(binsFromCenter) <= computeBinRadius(position.binStep);
   const isOutOfRange = inRange === false; // null (unknown) is treated as "not (confirmed) out of range" — don't force on missing data
-  if (isOutOfRange && position.outOfRangeSinceMs === null) position.outOfRangeSinceMs = now;
-  else if (!isOutOfRange) position.outOfRangeSinceMs = null;
+  // Shared logic (logic/outOfRangeTracking.ts) with the real bot's
+  // PoolContext so both debounce the same way — a momentary in-range blip
+  // at the boundary no longer resets the idle-forced streak.
+  const outOfRangeTracking = computeOutOfRangeTracking(position, isOutOfRange, now);
+  position.outOfRangeSinceMs = outOfRangeTracking.outOfRangeSinceMs;
+  position.inRangeSinceMs = outOfRangeTracking.inRangeSinceMs;
 
   // Fee accrual since last tick, pro-rata TVL share (see file header caveat).
   const elapsedHours = (now - position.lastFeeAccrualAtMs) / 3_600_000;
@@ -539,6 +547,7 @@ async function tick(): Promise<void> {
         position.lastRebalanceAtMs = now;
         position.centerBinId = currentBinId; // reopening re-centers the range on the current active bin
         position.outOfRangeSinceMs = null;
+        position.inRangeSinceMs = null;
         summary.rebalances++;
         if (visit) visit.rebalanceCount++;
       } else {

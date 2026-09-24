@@ -102,6 +102,28 @@ export const env = {
   // paperTrade.ts ENTER/SWITCH events).
   MAX_PRICE_CHANGE_1H_PUMP_PCT: num('MAX_PRICE_CHANGE_1H_PUMP_PCT', 60),
 
+  // Floor on 1h buyRatio (buys/(buys+sells), DexScreener txns.h1) — below
+  // this, activity is treated as sell-dominant/distribution, not a genuine
+  // pump signal. Applies to both fresh entries and re-screens (health
+  // check, not a sizing check). Was hardcoded 0.5 (2026-09-24 first pass);
+  // confirmed live via src/scripts/diagnoseRejections.ts that 0.5 alone
+  // rejected 65/123 (53%) of real candidates — moved to env so it can be
+  // tuned/A-B'd instead of requiring a code change.
+  ENTRY_MIN_BUY_RATIO_1H: num('ENTRY_MIN_BUY_RATIO_1H', 0.5),
+
+  // Entry-only floor on volumeSpikeRatio (see meteoraScanner.ts) — below
+  // this, a pool isn't accelerating at all (1.0x = running exactly at its
+  // own recent 5h pace). rankCandidates() already sorts by this, but
+  // sorting alone doesn't help when there's only ONE candidate — without a
+  // floor a fully cooled-off pool can still be "the top pick" simply
+  // because nothing else passed the base filters. Confirmed live
+  // 2026-09-24: familiars-SOL entered at spike 0.182x with priceChange24hPct
+  // +4400% (an already-played-out runner) because 5 straight scans found no
+  // other candidate. Was hardcoded 1.0 (first pass); diagnoseRejections.ts
+  // then showed that alone rejected 99/123 (80%) of real candidates — moved
+  // to env, same reasoning as ENTRY_MIN_BUY_RATIO_1H above.
+  ENTRY_MIN_SPIKE_RATIO: num('ENTRY_MIN_SPIKE_RATIO', 1.0),
+
   // Position sizing — bin radius is DERIVED per-pool from bin_step to hit
   // this target price coverage (a fixed bin-count radius covers wildly
   // different % price ranges across pools with different bin_step — e.g.
