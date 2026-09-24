@@ -148,6 +148,8 @@ async function tick(): Promise<void> {
         candidateSpikeRatio: scanResult.candidateSpikeRatio,
         hasCandidate: scanResult.candidate !== null,
         lastSwitchAtMs,
+        currentPriceTrendPct: scanResult.currentPriceTrendPct,
+        candidateBuyRatio1h: scanResult.candidateBuyRatio1h,
       },
       now,
     );

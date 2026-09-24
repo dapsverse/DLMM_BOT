@@ -85,6 +85,8 @@ export interface MeteoraPair {
   volumeH6Usd?: number;
   /** DexScreener's 5-minute buy+sell count — $ volume can look fine while literally 0 trades happened just now; this catches that directly. */
   txCountM5?: number;
+  /** DexScreener's 1h buys / (buys+sells) — a volume spike can be genuine buying pressure OR a sell-off/dump; this distinguishes them. Used to gate the opportunistic-switch candidate (see evaluateSwitchOpportunity) so a "spike" that's actually distribution doesn't trigger a switch. */
+  buyRatio1h?: number;
   /**
    * True when this pool's whole DexScreener batch call failed (429/timeout/etc) —
    * distinct from a pool that DexScreener simply has no data for. Every
@@ -233,7 +235,7 @@ interface DexScreenerPair {
   baseToken?: { address?: string };
   priceChange?: { h1?: number; h6?: number; h24?: number };
   volume?: { m5?: number; h1?: number; h6?: number };
-  txns?: { m5?: { buys?: number; sells?: number } };
+  txns?: { m5?: { buys?: number; sells?: number }; h1?: { buys?: number; sells?: number } };
 }
 
 /** Trailing 1h USD volume for a token, used by riskManager's volume-drop hard-exit check. */
@@ -267,6 +269,10 @@ function applyDexScreenerFields(pair: MeteoraPair, dexPair: DexScreenerPair): vo
   if (typeof dexPair.volume?.h6 === 'number') pair.volumeH6Usd = dexPair.volume.h6;
   const m5Txns = dexPair.txns?.m5;
   if (typeof m5Txns?.buys === 'number' && typeof m5Txns?.sells === 'number') pair.txCountM5 = m5Txns.buys + m5Txns.sells;
+  const h1Txns = dexPair.txns?.h1;
+  if (typeof h1Txns?.buys === 'number' && typeof h1Txns?.sells === 'number' && h1Txns.buys + h1Txns.sells > 0) {
+    pair.buyRatio1h = h1Txns.buys / (h1Txns.buys + h1Txns.sells);
+  }
 }
 
 /**
@@ -475,6 +481,10 @@ export interface OpportunityScanResult {
   candidate: MeteoraPair | null;
   candidateSpikeRatio: number;
   currentSpikeRatio: number;
+  /** Candidate's 1h buy ratio (buys/(buys+sells)) — undefined if DexScreener never returned tx-side data. See MeteoraPair.buyRatio1h. */
+  candidateBuyRatio1h: number | undefined;
+  /** Currently-held pool's own 6h price trend — undefined if unhydrated. Used to protect a position that's still genuinely trending up even if its volume spike has cooled. */
+  currentPriceTrendPct: number | undefined;
 }
 
 /**
@@ -503,11 +513,12 @@ export async function scanForBetterOpportunity(currentPoolAddress: string, confi
 
   const currentSpikeRatio = currentPool ? volumeSpikeRatio(currentPool) : 0;
   const candidateSpikeRatio = topCandidate ? volumeSpikeRatio(topCandidate) : 0;
+  const currentPriceTrendPct = currentPool?.priceChange6hPct;
 
   if (!topCandidate || topCandidate.address === currentPoolAddress) {
-    return { candidate: null, candidateSpikeRatio: 0, currentSpikeRatio };
+    return { candidate: null, candidateSpikeRatio: 0, currentSpikeRatio, candidateBuyRatio1h: undefined, currentPriceTrendPct };
   }
-  return { candidate: topCandidate, candidateSpikeRatio, currentSpikeRatio };
+  return { candidate: topCandidate, candidateSpikeRatio, currentSpikeRatio, candidateBuyRatio1h: topCandidate.buyRatio1h, currentPriceTrendPct };
 }
 
 export interface PoolEligibility {

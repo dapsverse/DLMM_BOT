@@ -52,9 +52,9 @@ export const env = {
   // near that TVL dilutes our pro-rata fee share to ~0.05%, near-zero $ fee
   // regardless of how active the pool actually is (confirmed live: ALLINU-SOL,
   // $476k TVL, $42k/1h volume — genuinely active pool, still only $0.40 fee
-  // in 46min). 150k keeps share in the same ballpark as past good entries
-  // (JEANPHIL $80k, QUEEF $56-134k) — ~0.3%+ instead of ~0.1%.
-  MAX_TVL_USD: num('MAX_TVL_USD', 150_000),
+  // in 46min). Then 150k, now raised to 300k (2026-09-23, user call) to widen
+  // the candidate pool without going back anywhere near the ~$1M dilution zone.
+  MAX_TVL_USD: num('MAX_TVL_USD', 300_000),
   MIN_24H_VOLUME_USD: num('MIN_24H_VOLUME_USD', 200_000),
   MIN_VOL_TVL_RATIO: num('MIN_VOL_TVL_RATIO', 3.0),
   POOL_SCAN_INTERVAL_MS: num('POOL_SCAN_INTERVAL_MS', 60_000),
@@ -110,9 +110,12 @@ export const env = {
 
   // Don't let capital sit idle out-of-range forever waiting on a fee
   // threshold that's stopped accruing — force a compound cycle after this
-  // many minutes out-of-range, but only while already in profit (never
-  // force-crystallize a loss). > REBALANCE_COOLDOWN_MS so it never fires
-  // faster than the normal cooldown allows anyway.
+  // many minutes out-of-range, regardless of profit/loss (stop-loss/
+  // HARD_EXIT already guards against forcing out a big loss). Tried 5min
+  // (2026-09-23): confirmed live it thrashes — 12h sample went from 3
+  // entries/1 rebalance (10min) to 10 entries/5 switches/4 rebalances/3
+  // leave_pool (5min), and gas cost ($13.82) actually exceeded fee income
+  // ($12.57) for the run. Reverted to 10min.
   MAX_IDLE_OUT_OF_RANGE_MINUTES: num('MAX_IDLE_OUT_OF_RANGE_MINUTES', 10),
 
   // Trailing take-profit: once unrealized profit peaks at/above
@@ -141,6 +144,13 @@ export const env = {
   SWITCH_SPIKE_RATIO_MARGIN: num('SWITCH_SPIKE_RATIO_MARGIN', 1.5),
   SWITCH_PROFIT_GUARD_PCT: num('SWITCH_PROFIT_GUARD_PCT', 30),
   SWITCH_COOLDOWN_MS: num('SWITCH_COOLDOWN_MS', 15 * 60_000),
+  // Separate protection from SWITCH_PROFIT_GUARD_PCT: that guard is about
+  // personal unrealized PnL (depends on entry timing), this is about the
+  // pool's own price direction. Added 2026-09-23 after SI-SOL got switched
+  // away at only +11% profit right as its volume spike cooled — its mcap
+  // kept climbing for hours afterward (2M -> 6M+). 10% on the same 6h window
+  // the uptrend entry filter uses (steadier than 1h for memecoin noise).
+  SWITCH_TREND_PROTECT_PCT: num('SWITCH_TREND_PROTECT_PCT', 10),
 
   // Swap / gas
   SLIPPAGE_BPS: num('SLIPPAGE_BPS', 100),

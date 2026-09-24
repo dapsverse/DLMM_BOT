@@ -122,6 +122,10 @@ export interface SwitchEvaluationInput {
   hasCandidate: boolean;
   /** Epoch ms of the last switch, or null if none has happened yet this run. */
   lastSwitchAtMs: number | null;
+  /** Currently-held pool's own 6h price trend, undefined if unhydrated. Protects a position that's still genuinely trending up even if its volume spike has cooled — a separate signal from currentProfitPct (personal PnL depends on entry timing; this is the pool's own price direction regardless of when we got in). */
+  currentPriceTrendPct?: number;
+  /** Candidate's 1h buy ratio (buys/(buys+sells)), undefined if DexScreener never returned tx-side data. A volume spike can be genuine buying pressure OR a sell-off/dump wearing the same $ number — this tells them apart. */
+  candidateBuyRatio1h?: number;
 }
 
 export interface SwitchEvaluation {
@@ -145,12 +149,52 @@ export function evaluateSwitchOpportunity(input: SwitchEvaluationInput, now = Da
       reason: `current profit ${input.currentProfitPct.toFixed(2)}% >= SWITCH_PROFIT_GUARD_PCT ${env.SWITCH_PROFIT_GUARD_PCT}% - protecting winner`,
     };
   }
+  // Separate protection from the profit guard above: profit depends on entry
+  // timing (a position can be genuinely trending up but only recently
+  // entered, so profit% hasn't caught up yet), this looks at the pool's own
+  // price direction directly. Confirmed live 2026-09-23: SI-SOL switched
+  // away at only +11% unrealized profit (well under the 30% profit guard)
+  // right as its own volume spike cooled to 0.56x — mcap kept climbing
+  // 2M->6M+ for hours after the bot left. A still-strongly-trending pool
+  // shouldn't get abandoned just because volume momentum dipped.
+  if (input.currentPriceTrendPct !== undefined && input.currentPriceTrendPct >= env.SWITCH_TREND_PROTECT_PCT) {
+    return {
+      shouldSwitch: false,
+      reason: `current pool 6h trend ${input.currentPriceTrendPct.toFixed(2)}% >= SWITCH_TREND_PROTECT_PCT ${env.SWITCH_TREND_PROTECT_PCT}% - still trending up, protecting position regardless of volume spike`,
+    };
+  }
   if (input.lastSwitchAtMs !== null && now - input.lastSwitchAtMs < env.SWITCH_COOLDOWN_MS) {
     const remainingMin = ((env.SWITCH_COOLDOWN_MS - (now - input.lastSwitchAtMs)) / 60_000).toFixed(1);
     return { shouldSwitch: false, reason: `switch cooldown active, ${remainingMin}min remaining` };
   }
   if (!(input.currentSpikeRatio > 0)) {
     return { shouldSwitch: false, reason: 'current pool spike ratio unknown or zero - no valid comparison, holding' };
+  }
+  // Absolute floor, not just relative margin: 1.0x means "running exactly at
+  // its own recent 5h pace" (see volumeSpikeRatio) — no spike at all. Without
+  // this, two dead-quiet pools (e.g. 0.26x vs 0.17x) can clear the relative
+  // margin against each other despite neither genuinely spiking. Confirmed
+  // live 2026-09-23: SWITCH SI-SOL -> SI-SOL (same pool!) fired on exactly
+  // this — 0.26x "beat" 0.17x * 1.5 margin (required 0.26x) — burning a full
+  // exit+re-entry gas cost for zero net position change.
+  const SWITCH_CANDIDATE_MIN_ABSOLUTE_SPIKE_RATIO = 1.0;
+  if (input.candidateSpikeRatio < SWITCH_CANDIDATE_MIN_ABSOLUTE_SPIKE_RATIO) {
+    return {
+      shouldSwitch: false,
+      reason: `candidate spike ${input.candidateSpikeRatio.toFixed(2)}x below absolute floor ${SWITCH_CANDIDATE_MIN_ABSOLUTE_SPIKE_RATIO}x - not a genuine spike even if it beats current on margin`,
+    };
+  }
+  // A $ volume spike is ambiguous on its own — it's the same number whether
+  // it's genuine buying pressure or a dump/sell-off. Require buys to
+  // actually dominate before trusting the spike as a switch-worthy signal.
+  // Unknown (DexScreener never returned h1 tx-side data) doesn't block —
+  // same "unknown, don't block" policy as the rest of the screen.
+  const SWITCH_CANDIDATE_MIN_BUY_RATIO = 0.5;
+  if (input.candidateBuyRatio1h !== undefined && input.candidateBuyRatio1h <= SWITCH_CANDIDATE_MIN_BUY_RATIO) {
+    return {
+      shouldSwitch: false,
+      reason: `candidate 1h buy ratio ${(input.candidateBuyRatio1h * 100).toFixed(0)}% <= ${SWITCH_CANDIDATE_MIN_BUY_RATIO * 100}% - volume spike looks sell-dominant, not genuine buying pressure`,
+    };
   }
   const requiredRatio = input.currentSpikeRatio * env.SWITCH_SPIKE_RATIO_MARGIN;
   if (input.candidateSpikeRatio >= requiredRatio) {
