@@ -47,7 +47,15 @@ export const env = {
   MAX_CONCURRENT_POOLS: num('MAX_CONCURRENT_POOLS', 1),
 
   // Pool scanner filters
-  MIN_TVL_USD: num('MIN_TVL_USD', 50_000),
+  // Was 50k -> 35k (2026-09-24) -> now just a "not literally dead" backstop
+  // (2026-09-25). A fixed dollar floor doesn't know how big our capital
+  // actually is: confirmed live that 6 of 7 sampled ~$300k-mcap pools sat
+  // on $472-$22,632 TVL (below even 35k) despite being completely safe for
+  // our ~$130 capital (0.3-3.3% capital/TVL ratio) — real slippage safety
+  // now comes from MAX_CAPITAL_TVL_RATIO_PCT below, which scales with
+  // capital automatically. This floor just catches pools with essentially
+  // no liquidity at all, regardless of ratio math.
+  MIN_TVL_USD: num('MIN_TVL_USD', 1_000),
   // Was 1_000_000 — with ~$490 (4.2 SOL) working capital, a pool anywhere
   // near that TVL dilutes our pro-rata fee share to ~0.05%, near-zero $ fee
   // regardless of how active the pool actually is (confirmed live: ALLINU-SOL,
@@ -123,6 +131,19 @@ export const env = {
   // then showed that alone rejected 99/123 (80%) of real candidates — moved
   // to env, same reasoning as ENTRY_MIN_BUY_RATIO_1H above.
   ENTRY_MIN_SPIKE_RATIO: num('ENTRY_MIN_SPIKE_RATIO', 1.0),
+
+  // Entry-only ceiling on (capital about to deposit) / (pool TVL), as a
+  // percent — added 2026-09-25, see MIN_TVL_USD comment above and
+  // ScannerConfig.maxCapitalTvlRatioPct doc comment for the full story.
+  // Replaces a fixed-dollar TVL floor with something that scales with
+  // capital: at ~$130 capital, 5% means pools down to ~$2,600 TVL are
+  // admitted (letting in real small-mcap opportunities that a flat $35k/
+  // $50k floor blocked entirely), while still rejecting a pool so thin our
+  // own deposit would move its price a lot (e.g. MACCA-SOL: $472 TVL would
+  // be a 27.5% ratio at $130 capital — correctly rejected). As capital
+  // compounds, the required TVL rises proportionally — no manual re-tuning
+  // needed. Low-confidence starting guess (5%), not yet validated live.
+  MAX_CAPITAL_TVL_RATIO_PCT: num('MAX_CAPITAL_TVL_RATIO_PCT', 5),
 
   // Position sizing — bin radius is DERIVED per-pool from bin_step to hit
   // this target price coverage (a fixed bin-count radius covers wildly

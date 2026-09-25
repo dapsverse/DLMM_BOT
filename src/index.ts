@@ -28,7 +28,7 @@ let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
 
 async function tryEnterPool(): Promise<void> {
-  const candidates = await scanPools(defaultScannerConfig(blacklistPools));
+  const candidates = await scanPools(defaultScannerConfig(blacklistPools), currentCapitalSol);
   for (const candidate of candidates) {
     const xIsSol = candidate.mint_x === WSOL_MINT;
     const yIsSol = candidate.mint_y === WSOL_MINT;
@@ -160,7 +160,9 @@ async function tick(): Promise<void> {
 
   if (now - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
     lastOpportunityScanAtMs = now;
-    const scanResult = await scanForBetterOpportunity(ctx.poolAddress, defaultScannerConfig(blacklistPools));
+    // currentValueSol, not ctx.initialDepositSol — a SWITCH moves whatever
+    // the position is actually worth right now, not the original deposit.
+    const scanResult = await scanForBetterOpportunity(ctx.poolAddress, defaultScannerConfig(blacklistPools), currentValueSol);
     const switchEval = evaluateSwitchOpportunity(
       {
         currentProfitPct,

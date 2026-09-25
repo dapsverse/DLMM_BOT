@@ -27,8 +27,9 @@ run in **both** modes unless marked [entry-only].
 |---|---|---|---|
 | Not blacklisted | `BLACKLIST_DURATION_MS` | 6h (21,600,000ms) | Set on `HARD_EXIT` only (stop-loss/anti-thrash/volume-drop). `SWITCH`/`TAKE_PROFIT` exits do NOT blacklist. |
 | TVL/volume sane | — | tvl/vol24h finite, tvl > 0 | Guards against bad API data. |
-| TVL floor | `MIN_TVL_USD` | $50,000 | |
+| TVL absolute backstop | `MIN_TVL_USD` | $1,000 (`.env`, was $50k → $35k → now just a "not literally dead" floor, 2026-09-25) | Real slippage-safety protection moved to `MAX_CAPITAL_TVL_RATIO_PCT` below — see Stage 3 table. |
 | TVL ceiling **[entry-only]** | `MAX_TVL_USD` | $300,000 | Was $1M → $150k (near-zero pro-rata fee share above this for ~$490 working capital) → raised to $300k to widen the candidate pool. |
+| Capital/TVL ratio ceiling **[entry-only]** | `MAX_CAPITAL_TVL_RATIO_PCT` | 5% (env, default) — reject if (capital about to deposit) / (pool TVL) × 100 exceeds this | Unknown (no `currentCapitalSol` passed by caller) → pass. Added 2026-09-25, replaces `MIN_TVL_USD` as the real slippage-safety gate — a fixed dollar floor doesn't scale with how big our capital actually is. Confirmed live: 6 of 7 sampled ~$300k-mcap pools sat on $472-$22,632 TVL (below even a $35k floor) but were completely safe for ~$130 capital (0.3-3.3% ratio); the 7th (MACCA-SOL, $472 TVL) was genuinely too thin (27.5%) and correctly still rejected. Scales automatically as capital compounds — no manual re-tuning needed. Low-confidence starting guess (5%), not yet validated live. Self-check: `src/scripts/checkCapitalTvlRatio.ts`. |
 | 24h volume floor | `MIN_24H_VOLUME_USD` | $200,000 | |
 | Vol/TVL ratio floor **[entry-only]** | `MIN_VOL_TVL_RATIO` | 3.0x | |
 | Bin step floor | `MIN_BIN_STEP` | 15 | Wider bins = wider effective price range per bin. |

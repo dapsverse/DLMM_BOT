@@ -206,6 +206,21 @@ export interface ScannerConfig {
   entryMinBuyRatio1h: number;
   /** Entry-only floor on volumeSpikeRatio — below this, a pool isn't accelerating at all, regardless of how it ranks against other candidates. */
   entryMinSpikeRatio: number;
+  /**
+   * Entry-only ceiling on (capital about to enter this pool) / (pool TVL),
+   * as a percent — e.g. 5 means our deposit can't exceed 5% of the pool's
+   * liquidity. Added 2026-09-25 to replace MIN_TVL_USD as the real
+   * slippage-safety gate: a fixed dollar floor doesn't know how big our
+   * capital actually is, so it either blocks genuinely-safe small-cap pools
+   * (confirmed live: 6 of 7 sampled ~$300k-mcap pools had 0.3-3.3% capital/
+   * TVL ratio — completely safe for our ~$130 capital — but sat on
+   * $472-$22,632 TVL, all below the old $35k/$50k floor) or, if loosened
+   * enough to admit them, would just as easily admit a genuinely-too-thin
+   * pool too (the 7th sample, MACCA-SOL: $472 TVL, 27.5% ratio — real
+   * price-impact risk). This scales automatically as capital compounds:
+   * the same ratio requires proportionally more TVL as the deposit grows.
+   */
+  maxCapitalTvlRatioPct: number;
   blacklistPools: Map<string, number>; // poolAddress -> blacklisted-until (epoch ms)
 }
 
@@ -348,19 +363,28 @@ export interface FilterOpts {
   /**
    * Skip the checks that only make sense when SIZING new capital into a
    * pool (maxTvlUsd, minVolTvlRatio, maxMemecoinMarketCapUsd,
-   * maxPriceChange1hPumpPct, entryMinSpikeRatio) — a pool growing past
-   * these ceilings, pumping hard, or having its spike cool off is a symptom
-   * of the position SUCCEEDING or just maturing, not of it going bad —
-   * don't force an exit on a held winner (trailing take-profit / the
-   * switch's trend-protect guard already cover "is this still worth
-   * holding"). Used when re-screening a pool we're already holding to
-   * decide "stay" vs "leave" — genuine health/danger checks (min TVL floor,
-   * min volume, holders, mint/freeze authority, crash-guard, trend floor,
-   * activity cascade, tx count, wash-trade guard, buy-ratio) still apply
-   * either way. Never set true for a fresh multi-candidate market scan —
-   * that's exactly where these checks matter.
+   * maxPriceChange1hPumpPct, entryMinSpikeRatio, maxCapitalTvlRatioPct) — a
+   * pool growing past these ceilings, pumping hard, having its spike cool
+   * off, or our own capital becoming a bigger slice of its TVL (because it
+   * grew, not because we deposited more) is a symptom of the position
+   * SUCCEEDING or just maturing, not of it going bad — don't force an exit
+   * on a held winner (trailing take-profit / the switch's trend-protect
+   * guard already cover "is this still worth holding"). Used when
+   * re-screening a pool we're already holding to decide "stay" vs "leave"
+   * — genuine health/danger checks (min TVL floor, min volume, holders,
+   * mint/freeze authority, crash-guard, trend floor, activity cascade, tx
+   * count, wash-trade guard, buy-ratio) still apply either way. Never set
+   * true for a fresh multi-candidate market scan — that's exactly where
+   * these checks matter.
    */
   skipSizingChecks?: boolean;
+  /**
+   * SOL amount about to be deposited into a pool — required for the
+   * maxCapitalTvlRatioPct check above. Undefined = that check is skipped
+   * (permissive-unknown, same policy as the rest of the screen), so every
+   * caller that wants slippage-safety protection must actually pass it.
+   */
+  currentCapitalSol?: number;
 }
 
 /**
@@ -381,6 +405,15 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
 
     if (tvl < config.minTvlUsd) return false;
     if (!opts.skipSizingChecks && tvl > config.maxTvlUsd) return false;
+    // Real slippage-safety gate (see maxCapitalTvlRatioPct doc comment) —
+    // scales with our actual capital instead of a fixed dollar floor.
+    if (!opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
+      const sol = solToken(pair);
+      if (sol) {
+        const capitalUsd = opts.currentCapitalSol * sol.priceUsd;
+        if ((capitalUsd / tvl) * 100 > config.maxCapitalTvlRatioPct) return false;
+      }
+    }
     if (vol24h < config.minVolume24hUsd) return false;
     if (!opts.skipSizingChecks && vol24h / tvl < config.minVolTvlRatio) return false;
     if (pair.bin_step < config.minBinStep) return false;
@@ -564,10 +597,10 @@ export interface OpportunityScanResult {
  * path; this runs on its own much slower OPPORTUNITY_SCAN_INTERVAL_MS
  * cadence, enforced by the caller in index.ts/paperTrade.ts, not here).
  */
-export async function scanForBetterOpportunity(currentPoolAddress: string, config: ScannerConfig): Promise<OpportunityScanResult> {
+export async function scanForBetterOpportunity(currentPoolAddress: string, config: ScannerConfig, currentCapitalSol?: number): Promise<OpportunityScanResult> {
   const pairs = await fetchTopPools();
   const currentPool = pairs.find((p) => p.address === currentPoolAddress) ?? null;
-  const shortlist = await filterAndRankPools(pairs, config);
+  const shortlist = await filterAndRankPools(pairs, config, { currentCapitalSol });
   const topCandidate = shortlist[0] ?? null;
 
   // filterAndRankPools already hydrated every pool in `shortlist` in place
@@ -621,6 +654,15 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   } else {
     if (tvl < config.minTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} < min $${config.minTvlUsd}`);
     if (!opts.skipSizingChecks && tvl > config.maxTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} > max $${config.maxTvlUsd}`);
+    if (!opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
+      const sol = solToken(pair);
+      if (sol) {
+        const ratioPct = ((opts.currentCapitalSol * sol.priceUsd) / tvl) * 100;
+        if (ratioPct > config.maxCapitalTvlRatioPct) {
+          reasons.push(`capital/tvl ratio ${ratioPct.toFixed(2)}% > max ${config.maxCapitalTvlRatioPct}%`);
+        }
+      }
+    }
     if (vol24h < config.minVolume24hUsd) reasons.push(`vol24h $${vol24h.toFixed(0)} < min $${config.minVolume24hUsd}`);
     if (!opts.skipSizingChecks && vol24h / tvl < config.minVolTvlRatio) reasons.push(`vol/tvl ${(vol24h / tvl).toFixed(2)}x < min ${config.minVolTvlRatio}x`);
   }
@@ -703,7 +745,7 @@ export async function isPoolStillEligible(poolAddress: string, config: ScannerCo
  * (>= MIN_SCAN_INTERVAL_MS) regardless of caller cadence, so a misconfigured
  * caller can't hammer the API.
  */
-export async function scanPools(config: ScannerConfig): Promise<MeteoraPair[]> {
+export async function scanPools(config: ScannerConfig, currentCapitalSol?: number): Promise<MeteoraPair[]> {
   const now = Date.now();
   if (now - lastScanAt < MIN_SCAN_INTERVAL_MS) {
     logger.debug('[scanner] skip: polled too recently');
@@ -712,7 +754,7 @@ export async function scanPools(config: ScannerConfig): Promise<MeteoraPair[]> {
   lastScanAt = now;
 
   const pairs = await fetchTopPools();
-  return filterAndRankPools(pairs, config);
+  return filterAndRankPools(pairs, config, { currentCapitalSol });
 }
 
 export function defaultScannerConfig(blacklistPools: Map<string, number>): ScannerConfig {
@@ -734,6 +776,7 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     maxPriceChange1hPumpPct: env.MAX_PRICE_CHANGE_1H_PUMP_PCT,
     entryMinBuyRatio1h: env.ENTRY_MIN_BUY_RATIO_1H,
     entryMinSpikeRatio: env.ENTRY_MIN_SPIKE_RATIO,
+    maxCapitalTvlRatioPct: env.MAX_CAPITAL_TVL_RATIO_PCT,
     blacklistPools,
   };
 }

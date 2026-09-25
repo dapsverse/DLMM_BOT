@@ -189,6 +189,16 @@ function writeState(currentValueUsd: number, currentBinId?: number | null, price
   const pnlUsd = summary.startingCapitalUsd === null ? 0 : currentValueUsd - summary.startingCapitalUsd;
   const pnlPct = summary.startingCapitalUsd ? (pnlUsd / summary.startingCapitalUsd) * 100 : 0;
 
+  // summary.totalFeesEarnedUsd only accumulates on realized events (claim,
+  // compound, exit) — an open position's currently-accruing feesEarnedUsd
+  // isn't folded in until one of those fires, so displaying it as-is
+  // understates "fees so far" for a still-open position (even though
+  // currentValueUsd/pnlUsd above already correctly include it via
+  // lpPrincipalUsd + position.feesEarnedUsd). Add the live unclaimed
+  // portion here for DISPLAY only — summary.totalFeesEarnedUsd itself stays
+  // untouched so the += additions on realization don't double-count it.
+  const totalFeesEarnedUsdWithUnclaimed = summary.totalFeesEarnedUsd + (position ? position.feesEarnedUsd : 0);
+
   let binInfo: Record<string, unknown> | null = null;
   if (position) {
     const center = position.centerBinId;
@@ -221,12 +231,16 @@ function writeState(currentValueUsd: number, currentBinId?: number | null, price
         currentValueUsd: +currentValueUsd.toFixed(2),
         currentValueSol: lastKnownSolPriceUsd > 0 ? +(currentValueUsd / lastKnownSolPriceUsd).toFixed(4) : null,
         // pnlUsd/pnlPct are total PnL WITH fees already baked in (currentValueUsd
-        // already nets out price/IL + all fee effects) — totalFeesEarnedUsd (from
-        // ...summary above) is the fees-only slice of that total, so
-        // pnlUsd - totalFeesEarnedUsd isolates the price/IL-only component.
+        // already nets out price/IL + all fee effects) — totalFeesEarnedUsd
+        // (overridden below to include the open position's live unclaimed
+        // fees, not just realized ones) is the fees-only slice of that
+        // total, so pnlUsd - totalFeesEarnedUsd isolates the price/IL-only
+        // component.
         pnlUsd: +pnlUsd.toFixed(2),
         pnlPct: +pnlPct.toFixed(2),
-        totalFeesEarnedSol: lastKnownSolPriceUsd > 0 ? +(summary.totalFeesEarnedUsd / lastKnownSolPriceUsd).toFixed(4) : null,
+        // Override the ...summary spread's totalFeesEarnedUsd — see comment above.
+        totalFeesEarnedUsd: +totalFeesEarnedUsdWithUnclaimed.toFixed(2),
+        totalFeesEarnedSol: lastKnownSolPriceUsd > 0 ? +(totalFeesEarnedUsdWithUnclaimed / lastKnownSolPriceUsd).toFixed(4) : null,
         currentPosition: position
           ? {
               pool: position.poolName,
@@ -326,8 +340,8 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
   return entered;
 }
 
-async function enterBestPool(pairs: MeteoraPair[]): Promise<VirtualPosition | null> {
-  const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist));
+async function enterBestPool(pairs: MeteoraPair[], currentCapitalSol?: number): Promise<VirtualPosition | null> {
+  const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist), { currentCapitalSol });
   if (!candidates.length) {
     logEvent({ type: 'NO_CANDIDATE', note: 'no pool passes screen this tick' });
     return null;
@@ -345,7 +359,8 @@ async function tick(): Promise<void> {
       idleCapitalUsd = (idleCapitalUsd / lastKnownSolPriceUsd) * anySol.priceUsd;
       lastKnownSolPriceUsd = anySol.priceUsd;
     }
-    const entered = await enterBestPool(pairs);
+    const currentCapitalSol = lastKnownSolPriceUsd > 0 ? idleCapitalUsd / lastKnownSolPriceUsd : undefined;
+    const entered = await enterBestPool(pairs, currentCapitalSol);
     writeState(portfolioValueUsd(entered ? entered.capitalUsd : idleCapitalUsd));
     return;
   }
@@ -622,7 +637,9 @@ async function tick(): Promise<void> {
     const opportunityNow = Date.now();
     if (opportunityNow - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
       lastOpportunityScanAtMs = opportunityNow;
-      const scanResult = await scanForBetterOpportunity(position.poolAddress, defaultScannerConfig(blacklist));
+      // finalPositionValueUsd/sol.priceUsd, not initialDepositUsd — a SWITCH
+      // moves whatever the position is actually worth right now.
+      const scanResult = await scanForBetterOpportunity(position.poolAddress, defaultScannerConfig(blacklist), finalPositionValueUsd / sol.priceUsd);
       // initialDepositUsd basis, matching index.ts's switch-eval currentProfitPct — same reasoning as the TAKE_PROFIT fix above.
       const currentProfitPctForSwitch = position.initialDepositUsd > 0 ? ((finalPositionValueUsd - position.initialDepositUsd) / position.initialDepositUsd) * 100 : 0;
       const switchEval = evaluateSwitchOpportunity(
