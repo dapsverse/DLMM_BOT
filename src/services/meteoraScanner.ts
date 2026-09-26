@@ -186,7 +186,6 @@ export function nonSolToken(pair: MeteoraPair): TokenMeta | null {
 
 export interface ScannerConfig {
   minTvlUsd: number;
-  maxTvlUsd: number;
   minVolume24hUsd: number;
   minVolTvlRatio: number;
   maxMemecoinMarketCapUsd: number;
@@ -202,10 +201,18 @@ export interface ScannerConfig {
   minTxCountM5: number;
   /** Entry-only ceiling on 1h price change — a pool already up more than this in the last hour is more likely near/past a local top than early in a move. See the overextension-ceiling check in filterAndRankPools. */
   maxPriceChange1hPumpPct: number;
+  /** Entry-only ceiling on 24h price change — catches a pool whose whole move already happened over the last day and has since decelerated under the 1h ceiling above. See MAX_PRICE_CHANGE_24H_PUMP_PCT doc comment (env.ts) for the GO-SOL/familiars-SOL incidents that motivated this. */
+  maxPriceChange24hPumpPct: number;
   /** Floor on 1h buyRatio (buys/(buys+sells)) — below this, activity is treated as sell-dominant, not a genuine pump signal. Applies in both entry and re-screen modes. */
   entryMinBuyRatio1h: number;
-  /** Entry-only floor on volumeSpikeRatio — below this, a pool isn't accelerating at all, regardless of how it ranks against other candidates. */
+  /** Entry-only floor on volumeSpikeRatio — below this, a pool isn't accelerating at all, regardless of how it ranks against other candidates. Only enforced in 'momentum' entryStrategyMode. */
   entryMinSpikeRatio: number;
+  /** Which entry track to use — see ENTRY_STRATEGY_MODE (env.ts) for the full rationale. 'momentum' (default) chases acceleration (entryMinSpikeRatio + rankCandidates). 'trend' requires a large SUSTAINED move (trendMinSustainedPct on both 6h and 24h) and ranks by TVL (rankTrendCandidates). 'range' is the opposite of both — requires LOW volatility (rangeMaxVolatilityPct) and ranks by vol/TVL turnover (rankRangeCandidates), for the DLMM/LP execution path specifically (fee yield with minimal IL). */
+  entryStrategyMode: 'momentum' | 'trend' | 'range';
+  /** Entry-only floor (both 6h AND 24h price change must clear this) for 'trend' entryStrategyMode — unknown data fails closed, unlike the rest of the screen's permissive-unknown policy, since verifying a sustained trend is the entire point of this mode. */
+  trendMinSustainedPct: number;
+  /** Ceiling on |1h| and |6h| price change for 'range' entryStrategyMode — unlike every other sizing check, NOT skipped on re-screen (see RANGE_MAX_VOLATILITY_PCT, env.ts): a held range-bound position that starts trending broke its own investment thesis. */
+  rangeMaxVolatilityPct: number;
   /**
    * Entry-only ceiling on (capital about to enter this pool) / (pool TVL),
    * as a percent — e.g. 5 means our deposit can't exceed 5% of the pool's
@@ -362,7 +369,7 @@ export async function hydrateMintAuthority(pairs: MeteoraPair[]): Promise<void> 
 export interface FilterOpts {
   /**
    * Skip the checks that only make sense when SIZING new capital into a
-   * pool (maxTvlUsd, minVolTvlRatio, maxMemecoinMarketCapUsd,
+   * pool (minVolTvlRatio, maxMemecoinMarketCapUsd,
    * maxPriceChange1hPumpPct, entryMinSpikeRatio, maxCapitalTvlRatioPct) — a
    * pool growing past these ceilings, pumping hard, having its spike cool
    * off, or our own capital becoming a bigger slice of its TVL (because it
@@ -404,7 +411,6 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     if (!Number.isFinite(tvl) || !Number.isFinite(vol24h) || tvl <= 0) return false;
 
     if (tvl < config.minTvlUsd) return false;
-    if (!opts.skipSizingChecks && tvl > config.maxTvlUsd) return false;
     // Real slippage-safety gate (see maxCapitalTvlRatioPct doc comment) —
     // scales with our actual capital instead of a fixed dollar floor.
     if (!opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
@@ -458,6 +464,14 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // (skipSizingChecks) — a HELD position pumping +50%+ in an hour is
     // exactly the outcome this bot wants, not a reason to force an exit.
     if (!opts.skipSizingChecks && pair.priceChange1hPct !== undefined && pair.priceChange1hPct > config.maxPriceChange1hPumpPct) {
+      return false;
+    }
+
+    // 24h overextension ceiling — same reasoning as the 1h ceiling above,
+    // but catches a pool whose blow-off already happened over the last day
+    // and has since decelerated enough to slip under the 1h check. See
+    // MAX_PRICE_CHANGE_24H_PUMP_PCT (env.ts) for the GO-SOL incident.
+    if (!opts.skipSizingChecks && pair.priceChange24hPct !== undefined && pair.priceChange24hPct > config.maxPriceChange24hPumpPct) {
       return false;
     }
 
@@ -518,19 +532,72 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // data) doesn't block, same policy as the rest of this screen.
     if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= config.entryMinBuyRatio1h) return false;
 
-    // Absolute spike floor for FRESH entries only — see ENTRY_MIN_SPIKE_RATIO
-    // doc comment. A held position's own spike cooling off is not itself a
-    // reason to force an exit (trailing take-profit / trend-protect already
-    // cover "is this position still worth holding"), so this only applies
-    // when sizing NEW capital into a pool.
-    if (!opts.skipSizingChecks && volumeSpikeRatio(pair) < config.entryMinSpikeRatio) return false;
+    // Absolute spike floor for FRESH entries only, 'momentum' mode only —
+    // see ENTRY_MIN_SPIKE_RATIO doc comment. A held position's own spike
+    // cooling off is not itself a reason to force an exit (trailing
+    // take-profit / trend-protect already cover "is this position still
+    // worth holding"), so this only applies when sizing NEW capital into a
+    // pool.
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'momentum' && volumeSpikeRatio(pair) < config.entryMinSpikeRatio) return false;
+
+    // 'trend' mode's entry floor: skip acceleration entirely, require a
+    // large SUSTAINED move instead (both 6h AND 24h) — see
+    // ENTRY_STRATEGY_MODE (env.ts) for the SI-SOL incident that motivated
+    // this. Fails closed on unknown data (undefined), unlike the rest of
+    // this screen — verifying the sustained trend IS the point of this mode.
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'trend') {
+      if ((pair.priceChange6hPct ?? -Infinity) < config.trendMinSustainedPct) return false;
+      if ((pair.priceChange24hPct ?? -Infinity) < config.trendMinSustainedPct) return false;
+    }
+
+    // 'range' mode's volatility ceiling — deliberately NOT gated by
+    // skipSizingChecks (see rangeMaxVolatilityPct doc comment): a held
+    // range-bound position that starts trending broke its own thesis, so
+    // this stays live on re-screen too, unlike every other sizing check
+    // here. Fails closed on unknown data, same reasoning as trend mode.
+    if (config.entryStrategyMode === 'range') {
+      if (Math.abs(pair.priceChange1hPct ?? Infinity) > config.rangeMaxVolatilityPct) return false;
+      if (Math.abs(pair.priceChange6hPct ?? Infinity) > config.rangeMaxVolatilityPct) return false;
+    }
 
     return true;
   });
 
-  const spikeShortlist = rankCandidates(candidates);
-  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters, top ${spikeShortlist.length} shortlisted by volume spike then buy-dominance then freshness`);
-  return spikeShortlist;
+  const shortlist =
+    config.entryStrategyMode === 'trend'
+      ? rankTrendCandidates(candidates)
+      : config.entryStrategyMode === 'range'
+        ? rankRangeCandidates(candidates)
+        : rankCandidates(candidates);
+  logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters (${config.entryStrategyMode} mode), top ${shortlist.length} shortlisted`);
+  return shortlist;
+}
+
+/**
+ * 'trend' entryStrategyMode's ranking (see ENTRY_STRATEGY_MODE, env.ts) —
+ * candidates already cleared the trendMinSustainedPct floor (genuine
+ * sustained 6h+24h move), so the remaining question is which is most
+ * "established" rather than which is accelerating fastest. TVL (liquidity)
+ * descending is the direct proxy: deepest pool first — biggest, most mature,
+ * least likely to be a thin/fragile mover. Deliberately a single sort key,
+ * not a weighted composite — nothing yet justifies more than that.
+ */
+export function rankTrendCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
+  return [...candidates].sort((a, b) => Number(b.liquidity) - Number(a.liquidity));
+}
+
+/**
+ * 'range' entryStrategyMode's ranking (see ENTRY_STRATEGY_MODE, env.ts) —
+ * candidates already cleared the rangeMaxVolatilityPct ceiling (genuinely
+ * calm, not trending), so the remaining question is which generates the
+ * most fee yield relative to capital. vol/TVL ratio (turnover) descending
+ * is the direct proxy — more $ traded per $ of liquidity means a bigger
+ * pro-rata fee share for the same deposit, with the volatility ceiling
+ * above already having screened out the IL risk that would normally come
+ * with high turnover. Single sort key, same reasoning as rankTrendCandidates.
+ */
+export function rankRangeCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
+  return [...candidates].sort((a, b) => Number(b.trade_volume_24h) / Number(b.liquidity) - Number(a.trade_volume_24h) / Number(a.liquidity));
 }
 
 /**
@@ -653,7 +720,6 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
     reasons.push('invalid tvl/volume data');
   } else {
     if (tvl < config.minTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} < min $${config.minTvlUsd}`);
-    if (!opts.skipSizingChecks && tvl > config.maxTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} > max $${config.maxTvlUsd}`);
     if (!opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
       const sol = solToken(pair);
       if (sol) {
@@ -686,6 +752,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   if (!opts.skipSizingChecks && pair.priceChange1hPct !== undefined && pair.priceChange1hPct > config.maxPriceChange1hPumpPct) {
     reasons.push(`1h overextension ${pair.priceChange1hPct.toFixed(2)}% > max ${config.maxPriceChange1hPumpPct}%`);
   }
+  if (!opts.skipSizingChecks && pair.priceChange24hPct !== undefined && pair.priceChange24hPct > config.maxPriceChange24hPumpPct) {
+    reasons.push(`24h overextension ${pair.priceChange24hPct.toFixed(2)}% > max ${config.maxPriceChange24hPumpPct}%`);
+  }
   if (config.requireUptrend && pair.priceChange6hPct !== undefined && pair.priceChange6hPct < config.minPriceChange6hPct) {
     reasons.push(`6h trend ${pair.priceChange6hPct.toFixed(2)}% < min ${config.minPriceChange6hPct}%`);
   }
@@ -711,8 +780,24 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= config.entryMinBuyRatio1h) {
     reasons.push(`1h buy ratio ${(pair.buyRatio1h * 100).toFixed(0)}% <= ${config.entryMinBuyRatio1h * 100}% - sell-dominant, not a genuine pump signal`);
   }
-  if (!opts.skipSizingChecks && volumeSpikeRatio(pair) < config.entryMinSpikeRatio) {
+  if (!opts.skipSizingChecks && config.entryStrategyMode === 'momentum' && volumeSpikeRatio(pair) < config.entryMinSpikeRatio) {
     reasons.push(`volume spike ${volumeSpikeRatio(pair).toFixed(2)}x < entry floor ${config.entryMinSpikeRatio}x - not actually accelerating`);
+  }
+  if (!opts.skipSizingChecks && config.entryStrategyMode === 'trend') {
+    if ((pair.priceChange6hPct ?? -Infinity) < config.trendMinSustainedPct) {
+      reasons.push(`6h change ${pair.priceChange6hPct?.toFixed(2) ?? 'unknown'}% < trend floor ${config.trendMinSustainedPct}%`);
+    }
+    if ((pair.priceChange24hPct ?? -Infinity) < config.trendMinSustainedPct) {
+      reasons.push(`24h change ${pair.priceChange24hPct?.toFixed(2) ?? 'unknown'}% < trend floor ${config.trendMinSustainedPct}%`);
+    }
+  }
+  if (config.entryStrategyMode === 'range') {
+    if (Math.abs(pair.priceChange1hPct ?? Infinity) > config.rangeMaxVolatilityPct) {
+      reasons.push(`1h |change| ${pair.priceChange1hPct?.toFixed(2) ?? 'unknown'}% > range ceiling ${config.rangeMaxVolatilityPct}% - no longer range-bound`);
+    }
+    if (Math.abs(pair.priceChange6hPct ?? Infinity) > config.rangeMaxVolatilityPct) {
+      reasons.push(`6h |change| ${pair.priceChange6hPct?.toFixed(2) ?? 'unknown'}% > range ceiling ${config.rangeMaxVolatilityPct}% - no longer range-bound`);
+    }
   }
 
   return reasons;
@@ -722,7 +807,7 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
  * Re-checks a single already-held pool against the entry screen — used
  * when an idle/out-of-range position needs to decide "stay in this pool
  * (still qualifies) or leave and find a different one (no longer does)".
- * Always skips the capital-sizing checks (maxTvlUsd/minVolTvlRatio/
+ * Always skips the capital-sizing checks (minVolTvlRatio/
  * maxMemecoinMarketCapUsd, see FilterOpts) — this is a "should I keep
  * holding" decision, not a "should new capital go here" decision, so a
  * pool that simply grew past those ceilings (i.e. succeeded) shouldn't
@@ -760,7 +845,6 @@ export async function scanPools(config: ScannerConfig, currentCapitalSol?: numbe
 export function defaultScannerConfig(blacklistPools: Map<string, number>): ScannerConfig {
   return {
     minTvlUsd: env.MIN_TVL_USD,
-    maxTvlUsd: env.MAX_TVL_USD,
     minVolume24hUsd: env.MIN_24H_VOLUME_USD,
     minVolTvlRatio: env.MIN_VOL_TVL_RATIO,
     maxMemecoinMarketCapUsd: env.MAX_MEMECOIN_MARKET_CAP_USD,
@@ -774,8 +858,12 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     minRecentActivityRatio: env.MIN_RECENT_ACTIVITY_RATIO,
     minTxCountM5: env.MIN_TX_COUNT_M5,
     maxPriceChange1hPumpPct: env.MAX_PRICE_CHANGE_1H_PUMP_PCT,
+    maxPriceChange24hPumpPct: env.MAX_PRICE_CHANGE_24H_PUMP_PCT,
     entryMinBuyRatio1h: env.ENTRY_MIN_BUY_RATIO_1H,
     entryMinSpikeRatio: env.ENTRY_MIN_SPIKE_RATIO,
+    entryStrategyMode: env.ENTRY_STRATEGY_MODE,
+    trendMinSustainedPct: env.TREND_MIN_SUSTAINED_PCT,
+    rangeMaxVolatilityPct: env.RANGE_MAX_VOLATILITY_PCT,
     maxCapitalTvlRatioPct: env.MAX_CAPITAL_TVL_RATIO_PCT,
     blacklistPools,
   };

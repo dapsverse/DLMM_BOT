@@ -56,13 +56,18 @@ export const env = {
   // capital automatically. This floor just catches pools with essentially
   // no liquidity at all, regardless of ratio math.
   MIN_TVL_USD: num('MIN_TVL_USD', 1_000),
-  // Was 1_000_000 — with ~$490 (4.2 SOL) working capital, a pool anywhere
-  // near that TVL dilutes our pro-rata fee share to ~0.05%, near-zero $ fee
-  // regardless of how active the pool actually is (confirmed live: ALLINU-SOL,
-  // $476k TVL, $42k/1h volume — genuinely active pool, still only $0.40 fee
-  // in 46min). Then 150k, now raised to 300k (2026-09-23, user call) to widen
-  // the candidate pool without going back anywhere near the ~$1M dilution zone.
-  MAX_TVL_USD: num('MAX_TVL_USD', 300_000),
+  // MAX_TVL_USD ceiling removed entirely 2026-09-26 (was 300_000). Its only
+  // rationale was LP pro-rata fee dilution in a big pool — moot now that
+  // paper-trade data showed fee income is already negligible/net-negative
+  // (rebalance+entry/exit costs exceed it) across every running instance
+  // regardless of pool size, and it doesn't apply to the spot executor at
+  // all (no LP fee to dilute). Confirmed live: SI-SOL's real Meteora pool
+  // ($685k TVL, sustained 6h/24h uptrend, 6M->9M mcap over 9h) was rejected
+  // SOLELY by this ceiling while every entered pool that night (all under
+  // 300k TVL, all "new spike" candidates) crashed -12% to -50%. Slippage
+  // safety on the LOW end is still fully covered by MAX_CAPITAL_TVL_RATIO_PCT
+  // below (scales with capital) — there's no equivalent risk on the high
+  // end a bigger pool introduces; a deeper pool is safer, not riskier.
   MIN_24H_VOLUME_USD: num('MIN_24H_VOLUME_USD', 200_000),
   MIN_VOL_TVL_RATIO: num('MIN_VOL_TVL_RATIO', 3.0),
   POOL_SCAN_INTERVAL_MS: num('POOL_SCAN_INTERVAL_MS', 60_000),
@@ -85,6 +90,50 @@ export const env = {
   // uptrend, not a coin flip near flat.
   REQUIRE_UPTREND: bool('REQUIRE_UPTREND', true),
   MIN_PRICE_CHANGE_6H_PCT: num('MIN_PRICE_CHANGE_6H_PCT', 0),
+
+  // Second entry track (added 2026-09-26) — the momentum-chase ranking
+  // above (volumeSpikeRatio/ENTRY_MIN_SPIKE_RATIO) structurally excludes a
+  // token that already did its whole move and is now just steadily holding
+  // (low CURRENT spike ratio despite a real, large, sustained trend).
+  // Confirmed live: SI-SOL's Meteora pool ($685k TVL, +66% 6h / +46% 24h,
+  // 6M->9M mcap over 9h) got rejected on spike ratio alone (0.21x) on every
+  // running instance, same night every entered "new spike" candidate
+  // crashed -12% to -50%. 'trend' mode (paperTrade.ts instances only, via
+  // ENTRY_STRATEGY_MODE=trend) skips the spike-ratio requirement entirely
+  // and instead requires BOTH 6h and 24h change to clear
+  // TREND_MIN_SUSTAINED_PCT (unknown data fails closed here — sustained
+  // trend is the entire point of this mode, unlike the rest of the screen's
+  // permissive-unknown policy). Ranks survivors by TVL (liquidity)
+  // descending instead of by acceleration — biggest/most-established first.
+  // All other safety gates (crash guard, overextension ceilings, buy-ratio,
+  // activity/tx-count, wash-trade, mint/freeze authority) still apply
+  // identically to both modes. Untested — this is what the trend-mode
+  // paper-trade instances exist to validate against the momentum-chase
+  // ones already running.
+  ENTRY_STRATEGY_MODE: (() => {
+    const v = optionalStr('ENTRY_STRATEGY_MODE', 'momentum');
+    if (v !== 'momentum' && v !== 'trend' && v !== 'range') throw new Error(`[env] ENTRY_STRATEGY_MODE must be "momentum", "trend", or "range", got "${v}"`);
+    return v as 'momentum' | 'trend' | 'range';
+  })(),
+  TREND_MIN_SUSTAINED_PCT: num('TREND_MIN_SUSTAINED_PCT', 20),
+
+  // Third entry track (added 2026-09-26) — specifically for the DLMM/LP
+  // execution path, not spot. IL costs nothing when price barely moves and
+  // fee income compounds with no directional cost — the OPPOSITE case from
+  // 'momentum'/'trend' (both target directional movers, confirmed live this
+  // session to be the worst-case scenario for LPing: every DLMM instance's
+  // rebalance+entry/exit costs exceeded its fee income on a momentum-chase
+  // target). 'range' mode rejects anything moving more than
+  // RANGE_MAX_VOLATILITY_PCT on EITHER 1h or 6h (opposite of 'trend' mode's
+  // floor) and ranks by vol/TVL ratio (turnover, a direct fee-yield proxy)
+  // instead of by spike or TVL. Unlike every other entry-only sizing check
+  // in this file, this ceiling is NOT skipped on re-screen — if a held
+  // 'range' position starts trending, the entire range-bound thesis just
+  // broke, that's a reason to reconsider even while holding, not something
+  // to ride out like a momentum position pumping. Untested — this is what
+  // the range-mode paper-trade instance (DLMM-only, spot execution
+  // deliberately not paired with this mode) exists to validate.
+  RANGE_MAX_VOLATILITY_PCT: num('RANGE_MAX_VOLATILITY_PCT', 15),
 
   // Activity cascade — 1h and 5m volume must each be at least this fraction
   // of the pool's own 24h average pace, or it's flagged as "24h number
@@ -109,6 +158,20 @@ export const env = {
   // start logging their own priceChange1hPct at decision time (see
   // paperTrade.ts ENTER/SWITCH events).
   MAX_PRICE_CHANGE_1H_PUMP_PCT: num('MAX_PRICE_CHANGE_1H_PUMP_PCT', 60),
+
+  // Entry-only overextension ceiling on 24h price change (2026-09-25) — the
+  // 1h ceiling above only catches a fresh blow-off; it's blind to a pool
+  // that already did its whole move over the last day and has since
+  // decelerated to a 1h/6h change small enough to slip under that ceiling.
+  // ENTRY_MIN_SPIKE_RATIO/entryMinBuyRatio1h don't help either — they're
+  // relative-momentum signals, not cumulative ones. Confirmed live
+  // 2026-09-25: GO-SOL entered at spike 0.305x (just above the loose 0.3x
+  // floor) with priceChange1hPct only 10.51% (nowhere near the 60% 1h
+  // ceiling) but priceChange24hPct +4637% — a near-identical pattern to the
+  // familiars-SOL incident that justified ENTRY_MIN_SPIKE_RATIO
+  // (+4400% 24h) — crashed -19% within the hour, -39% 6h trend. Low-
+  // confidence starting guess, not yet validated live.
+  MAX_PRICE_CHANGE_24H_PUMP_PCT: num('MAX_PRICE_CHANGE_24H_PUMP_PCT', 300),
 
   // Floor on 1h buyRatio (buys/(buys+sells), DexScreener txns.h1) — below
   // this, activity is treated as sell-dominant/distribution, not a genuine
@@ -239,6 +302,16 @@ export const env = {
   // the uptrend entry filter uses (steadier than 1h for memecoin noise).
   SWITCH_TREND_PROTECT_PCT: num('SWITCH_TREND_PROTECT_PCT', 10),
 
+  // Paper-trade executor toggles (paperTrade.ts only — no effect on the
+  // real bot). Both default to today's behavior (LP-only). Turn both on to
+  // run LP and spot side-by-side off the SAME scanned candidate/tick, for
+  // an apples-to-apples comparison of the LP wrapper itself vs. just
+  // buying/selling the token directly (added 2026-09-25 after paper-trade
+  // data showed every running LP instance's rebalance+entry/exit costs
+  // exceeding its fee income — see spotExecutor.ts).
+  ENABLE_LP_EXECUTOR: bool('ENABLE_LP_EXECUTOR', true),
+  ENABLE_SPOT_EXECUTOR: bool('ENABLE_SPOT_EXECUTOR', false),
+
   // Swap / gas
   SLIPPAGE_BPS: num('SLIPPAGE_BPS', 100),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),
@@ -260,7 +333,4 @@ if (env.INITIAL_LP_CAPITAL_SOL <= 0) {
 }
 if (env.STOP_LOSS_PCT <= 0 || env.STOP_LOSS_PCT > 100) {
   throw new Error('[env] STOP_LOSS_PCT must be in (0, 100]');
-}
-if (env.MAX_TVL_USD <= env.MIN_TVL_USD) {
-  throw new Error('[env] MAX_TVL_USD must be > MIN_TVL_USD');
 }

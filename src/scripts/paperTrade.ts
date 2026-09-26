@@ -54,6 +54,7 @@ import { computeOutOfRangeTracking } from '../logic/outOfRangeTracking.js';
 import { estimateCycleGasCostSol, estimateClaimCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
+import { createSpotExecutor, type SpotExecutor } from '../logic/spotExecutor.js';
 import { env } from '../config/env.js';
 
 const TICK_MS = 60_000; // matches MIN_SCAN_INTERVAL_MS — no point polling Meteora faster
@@ -138,6 +139,10 @@ let lastKnownSolPriceUsd = 0;
 let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
 const blacklist = new Map<string, number>();
+// Spot executor: same candidate/tick basis as the DLMM position below (see
+// mainTick), just buys/holds/sells the token instead of opening an LP
+// position. Off by default — see env.ts's ENABLE_SPOT_EXECUTOR doc comment.
+const spotExec: SpotExecutor | null = env.ENABLE_SPOT_EXECUTOR ? createSpotExecutor(`${LABEL ?? 'default'}-spot`, blacklist) : null;
 const summary: RunSummary = {
   label: LABEL ?? 'default',
   startedAtMs: runStartedAtMs,
@@ -340,18 +345,16 @@ async function enterPool(chosen: MeteoraPair): Promise<VirtualPosition | null> {
   return entered;
 }
 
-async function enterBestPool(pairs: MeteoraPair[], currentCapitalSol?: number): Promise<VirtualPosition | null> {
-  const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist), { currentCapitalSol });
-  if (!candidates.length) {
+/** Candidate is picked once per tick by mainTick (shared with the spot executor when both are active) — see mainTick's doc comment. */
+async function enterBestPool(preScanned: MeteoraPair | null): Promise<VirtualPosition | null> {
+  if (!preScanned) {
     logEvent({ type: 'NO_CANDIDATE', note: 'no pool passes screen this tick' });
     return null;
   }
-  return enterPool(candidates[0]!);
+  return enterPool(preScanned);
 }
 
-async function tick(): Promise<void> {
-  const pairs = await fetchTopPools();
-
+async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | null): Promise<void> {
   if (!position) {
     // revalue idle capital against latest SOL price (any pool with a SOL side works)
     const anySol = pairs.map(solToken).find((t) => t !== null);
@@ -359,8 +362,7 @@ async function tick(): Promise<void> {
       idleCapitalUsd = (idleCapitalUsd / lastKnownSolPriceUsd) * anySol.priceUsd;
       lastKnownSolPriceUsd = anySol.priceUsd;
     }
-    const currentCapitalSol = lastKnownSolPriceUsd > 0 ? idleCapitalUsd / lastKnownSolPriceUsd : undefined;
-    const entered = await enterBestPool(pairs, currentCapitalSol);
+    const entered = await enterBestPool(sharedCandidate);
     writeState(portfolioValueUsd(entered ? entered.capitalUsd : idleCapitalUsd));
     return;
   }
@@ -633,7 +635,11 @@ async function tick(): Promise<void> {
     });
   }
 
-  if (position && decision !== 'REBALANCE') {
+  // Opportunistic switching is a momentum-mode concept (chase whatever's
+  // spiking harder) — a 'trend' position isn't chasing acceleration, so
+  // there's nothing for it to switch INTO based on spike-ratio margin. See
+  // ENTRY_STRATEGY_MODE (env.ts).
+  if (position && decision !== 'REBALANCE' && env.ENTRY_STRATEGY_MODE === 'momentum') {
     const opportunityNow = Date.now();
     if (opportunityNow - lastOpportunityScanAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
       lastOpportunityScanAtMs = opportunityNow;
@@ -714,18 +720,57 @@ async function tick(): Promise<void> {
   writeState(portfolioValueUsd(position ? finalPositionValueUsd : idleCapitalUsd), currentBinId, priceCtx);
 }
 
+/**
+ * Fetches pool data ONCE per tick and dispatches to whichever executor(s)
+ * are enabled (ENABLE_LP_EXECUTOR/ENABLE_SPOT_EXECUTOR, env.ts). When both
+ * are idle (no open position), the entry candidate is picked ONCE here and
+ * fed to both — same candidate, same price, same timestamp — so a
+ * side-by-side LP-vs-spot comparison isn't confounded by each executor
+ * scanning independently a few seconds apart (confirmed this session:
+ * pool selection is timing-sensitive enough that a ~75s stagger alone
+ * changed which candidate qualified). Also avoids double-hydrating the
+ * same pairs via two independent filterAndRankPools calls.
+ */
+async function mainTick(): Promise<void> {
+  const pairs = await fetchTopPools();
+  const now = Date.now();
+
+  const dlmmIdle = env.ENABLE_LP_EXECUTOR && !position;
+  const spotIdle = !!spotExec && !spotExec.hasPosition();
+
+  let sharedCandidate: MeteoraPair | null = null;
+  if (dlmmIdle || spotIdle) {
+    // Capital basis for the capital/TVL ratio check: prefer DLMM's idle
+    // capital when it's the one idle, else spot's — ponytail: assumes
+    // matched capital across executors (this is for mirrored-instance
+    // comparison, not a generalized multi-capital resolver).
+    const currentCapitalSol = dlmmIdle
+      ? (lastKnownSolPriceUsd > 0 ? idleCapitalUsd / lastKnownSolPriceUsd : undefined)
+      : spotExec!.idleCapitalSol();
+    const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist), { currentCapitalSol });
+    sharedCandidate = candidates[0] ?? null;
+  }
+
+  const tasks: Promise<void>[] = [];
+  if (env.ENABLE_LP_EXECUTOR) tasks.push(dlmmTick(pairs, sharedCandidate));
+  if (spotExec) tasks.push(spotExec.tick(pairs, now, sharedCandidate));
+  await Promise.all(tasks);
+}
+
 async function main(): Promise<void> {
-  logEvent({
-    type: 'SIM_START',
-    label: summary.label,
-    durationHours: DURATION_HOURS,
-    initialLpCapitalSol: env.INITIAL_LP_CAPITAL_SOL,
-    note: 'paper trading — no wallet, no real transactions',
-  });
+  if (env.ENABLE_LP_EXECUTOR) {
+    logEvent({
+      type: 'SIM_START',
+      label: summary.label,
+      durationHours: DURATION_HOURS,
+      initialLpCapitalSol: env.INITIAL_LP_CAPITAL_SOL,
+      note: 'paper trading — no wallet, no real transactions',
+    });
+  }
 
   while (Date.now() - runStartedAtMs < DURATION_MS) {
     try {
-      await tick();
+      await mainTick();
     } catch (err) {
       logEvent({ type: 'ERROR', error: err instanceof Error ? err.message : String(err) });
     }
@@ -734,15 +779,18 @@ async function main(): Promise<void> {
 
   logEvent({ type: 'SIM_END', note: `${DURATION_HOURS}h simulation window elapsed` });
   logStream.end();
+  spotExec?.close();
 }
 
 process.on('SIGINT', () => {
   logEvent({ type: 'SIM_INTERRUPTED', note: 'SIGINT received' });
   logStream.end();
+  spotExec?.close();
   process.exit(0);
 });
 
 main().catch((err) => {
   logEvent({ type: 'FATAL', error: err instanceof Error ? err.message : String(err) });
+  spotExec?.close();
   process.exit(1);
 });

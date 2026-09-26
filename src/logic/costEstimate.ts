@@ -24,6 +24,19 @@ export function estimateCycleGasCostSol(capitalSol: number): number {
 }
 
 /**
+ * All-in cost (SOL) of one spot swap leg (buy-in or sell-out) — one tx,
+ * slippage budget + DEX fee on the FULL amount. Unlike
+ * estimateCycleGasCostSol above, a spot swap moves 100% of capital one
+ * direction (no LP deposit ratio to balance), so there's no "half capital"
+ * discount and no close/reopen leg — just the swap itself.
+ */
+export function estimateSpotSwapCostSol(capitalSol: number): number {
+  const priorityFeeSol = 0.0005; // 1 tx
+  const swapCostSol = capitalSol * ((env.SLIPPAGE_BPS + 30) / 10_000);
+  return priorityFeeSol + swapCostSol;
+}
+
+/**
  * Cost (SOL) of claiming fees WITHOUT closing the position — one tx, no
  * swap. Used when a fee-threshold REBALANCE fires while still in-range: no
  * need to re-center a range that isn't out of range, so skip the

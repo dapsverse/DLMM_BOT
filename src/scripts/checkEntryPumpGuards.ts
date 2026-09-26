@@ -1,12 +1,13 @@
 /**
- * Self-check for the P1 (overextension ceiling), P2 (buy-ratio reject), and
- * entry-spike-floor entry-screen guards — see SCREEN_RULE.MD "P0-P4" for
- * the full rationale (post-entry troughs of -8% to -28% observed live,
- * traced to the ranking chasing already-extended pumps).
+ * Self-check for the P1 (overextension ceiling, 1h + 24h), P2 (buy-ratio
+ * reject), and entry-spike-floor entry-screen guards — see SCREEN_RULE.MD
+ * "P0-P4" for the full rationale (post-entry troughs of -8% to -28%
+ * observed live, traced to the ranking chasing already-extended pumps).
  *
- *   P1 (maxPriceChange1hPumpPct): reject a pool up more than the ceiling in
- *   the last hour — entry-only (skipSizingChecks exempts a held position
- *   from being force-exited just for pumping hard).
+ *   P1 (maxPriceChange1hPumpPct / maxPriceChange24hPumpPct): reject a pool
+ *   up more than the ceiling in the last hour OR the last 24h — entry-only
+ *   (skipSizingChecks exempts a held position from being force-exited just
+ *   for pumping hard).
  *   P2 (buyRatio1h floor): reject a pool whose 1h volume is sell-dominant —
  *   applies in BOTH modes (health check, not a sizing check).
  *   Entry spike floor (ENTRY_MIN_SPIKE_RATIO, added 2026-09-24): reject a
@@ -60,6 +61,24 @@ const notOverextended = healthyPair({ priceChange1hPct: config.maxPriceChange1hP
 assert(
   !poolRejectReasons(notOverextended, config, { skipSizingChecks: false }).some((r) => r.includes('overextension')),
   'expected a pool under the ceiling to pass',
+);
+
+// P1b: entry-only 24h overextension ceiling (GO-SOL incident: 1h/6h looked
+// calm, 24h was +4637% — an already-played-out runner the 1h ceiling alone
+// missed).
+const stale24h = healthyPair({ priceChange1hPct: 10, priceChange24hPct: config.maxPriceChange24hPumpPct + 100 });
+assert(
+  poolRejectReasons(stale24h, config, { skipSizingChecks: false }).some((r) => r.includes('24h overextension')),
+  'expected fresh-entry screen to reject a pool over the 24h pump ceiling even with a calm 1h number',
+);
+assert(
+  !poolRejectReasons(stale24h, config, { skipSizingChecks: true }).some((r) => r.includes('24h overextension')),
+  'expected a held position up hard over 24h to NOT be force-exited (skipSizingChecks)',
+);
+const fresh24h = healthyPair({ priceChange1hPct: 10, priceChange24hPct: config.maxPriceChange24hPumpPct - 10 });
+assert(
+  !poolRejectReasons(fresh24h, config, { skipSizingChecks: false }).some((r) => r.includes('24h overextension')),
+  'expected a pool under the 24h ceiling to pass',
 );
 
 // P2: buy-ratio floor, both modes.
