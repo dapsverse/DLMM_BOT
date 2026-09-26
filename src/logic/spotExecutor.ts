@@ -98,10 +98,31 @@ export function shouldForceLeaveOnFailedRescreen(currentProfitPct: number): bool
   return currentProfitPct <= 0;
 }
 
+/**
+ * Idle capital (not currently in a position), in SOL, given a lazily-set
+ * price/capital pair. Bug found live 2026-09-26: both spotExecutor's own
+ * lastKnownSolPriceUsd/idleCapitalUsd AND paperTrade.ts's separate DLMM-side
+ * copies are only ever set for real inside their respective enterPool() —
+ * so before a process's first-ever entry they're still 0, and the naive
+ * `priceUsd > 0 ? capitalUsd / priceUsd : undefined` used to silently pass
+ * `undefined` as the capital/TVL ratio check's basis, skipping that
+ * slippage-safety gate entirely for the first entry (confirmed live:
+ * STEVEWILLDOIT-SOL entered at a 6.7% ratio, over the 5% ceiling).
+ * lastKnownSolPriceUsd never resets back to 0 after the first entry, so
+ * ===0 reliably means "still pristine, pre-first-entry" — the true idle
+ * capital there IS exactly INITIAL_LP_CAPITAL_SOL, not an unknown. Pulled
+ * into one shared function (spotExecutor.ts and paperTrade.ts each had
+ * their own inline copy of this exact ternary) so the two can't drift out
+ * of sync again — see checkSpotExecutor.ts for the self-check.
+ */
+export function resolveIdleCapitalSol(lastKnownSolPriceUsd: number, idleCapitalUsd: number): number {
+  return lastKnownSolPriceUsd > 0 ? idleCapitalUsd / lastKnownSolPriceUsd : env.INITIAL_LP_CAPITAL_SOL;
+}
+
 export interface SpotExecutor {
   hasPosition(): boolean;
-  /** Idle capital (not currently in a position), in SOL — undefined until the first candidate is known (mirrors DLMM's same bootstrap gap). Used by paperTrade.ts to pick the capital/TVL ratio basis for the shared candidate scan. */
-  idleCapitalSol(): number | undefined;
+  /** Idle capital (not currently in a position), in SOL — falls back to INITIAL_LP_CAPITAL_SOL in the pristine pre-first-entry state (see the implementation's 2026-09-26 bug-fix comment). Used by paperTrade.ts to pick the capital/TVL ratio basis for the shared candidate scan. */
+  idleCapitalSol(): number;
   tick(pairs: MeteoraPair[], now: number, sharedCandidate: MeteoraPair | null): Promise<void>;
   /** Flush and close this executor's own jsonl stream — call on process shutdown alongside the DLMM executor's. */
   close(): void;
@@ -454,7 +475,7 @@ export function createSpotExecutor(label: string, blacklist: Map<string, number>
 
   return {
     hasPosition: () => position !== null,
-    idleCapitalSol: () => (lastKnownSolPriceUsd > 0 ? idleCapitalUsd / lastKnownSolPriceUsd : undefined),
+    idleCapitalSol: () => resolveIdleCapitalSol(lastKnownSolPriceUsd, idleCapitalUsd),
     tick,
     close: () => logStream.end(),
   };

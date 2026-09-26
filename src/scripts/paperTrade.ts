@@ -54,7 +54,7 @@ import { computeOutOfRangeTracking } from '../logic/outOfRangeTracking.js';
 import { estimateCycleGasCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
-import { createSpotExecutor, type SpotExecutor } from '../logic/spotExecutor.js';
+import { createSpotExecutor, resolveIdleCapitalSol, type SpotExecutor } from '../logic/spotExecutor.js';
 import { env } from '../config/env.js';
 
 const TICK_MS = 60_000; // matches MIN_SCAN_INTERVAL_MS — no point polling Meteora faster
@@ -726,10 +726,10 @@ async function mainTick(): Promise<void> {
     // Capital basis for the capital/TVL ratio check: prefer DLMM's idle
     // capital when it's the one idle, else spot's — ponytail: assumes
     // matched capital across executors (this is for mirrored-instance
-    // comparison, not a generalized multi-capital resolver).
-    const currentCapitalSol = dlmmIdle
-      ? (lastKnownSolPriceUsd > 0 ? idleCapitalUsd / lastKnownSolPriceUsd : undefined)
-      : spotExec!.idleCapitalSol();
+    // comparison, not a generalized multi-capital resolver). See
+    // resolveIdleCapitalSol's doc comment (spotExecutor.ts) for the
+    // 2026-09-26 pristine-bootstrap bug this guards against.
+    const currentCapitalSol = dlmmIdle ? resolveIdleCapitalSol(lastKnownSolPriceUsd, idleCapitalUsd) : spotExec!.idleCapitalSol();
     const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist), { currentCapitalSol });
     sharedCandidate = candidates[0] ?? null;
   }

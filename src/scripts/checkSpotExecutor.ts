@@ -20,9 +20,21 @@
 import assert from 'node:assert';
 import { estimateCycleGasCostSol, estimateSpotSwapCostSol } from '../logic/costEstimate.js';
 import { evaluatePosition, type PositionHealthInput } from '../logic/riskManager.js';
-import { shouldForceLeaveOnFailedRescreen } from '../logic/spotExecutor.js';
+import { shouldForceLeaveOnFailedRescreen, resolveIdleCapitalSol } from '../logic/spotExecutor.js';
 import { TAKE_PROFIT_TIERS } from '../config/constants.js';
 import { env } from '../config/env.js';
+
+// 0. Bug found live 2026-09-26: in the pristine pre-first-entry state
+// (price/capital both still 0, never set), the idle-capital basis fed to
+// the capital/TVL ratio check must fall back to INITIAL_LP_CAPITAL_SOL, not
+// silently become `undefined` (which used to skip that slippage-safety
+// check entirely for a process's first-ever entry).
+assert(
+  resolveIdleCapitalSol(0, 0) === env.INITIAL_LP_CAPITAL_SOL,
+  'expected pristine (never-priced) state to fall back to INITIAL_LP_CAPITAL_SOL, not 0/undefined',
+);
+// Once a real price/capital pair exists, it should compute normally, not keep falling back.
+assert(resolveIdleCapitalSol(100, 250) === 2.5, 'expected a real price/capital pair to compute capitalUsd/priceUsd normally');
 
 // 1. Cost model: spot's swap leg is on the FULL capital, DLMM's is on HALF.
 const capitalSol = 10;
