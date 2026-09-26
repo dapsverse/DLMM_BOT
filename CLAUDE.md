@@ -1,14 +1,18 @@
-# meteora-dlmm-bot — session context (2026-09-25)
+# meteora-dlmm-bot — session context (2026-09-26)
 
 Single-pool auto-compounding Meteora DLMM LP bot for Solana memecoin pools.
 5 SOL total budget in the general design (4.2 SOL working capital / 0.8 SOL
 gas reserve); current paper-trade validation runs are sized off
-`INITIAL_LP_CAPITAL_SOL=1.15` / `MIN_GAS_RESERVE_SOL=0.1` (see below — these
-changed again this session). This file is the handoff — **read it before
-doing anything else in a fresh session.** Three sessions of work are folded
-in here (2026-09-22 baseline, 2026-09-23 opportunistic-switching, 2026-09-24
-→ 2026-09-25 pump-detection/volume-drop/capital-sizing) — this file
-supersedes the previous version entirely.
+`INITIAL_LP_CAPITAL_SOL=1.15` / `MIN_GAS_RESERVE_SOL=0.1` (unchanged this
+session). This file is the handoff — **read it before doing anything else in
+a fresh session.** Four sessions of work are folded in here (2026-09-22
+baseline, 2026-09-23 opportunistic-switching, 2026-09-24 → 2026-09-25
+pump-detection/volume-drop/capital-sizing, 2026-09-26 entry-strategy-modes +
+spot-executor A/B) — this file supersedes the previous version entirely.
+**Note: the 2026-09-26 work below was reconstructed from code/logs after the
+session's own context was lost to `/clear` before being saved — re-verify
+against the actual diff (`git status`/`git diff`) if anything here looks
+off, don't just trust this summary blindly.**
 
 **For the full current entry-screen parameter reference (every filter,
 value, unknown-data policy, and why), read `SCREEN_RULE.MD` — it's kept in
@@ -20,28 +24,49 @@ the spec.**
 
 - **Git**: still local-only, `main` has **zero commits on purpose** (never
   commit directly to main). All work is on `feature/trend-aware-entry` —
-  current branch. 42 commits on top of the original baseline scaffold.
-  Working tree clean. No PR opened yet (no git remote configured).
-- **Six live paper-trade instances running right now**, comparing entry
-  strictness × volume-drop-baseline fix, all on the SAME capital config
-  (`INITIAL_LP_CAPITAL_SOL=1.15`, `MIN_GAS_RESERVE_SOL=0.1`):
-  - `strict-optA` / `strict-optB` / `strict-optAB` — default (strict) entry
-    gates (`ENTRY_MIN_SPIKE_RATIO=1.0`, `ENTRY_MIN_BUY_RATIO_1H=0.5`).
-  - `loose-optA` / `loose-optB` / `loose-optAB` — loosened entry gates
-    (`ENTRY_MIN_SPIKE_RATIO=0.3`, `ENTRY_MIN_BUY_RATIO_1H=0.4`).
-  - `optA`/`optB`/`optAB` suffix = which volume-drop-baseline fix is on:
-    `VOLUME_BASELINE_REFRESH_MS=3600000` (Option A, refresh),
-    `VOLUME_DROP_GRACE_MS=3600000` (Option B, grace period), or both (1h
-    each — **low-confidence starting guess, not yet validated**). See "Two
-    toggleable volume-drop fixes" below for what these actually do and why
-    they were needed.
-  - Restarted several times this session as fixes landed — all currently
-    running the LATEST code (as of commit `42dde55`). Check anytime with
-    `npm run paper-trade:report` (auto-cleans orphaned state files).
-  - The original `cap1.15-reserve0.1` baseline instance (frozen pre-session
-    code, run all through 2026-09-24) was **retired by user's call** —
-    it drifted from +27.54% to -6.62% overnight and was no longer a useful
-    reference once this many fixes had landed on top of it.
+  current branch, matches the entry-strategy-mode work below. 42 commits on
+  top of the original baseline scaffold as of `77735d5`.
+  **Working tree is NOT clean** — the whole 2026-09-26 session (entry
+  strategy modes + spot executor, see below) is uncommitted:
+  modified `SCREEN_RULE.MD`, `src/config/env.ts`, `src/logic/costEstimate.ts`,
+  `src/scripts/checkEntryPumpGuards.ts`, `src/scripts/paperTrade.ts`,
+  `src/services/meteoraScanner.ts`; untracked `src/logic/spotExecutor.ts`,
+  `src/scripts/checkRangeMode.ts`, `src/scripts/checkSpotExecutor.ts`,
+  `src/scripts/checkTrendMode.ts`. No PR opened yet (no git remote
+  configured). **Commit this before doing anything else that touches these
+  files** — next session shouldn't have to reconstruct it from code again.
+- **Five live paper-trade instances running right now** (restarted this
+  session on the new entry-strategy-mode code), all on the SAME capital
+  config (`INITIAL_LP_CAPITAL_SOL=1.15`, `MIN_GAS_RESERVE_SOL=0.1`). This
+  REPLACES the prior 6-instance strict-vs-loose comparison — the strictness
+  axis (strict/loose `ENTRY_MIN_SPIKE_RATIO`/`ENTRY_MIN_BUY_RATIO_1H`) was
+  dropped in favor of the new `ENTRY_STRATEGY_MODE` axis (momentum/trend/range,
+  see the 2026-09-26 section below) crossed with LP-vs-spot execution:
+  - `strict-optA-spot` / `strict-optB-spot` / `strict-optAB-spot` —
+    `ENTRY_STRATEGY_MODE=momentum` (default, name kept from the old
+    strict/loose naming but now just means "default gates"), spot executor
+    only (`ENABLE_LP_EXECUTOR=false`, `ENABLE_SPOT_EXECUTOR=true`). `optA`/
+    `optB`/`optAB` suffix = same volume-drop-baseline fix axis as before
+    (`VOLUME_BASELINE_REFRESH_MS`/`VOLUME_DROP_GRACE_MS`, still a
+    low-confidence starting guess).
+  - `trend-optAB-spot` — `ENTRY_STRATEGY_MODE=trend`, spot executor only,
+    both volume-drop fixes on.
+  - `range-optAB` — `ENTRY_STRATEGY_MODE=range`, **LP/DLMM executor**
+    (default toggles: `ENABLE_LP_EXECUTOR=true`, `ENABLE_SPOT_EXECUTOR=false`)
+    — the one instance testing the DLMM execution path, deliberately paired
+    with `range` mode since that's the thesis LP is actually supposed to be
+    good at (see below). Both volume-drop fixes on.
+  - Check anytime with `npm run paper-trade:report` (auto-cleans orphaned
+    state files). As of this write-up: `trend-optAB-spot` +32.81% (PAID-SOL,
+    entered on trend mode's sustained-6h/24h floor — momentum instances
+    rejected it outright on the spike floor, 0.281 < required; range
+    instance rejected it on the volatility ceiling, 40%/60% >> 15% cap),
+    `range-optAB` +2.73%, `strict-optA-spot` -2.95%, `strict-optB-spot`
+    -10.81%, `strict-optAB-spot` -40.08% (HARD_EXIT stop-loss on pill-SOL,
+    then re-entered COLLECT-SOL from a lower basis). Only ~17min old at that
+    point — noise-dominated, not yet a real comparison.
+  - The prior 6-instance strict-vs-loose run and the `cap1.15-reserve0.1`
+    frozen baseline before it are both retired — superseded by this set.
 - **RPC swapped from the public Solana endpoint to the Helius key from
   `.env.live`** (paper-trade only touches RPC for reads — mint-authority
   checks, active-bin lookups — never the wallet, so this is safe with no
@@ -199,6 +224,106 @@ a real answer instead of a guess. Deliberately skips the RPC-heavy
 mint-authority check (running it against ~150+ pools instead of a small
 pre-filtered subset 429-storms the RPC — confirmed running it once).
 
+## 2026-09-26 session: entry strategy modes (trend/range) + spot executor A/B
+   (uncommitted — see git status note above)
+
+**Context this session started from**: prior sessions' `momentum` mode
+(spike-ratio floor + acceleration ranking) was validated as directionally
+right, but two new live observations motivated splitting it into three
+parallel, independently-selectable tracks instead of one-size-fits-all.
+
+**1. `trend` mode** — `ENTRY_STRATEGY_MODE=trend` skips the spike-ratio
+floor entirely, requires `TREND_MIN_SUSTAINED_PCT` (default 20%) on BOTH 6h
+AND 24h price change (fail-closed on unknown, unlike almost every other
+filter in the screen), ranks survivors by TVL descending
+(`rankTrendCandidates`) instead of acceleration. Motivation confirmed live
+2026-09-25/26: SI-SOL's real pool ($685k TVL, +66%/6h, +46%/24h, mcap
+6M→9M over 9h, spike ratio only 0.21x) was rejected by every running
+`momentum` instance on the spike floor alone, the same night every
+"new spike" `momentum` entry (goon-SOL, AQUA-SOL, OP-SOL, etc.) crashed
+-12% to -50%. `momentum`'s spike floor structurally can't hold a steady,
+already-successful winner — `trend` is the parallel track for that case.
+Confirmed again today (2026-09-26) live: PAID-SOL (volumeSpikeRatio 0.281,
+priceChange 1h/6h/24h = 40.4%/59.62%/84.41%) was rejected by all 3
+`momentum` instances on the spike floor and by `range` on the volatility
+ceiling, entered ONLY by `trend` — currently +32.81%, the best performer of
+the 5 running instances.
+
+**2. `range` mode** — the opposite thesis, and specifically scoped to the
+**DLMM/LP execution path** (not spot — see point 3). Rejects any candidate
+moving more than `RANGE_MAX_VOLATILITY_PCT` (default 15%) on EITHER 1h or
+6h, ranks by vol/TVL turnover descending (`rankRangeCandidates`, a direct
+fee-yield proxy). Uniquely, the volatility ceiling stays live on
+re-screen — every other sizing check in the screen is skipped for a held
+position (`skipSizingChecks`), but a range position that starts trending
+broke its own thesis, so this one keeps checking. Motivation confirmed
+live 2026-09-26: `momentum`-mode DLMM instances were consistently losing
+**~half as much** as their spot siblings on a losing position (the 50/50
+SOL/token LP basket + IL dampens both directions ~2x) — meaning DLMM run
+against a directional/momentum target is structurally just a smaller,
+cost-heavier version of holding the token outright. LPing's real edge (fee
+income on range-bound/stable pairs, where IL costs near-nothing) was never
+actually being tested — `range` isolates that thesis to the one instance
+(`range-optAB`) actually running the LP executor this round.
+Opportunistic switching (`evaluateSwitchOpportunity`) is skipped for both
+`trend` and `range` positions — spike-ratio switching doesn't fit either
+non-acceleration thesis.
+
+**3. Spot (buy→hold→sell) executor added as an A/B against the LP wrapper
+itself** (`src/logic/spotExecutor.ts`, 461 lines) — motivated by paper-trade
+data showing every running LP instance's rebalance + entry/exit tx costs
+exceeding its fee income. `ENABLE_LP_EXECUTOR`/`ENABLE_SPOT_EXECUTOR` env
+toggles (default LP-only, unchanged behavior unless spot is explicitly
+turned on) let both executors run off the SAME scanned candidate/tick per
+process, for an apples-to-apples LP-vs-spot comparison with no entry-price
+confound. When spot is on, its paper-trade label auto-suffixes `-spot`
+(`paperTrade.ts:145`) so both sides' state/log files coexist and
+`paperTradeReport.ts` picks up either with zero changes (a position with no
+`bin` field just renders without a range line). Spot reuses the exact same
+decision signals as DLMM (`rankCandidates`/`filterAndRankPools`,
+`evaluatePosition`/`evaluateSwitchOpportunity`) — only the mechanics differ:
+no bin range, no rebalance, no IL, no LP fee income;
+`estimateSpotSwapCostSol()` (new, `costEstimate.ts`) prices one full-capital
+swap leg instead of the half-capital LP-deposit-ratio math
+`estimateCycleGasCostSol` does.
+  - **Live finding, already causing a real problem and partially fixed
+    this session**: spot has no "out of range" signal to force a periodic
+    re-screen on DLMM's own timer, so it rides the shared
+    `OPPORTUNITY_SCAN_INTERVAL_MS` cadence instead — and an early version
+    that acted on a single failed 5-min-window snapshot whipsawed spot
+    instances into 14-25 entries/9h vs. DLMM's 4-9/9h on the same night,
+    costing enough in round-trip fees alone to drive spot to -40%..-70% vs
+    DLMM's -31%..-43% on THE SAME bad night. Two fixes landed: (a) require
+    2 consecutive failed re-screens (~10min sustained) before acting, same
+    debounce philosophy as DLMM's idle-out-of-range timer; (b) a profit
+    guard (`shouldForceLeaveOnFailedRescreen`) — unlike DLMM's `LEAVE_POOL`
+    (only reachable after price already left the bin range, itself a
+    concrete signal), spot's re-screen runs on a blind timer regardless of
+    whether the position is winning, so a currently-profitable position
+    now holds through a failed re-screen instead of being forced out.
+    Confirmed live 2026-09-26 pre-fix: `trend-optAB-10sol-spot` sold
+    baton-SOL at a real -2.3% loss on a transient "5m tx count 3 < min 20"
+    dip, right before its DLMM sibling (which never even re-screened —
+    price stayed in-range) rode the SAME pool to +3.89%.
+  - **Caveat already flagged in `SCREEN_RULE.MD`**: the 14-25-vs-4-9
+    entries/9h and -40%..-70%-vs-31%..-43% numbers above are an
+    apples-to-oranges artifact of the pre-fix whipsaw bug, not yet a real
+    LP-vs-spot signal — that comparison still needs a clean run on the
+    fixed code (i.e. what the current 5 running instances are for).
+
+**Self-checks added**: `checkSpotExecutor.ts`, `checkTrendMode.ts`,
+`checkRangeMode.ts` — all pass as of this write-up (spot cost model + the
+REBALANCE-unreachable invariant + stop-loss/take-profit + re-screen profit
+guard; trend mode's spike-floor skip + fail-closed sustained-floor + TVL
+ranking; range mode's volatility ceiling staying live on re-screen +
+turnover ranking).
+
+**Not yet validated**: whether `trend`/`range` actually beat `momentum`
+over time (both marked unvalidated in `SCREEN_RULE.MD`), and the real
+(post-whipsaw-fix) LP-vs-spot cost comparison — same "let it run, don't
+declare a winner from one sample" methodology as every other unvalidated
+knob in this file.
+
 ## Important mechanics/insights surfaced this session (don't re-derive)
 
 - **A fixed-dollar sizing floor (TVL, or anything else) doesn't know how
@@ -253,20 +378,37 @@ pre-filtered subset 429-storms the RPC — confirmed running it once).
   running instances are for.
 - The volume-drop A+B-vs-false-positive tension (point 5 above) is
   explicitly unresolved, not just untuned.
+- `trend`/`range` `ENTRY_STRATEGY_MODE`s and the spot executor are both
+  brand new this session and **unvalidated over time** — only anecdotal
+  same-night confirmations so far (SI-SOL, PAID-SOL, baton-SOL), not a
+  multi-episode track record.
+- The LP-vs-spot cost comparison (spot executor's whole reason for
+  existing) is still confounded by the pre-fix re-screen whipsaw bug —
+  needs a clean run on the fixed code before it means anything.
 
 ## Next steps
 
-1. **Let the 6 running instances keep going** — the comparison is
-   strict-vs-loose entry gates × optA/optB/optAB volume-drop fix, all on
-   identical capital. Watch for: which combo wins on average (not from 1
-   episode); does the capital/TVL ratio change (point 6) actually surface
-   more small-mcap entries without a corresponding rise in bad outcomes;
-   does the A+B-vs-false-positive tension (point 5) resolve one way with
-   more samples.
-2. Decide on the still-open spec gaps: `HARD_EXIT` profit-guard, absolute
-   switch-margin floor (both from 2026-09-23), and now also the volume-drop
-   Option A/B magnitude (currently 1h, arbitrary) once more data exists.
-3. Once behavior looks solid over a longer window across multiple episodes
+1. **Commit the 2026-09-26 work** (entry strategy modes + spot executor,
+   currently uncommitted — see git status note up top) before it's at risk
+   of being lost again. New branch not needed, `feature/trend-aware-entry`
+   already matches; normal new-branch-+-PR rule still applies if/when this
+   is ready to land on `main`.
+2. **Let the 5 running instances keep going** — the comparison is now
+   `ENTRY_STRATEGY_MODE` (momentum/trend/range) × volume-drop optA/optB/optAB,
+   crossed with LP-vs-spot execution on the `range` instance specifically,
+   all on identical capital. Watch for: does `trend` keep beating `momentum`
+   past today's single sample; does `range`'s DLMM instance actually earn
+   steadier fee income than a momentum-target DLMM would have; does the
+   post-whipsaw-fix spot-vs-LP cost gap narrow; does the capital/TVL ratio
+   change (point 6, prior session) surface more small-mcap entries without
+   more bad outcomes; does the A+B-vs-false-positive tension (point 5,
+   prior session) resolve one way with more samples.
+3. Decide on the still-open spec gaps: `HARD_EXIT` profit-guard, absolute
+   switch-margin floor (both from 2026-09-23), the volume-drop Option A/B
+   magnitude (currently 1h, arbitrary), and now also whether `trend`/`range`
+   should become the new defaults (or stay opt-in tracks) once more data
+   exists.
+4. Once behavior looks solid over a longer window across multiple episodes
    (not just one): re-check `.env.live` wallet balance, decide on a first
    real cycle. Same "no devnet dry-run, watch the first cycle closely"
    plan as every prior session — nothing about that has changed. Given
