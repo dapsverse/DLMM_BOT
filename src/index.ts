@@ -5,7 +5,6 @@ import { openPool } from './services/meteoraDLMM.js';
 import {
   openInitialPosition,
   compoundCycle,
-  claimFeesOnly,
   executeHardExit,
   executeCleanExit,
   getPositionHealthSnapshot,
@@ -142,17 +141,11 @@ async function tick(): Promise<void> {
       logger.info('[index] rebalance triggered but still in cooldown, holding');
       return;
     }
-    if (!binStatus.isOutOfRange) {
-      // Fee-threshold trigger while still in-range: harvest only, don't
-      // close/reopen — nothing about the range needs to change, and closing
-      // would just crystallize unrealized price/IL PnL for no reason.
-      await claimFeesOnly(ctx);
-      return;
-    }
-    // Out-of-range (idle-forced): compoundCycle re-checks whether this pool
-    // still passes the entry screen: null means it doesn't (capital
-    // converted to SOL, no reopen) — next tick's tryEnterPool() picks up
-    // from there.
+    // REBALANCE only ever fires idle-forced (out-of-range) now — see
+    // riskManager.ts's 2026-09-26 removal note. compoundCycle re-checks
+    // whether this pool still passes the entry screen: null means it
+    // doesn't (capital converted to SOL, no reopen) — next tick's
+    // tryEnterPool() picks up from there.
     currentPool = await compoundCycle(ctx, defaultScannerConfig(blacklistPools));
     if (!currentPool) currentCapitalSol = Math.max((await getWalletSolBalance()) - env.MIN_GAS_RESERVE_SOL, 0);
     return;

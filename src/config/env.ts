@@ -221,7 +221,9 @@ export const env = {
   STOP_LOSS_PCT: num('STOP_LOSS_PCT', 25),
   MAX_REBALANCE_PER_HOUR: num('MAX_REBALANCE_PER_HOUR', 3),
   REBALANCE_COOLDOWN_MS: num('REBALANCE_COOLDOWN_MS', 5 * 60_000),
-  FEE_GAS_MULTIPLIER: num('FEE_GAS_MULTIPLIER', 2.5),
+  // FEE_GAS_MULTIPLIER removed 2026-09-26 along with the standalone
+  // fee-threshold REBALANCE trigger it gated — see riskManager.ts's
+  // doc comment at that removal site for why.
   VOLUME_DROP_HARD_EXIT_PCT: num('VOLUME_DROP_HARD_EXIT_PCT', 60),
 
   // Two independently toggleable fixes for the same root problem, added
@@ -268,18 +270,15 @@ export const env = {
   // ($12.57) for the run. Reverted to 10min.
   MAX_IDLE_OUT_OF_RANGE_MINUTES: num('MAX_IDLE_OUT_OF_RANGE_MINUTES', 10),
 
-  // Trailing take-profit: once unrealized profit peaks at/above
-  // TAKE_PROFIT_ARM_PCT, a trailing floor is set at (peak -
-  // TAKE_PROFIT_GIVEBACK_PCT) percentage points; if profit drops to/below
-  // that floor, exit and lock in the remaining gain instead of riding it
-  // all the way back down. No blacklist on this exit (see riskManager.ts) -
-  // it's profit protection, not a risk violation, so the pool stays a
-  // valid candidate if its run continues. 25pp giveback (not the 50pp
-  // originally considered) matches the 15-30% range crypto-momentum
-  // practice converges on for volatile assets; a flat 50pp giveback was
-  // researched as too loose for Solana memecoin volatility specifically.
-  TAKE_PROFIT_ARM_PCT: num('TAKE_PROFIT_ARM_PCT', 30),
-  TAKE_PROFIT_GIVEBACK_PCT: num('TAKE_PROFIT_GIVEBACK_PCT', 25),
+  // Trailing take-profit: tiered/sticky schedule, not a flat giveback — see
+  // TAKE_PROFIT_TIERS (constants.ts) for the table and riskManager.ts's
+  // trailingTakeProfitFloorPct() for the logic. Replaced the old flat
+  // TAKE_PROFIT_ARM_PCT/TAKE_PROFIT_GIVEBACK_PCT (30% arm, 25pp giveback
+  // always) 2026-09-26: confirmed live a flat 25pp giveback exits WAY too
+  // early on a real memecoin runner (PAID-SOL peaked +57.71%, exited at
+  // +32.28%, kept running to +136%+ afterward) — a fixed percentage-point
+  // giveback is too tight relative to peak when peak is still in the
+  // 30-100% range, this asset class's normal volatility band.
 
   // Opportunistic pool-switching: every OPPORTUNITY_SCAN_INTERVAL_MS while
   // holding a position, compare it against the best market candidate via

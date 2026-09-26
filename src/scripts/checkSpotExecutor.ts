@@ -21,6 +21,7 @@ import assert from 'node:assert';
 import { estimateCycleGasCostSol, estimateSpotSwapCostSol } from '../logic/costEstimate.js';
 import { evaluatePosition, type PositionHealthInput } from '../logic/riskManager.js';
 import { shouldForceLeaveOnFailedRescreen } from '../logic/spotExecutor.js';
+import { TAKE_PROFIT_TIERS } from '../config/constants.js';
 import { env } from '../config/env.js';
 
 // 1. Cost model: spot's swap leg is on the FULL capital, DLMM's is on HALF.
@@ -68,6 +69,21 @@ assert(
   'test setup: expected a DLMM-shaped idle-out-of-range position to REBALANCE (proves the check above is meaningful, not vacuous)',
 );
 
+// 2b. The standalone fee-threshold REBALANCE (claim-without-closing while
+// in-range) was removed 2026-09-26 — a DLMM-shaped position with a huge
+// unclaimedFeesUsd and isOutOfRange:false must HOLD now, not REBALANCE,
+// no matter how far past the old threshold the fees are.
+const dlmmShapedHighFeesInRange: PositionHealthInput = {
+  ...spotShapedBase,
+  unclaimedFeesUsd: 1_000_000,
+  estimatedGasCostUsd: 0.001,
+  isOutOfRange: false,
+};
+assert(
+  evaluatePosition(dlmmShapedHighFeesInRange).decision === 'HOLD',
+  'expected in-range position with huge unclaimed fees to HOLD (the standalone fee-threshold REBALANCE trigger was removed)',
+);
+
 // 3. Stop-loss / take-profit still fire for spot-shaped input — same evaluatePosition, just a differently-shaped caller.
 const spotStopLoss: PositionHealthInput = {
   ...spotShapedBase,
@@ -75,10 +91,11 @@ const spotStopLoss: PositionHealthInput = {
 };
 assert(evaluatePosition(spotStopLoss).decision === 'HARD_EXIT', 'expected spot-shaped input past STOP_LOSS_PCT to HARD_EXIT');
 
+const firstTier = TAKE_PROFIT_TIERS[0]!;
 const spotTakeProfit: PositionHealthInput = {
   ...spotShapedBase,
-  currentValueUsd: 100 * (1 + (env.TAKE_PROFIT_ARM_PCT - env.TAKE_PROFIT_GIVEBACK_PCT - 1) / 100),
-  peakProfitPct: env.TAKE_PROFIT_ARM_PCT + 5, // armed, then gave back past the floor
+  currentValueUsd: 100 * (1 + (firstTier.floorPct - 1) / 100), // 1pp below the sticky floor
+  peakProfitPct: firstTier.armPct + 5, // armed, still in the first tier's band
 };
 assert(evaluatePosition(spotTakeProfit).decision === 'TAKE_PROFIT', 'expected spot-shaped input past the trailing take-profit floor to TAKE_PROFIT');
 

@@ -6,7 +6,6 @@ import {
   getUserPositions,
   openPosition,
   closePositionFull,
-  claimFees,
   getActiveBin,
   type DlmmPool,
 } from '../services/meteoraDLMM.js';
@@ -131,23 +130,13 @@ export async function getPositionHealthSnapshot(ctx: PoolContext): Promise<Posit
   return { currentValueSol, unclaimedFeesSol };
 }
 
-export { estimateCycleGasCostSol, estimateClaimCostSol } from './costEstimate.js';
+export { estimateCycleGasCostSol } from './costEstimate.js';
 
-/**
- * Fee-threshold REBALANCE while still in-range: just claim, don't close.
- * No need to re-center a range that isn't out of range, and closing would
- * only crystallize whatever unrealized price/IL PnL exists right now for
- * no reason — the position keeps earning from where it already is.
- * Reserve compoundCycle (full close+reopen) for when the range/pool
- * actually needs to change: out-of-range (idle-forced) or no longer
- * eligible.
- */
-export async function claimFeesOnly(ctx: PoolContext): Promise<void> {
-  const [position] = await getUserPositions(ctx.pool);
-  if (!position) throw new Error(`[rebalanceEngine] no open position found for pool ${ctx.poolAddress}`);
-  logger.info('[rebalanceEngine] claiming fees without closing (still in-range)', { pool: ctx.poolAddress });
-  await claimFees(ctx.pool, position);
-}
+// claimFeesOnly (fee-threshold REBALANCE while still in-range) removed
+// 2026-09-26 — see riskManager.ts's removal note. Fees are now only ever
+// realized as part of an already-necessary transaction (compoundCycle's
+// close+reopen, or an exit) — closePositionFull below claims fees as part
+// of closing, no separate claim step needed.
 
 /**
  * Full compound cycle: close position (claim fees + reclaim rent), then

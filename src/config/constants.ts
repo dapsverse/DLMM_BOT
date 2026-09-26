@@ -36,6 +36,33 @@ export const PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT = -12;
 /** How many of the strongest-6h-trend candidates to shortlist before picking the best volume-spike ratio among them. */
 export const TREND_SHORTLIST_SIZE = 3;
 
+/**
+ * Trailing take-profit schedule — sticky per tier, not a flat giveback.
+ * Once peakProfitPct crosses a tier's `armPct`, the floor locks to that
+ * tier's `floorPct` and STAYS there (doesn't recompute continuously) until
+ * peak crosses the next tier's `armPct`. Below the first tier, take-profit
+ * isn't armed at all (same as the old TAKE_PROFIT_ARM_PCT gate). Above the
+ * last tier, the floor keeps rolling using the last tier's giveback delta
+ * (150 - 125 = 25pp here) — see trailingTakeProfitFloorPct() in
+ * riskManager.ts for the exact logic and src/scripts/checkTakeProfitTiers.ts
+ * for the self-check.
+ *
+ * Replaced a flat 30% arm / 25pp giveback 2026-09-26 after PAID-SOL peaked
+ * +57.71% and got exited at +32.28% (a 25pp giveback locked way too early
+ * relative to peak in the 30-100% band) — the token kept running to +136%+
+ * afterward. User-specified tiers: wide room early (protect only 25% while
+ * peak is anywhere 30-100%, since memecoin peaks in that band are often
+ * noise/pullback-and-continue), progressively tighter as gains compound.
+ * Low-confidence starting guess like every other threshold in this file —
+ * not yet validated over multiple live episodes.
+ */
+export const TAKE_PROFIT_TIERS: ReadonlyArray<{ armPct: number; floorPct: number }> = [
+  { armPct: 30, floorPct: 25 },
+  { armPct: 100, floorPct: 50 },
+  { armPct: 125, floorPct: 100 },
+  { armPct: 150, floorPct: 125 },
+];
+
 export const RPC_MAX_RETRIES = 5;
 export const RPC_RETRY_BASE_DELAY_MS = 500;
 

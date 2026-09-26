@@ -36,12 +36,6 @@ export function estimateSpotSwapCostSol(capitalSol: number): number {
   return priorityFeeSol + swapCostSol;
 }
 
-/**
- * Cost (SOL) of claiming fees WITHOUT closing the position — one tx, no
- * swap. Used when a fee-threshold REBALANCE fires while still in-range: no
- * need to re-center a range that isn't out of range, so skip the
- * close+swap+reopen cycle entirely and just harvest.
- */
-export function estimateClaimCostSol(): number {
-  return 0.0005; // 1 tx
-}
+// estimateClaimCostSol (standalone claim-without-closing cost) removed
+// 2026-09-26 along with the fee-threshold REBALANCE trigger it priced —
+// see riskManager.ts's removal note.

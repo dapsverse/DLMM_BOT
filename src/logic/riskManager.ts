@@ -1,7 +1,33 @@
 import { env } from '../config/env.js';
+import { TAKE_PROFIT_TIERS } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
 
 export type RiskDecision = 'HOLD' | 'REBALANCE' | 'HARD_EXIT' | 'TAKE_PROFIT';
+
+/**
+ * Sticky-per-tier trailing floor — see TAKE_PROFIT_TIERS (constants.ts) for
+ * the table and rationale. Returns null if peak hasn't armed yet (below the
+ * first tier's armPct). Pure/exported so it's independently testable — see
+ * checkTakeProfitTiers.ts.
+ */
+export function trailingTakeProfitFloorPct(peakProfitPct: number, tiers = TAKE_PROFIT_TIERS): number | null {
+  if (tiers.length === 0 || peakProfitPct < tiers[0]!.armPct) return null;
+
+  let floorPct = tiers[0]!.floorPct;
+  for (const tier of tiers) {
+    if (peakProfitPct >= tier.armPct) floorPct = tier.floorPct;
+  }
+
+  // Beyond the last tier, keep rolling using its own giveback delta instead
+  // of freezing forever — never below the sticky floor above.
+  const last = tiers[tiers.length - 1]!;
+  if (peakProfitPct >= last.armPct) {
+    const giveback = last.armPct - last.floorPct;
+    floorPct = Math.max(floorPct, peakProfitPct - giveback);
+  }
+
+  return floorPct;
+}
 
 export interface PositionHealthInput {
   /** USD value of capital deposited when the position was FIRST opened — deliberately NOT updated on a compound/rebalance within the same pool (only a fresh entry or a SWITCH into a different pool resets this), so STOP_LOSS_PCT/TAKE_PROFIT track cumulative gain/loss since the original deposit, not since the last compound. Stale wording fixed 2026-09-24 — this docstring used to say "opened/last compounded", which didn't match either caller: index.ts always passes ctx.initialDepositSol (never reset on compound, see PoolContext's own doc comment), and paper-trade had a real bug where it WAS reset on compound (via position.capitalUsd) until this fix. */
@@ -85,33 +111,38 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
     return { decision: 'HARD_EXIT', reasons };
   }
 
-  if (input.peakProfitPct >= env.TAKE_PROFIT_ARM_PCT) {
-    const floorPct = input.peakProfitPct - env.TAKE_PROFIT_GIVEBACK_PCT;
-    if (profitPct <= floorPct) {
-      const r = [
-        `profit ${profitPct.toFixed(2)}% dropped to trailing floor ${floorPct.toFixed(2)}% (peak ${input.peakProfitPct.toFixed(2)}% - ${env.TAKE_PROFIT_GIVEBACK_PCT}pp giveback)`,
-      ];
-      logger.info('[riskManager] TAKE_PROFIT', { reasons: r });
-      return { decision: 'TAKE_PROFIT', reasons: r };
-    }
+  const floorPct = trailingTakeProfitFloorPct(input.peakProfitPct);
+  if (floorPct !== null && profitPct <= floorPct) {
+    const r = [
+      `profit ${profitPct.toFixed(2)}% dropped to trailing floor ${floorPct.toFixed(2)}% (peak ${input.peakProfitPct.toFixed(2)}%, sticky tier — see TAKE_PROFIT_TIERS)`,
+    ];
+    logger.info('[riskManager] TAKE_PROFIT', { reasons: r });
+    return { decision: 'TAKE_PROFIT', reasons: r };
   }
 
-  const rebalanceThresholdUsd = input.estimatedGasCostUsd * env.FEE_GAS_MULTIPLIER;
-  if (input.unclaimedFeesUsd > rebalanceThresholdUsd) {
-    const r = [`unclaimed fees $${input.unclaimedFeesUsd.toFixed(2)} > threshold $${rebalanceThresholdUsd.toFixed(2)} (gas * ${env.FEE_GAS_MULTIPLIER})`];
-    logger.info('[riskManager] REBALANCE', { reasons: r });
-    return { decision: 'REBALANCE', reasons: r };
-  }
-
+  // Removed 2026-09-26: a standalone fee-threshold REBALANCE (claim fees
+  // without closing, while still in-range) used to fire here whenever
+  // unclaimedFeesUsd cleared FEE_GAS_MULTIPLIER * gas cost. Traced through
+  // both callers (rebalanceEngine.ts's claimFeesOnly / paperTrade.ts's
+  // CLAIM_FEES branch) and confirmed it bought NOTHING: claiming mid-position
+  // never reinvests into the LP (claimFeesOnly just sends fee tokens to the
+  // wallet; real compounding only happens in compoundCycle's close+reopen,
+  // which already re-reads the FULL wallet SOL balance at that point — so
+  // any fee claimed earlier gets swept in anyway, just later). Meanwhile
+  // every position-changing event (SWITCH, idle-forced REBALANCE reopen,
+  // HARD_EXIT, TAKE_PROFIT) already folds accrued fees into its exit value
+  // for free, no separate claim tx needed. Net effect of the old trigger:
+  // pure extra gas cost for zero compounding benefit. Fees now only ever
+  // get realized as a side effect of an already-necessary transaction.
+  //
   // Idle-forced rebalance: out-of-range means the position stopped earning
-  // new fees, so the fee-threshold check above can stall forever waiting on
-  // fees that no longer accrue. Capital shouldn't just sit there once it's
-  // been out of range "too long" — force a compound cycle regardless of
-  // profit/loss (loss already would have HARD_EXIT'd above at STOP_LOSS_PCT,
-  // so anything reaching here is an acceptable loss to crystallize in
-  // exchange for redeploying idle capital). compoundCycle re-checks whether
-  // this pool still qualifies for re-entry or whether capital should go find
-  // a different one instead (decided by rebalanceEngine/paperTrade, not here).
+  // new fees. Capital shouldn't just sit there once it's been out of range
+  // "too long" — force a compound cycle regardless of profit/loss (loss
+  // already would have HARD_EXIT'd above at STOP_LOSS_PCT, so anything
+  // reaching here is an acceptable loss to crystallize in exchange for
+  // redeploying idle capital). compoundCycle re-checks whether this pool
+  // still qualifies for re-entry or whether capital should go find a
+  // different one instead (decided by rebalanceEngine/paperTrade, not here).
   if (input.isOutOfRange && input.outOfRangeSinceMs !== undefined && input.outOfRangeSinceMs !== null) {
     const idleMinutes = (now - input.outOfRangeSinceMs) / 60_000;
     if (idleMinutes >= env.MAX_IDLE_OUT_OF_RANGE_MINUTES) {

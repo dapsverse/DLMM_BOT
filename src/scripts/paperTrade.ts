@@ -51,7 +51,7 @@ import {
 } from '../services/meteoraScanner.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from '../logic/riskManager.js';
 import { computeOutOfRangeTracking } from '../logic/outOfRangeTracking.js';
-import { estimateCycleGasCostSol, estimateClaimCostSol } from '../logic/costEstimate.js';
+import { estimateCycleGasCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
 import { createSpotExecutor, type SpotExecutor } from '../logic/spotExecutor.js';
@@ -517,31 +517,14 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       logEvent({ type: 'HOLD', pool: position.poolName, note: 'rebalance triggered but ENABLE_AUTO_COMPOUND=false', currentValueUsd: +currentValueUsd.toFixed(2), currentBinId, inRange });
     } else if (cooldownActive) {
       logEvent({ type: 'HOLD', pool: position.poolName, note: 'rebalance triggered but still in cooldown', currentValueUsd: +currentValueUsd.toFixed(2), currentBinId, inRange });
-    } else if (!isOutOfRange) {
-      // Fee-threshold trigger while still in-range: just claim, don't
-      // close/reopen — nothing about the range needs to change, and
-      // closing would only crystallize unrealized price/IL PnL for no
-      // reason. (Idle-forced REBALANCE only ever fires when isOutOfRange
-      // is true, so this branch is unreachable for that case — it only
-      // ever sees the fee-threshold trigger.)
-      const claimCostUsd = estimateClaimCostSol() * sol.priceUsd;
-      const netHarvestedUsd = Math.max(position.feesEarnedUsd - claimCostUsd, 0);
-      logEvent({
-        type: 'CLAIM_FEES',
-        pool: position.poolName,
-        reasons,
-        feesClaimedUsd: +position.feesEarnedUsd.toFixed(2),
-        feesClaimedSol: +(position.feesEarnedUsd / sol.priceUsd).toFixed(4),
-        claimCostUsd: +claimCostUsd.toFixed(2),
-        netHarvestedUsd: +netHarvestedUsd.toFixed(2),
-        netHarvestedSol: +(netHarvestedUsd / sol.priceUsd).toFixed(4),
-      });
-      summary.harvestedFeesUsd += netHarvestedUsd;
-      summary.totalFeesEarnedUsd += position.feesEarnedUsd;
-      finalPositionValueUsd = currentValueUsd - position.feesEarnedUsd; // = lpPrincipalUsd — fees just moved out to harvestedFeesUsd
-      position.feesEarnedUsd = 0;
-      position.lastRebalanceAtMs = now; // respect cooldown before claiming again
     } else {
+      // REBALANCE only ever fires idle-forced (out-of-range) now — the old
+      // fee-threshold "claim without closing" trigger was removed
+      // 2026-09-26 (see riskManager.ts's removal note): it never reinvested
+      // into the position anyway (real compounding only happens below, at
+      // close+reopen), and every position-changing event already folds
+      // accrued fees into its exit value for free. So this branch is
+      // reached only when isOutOfRange is true.
       const compoundedToUsd = Math.max(currentValueUsd - gasCostUsd, 0);
       // Re-check the held pool against the entry screen using the SAME
       // fresh `live` data already fetched this tick (no extra request) —
