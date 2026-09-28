@@ -576,12 +576,16 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       } else {
         // Pool no longer passes the entry screen (e.g. no longer trending)
         // — leave with the compounded capital instead of forcing a reopen
-        // here. Short cooldown (LEFT_POOL_COOLDOWN_MS), not the long
-        // HARD_EXIT blacklist — see env.ts doc comment: without even a
-        // short cooldown, a pool that just failed re-screen but is still
-        // top-ranked gets re-entered next tick, whipsawing.
-        addToBlacklist(blacklist, position.poolAddress, now, env.LEFT_POOL_COOLDOWN_MS);
+        // here. Compute the real reject reasons BEFORE blacklisting — doing
+        // it after made the pool self-report "blacklisted" as one of its
+        // own reasons (confirmed live), which is circular: it only became
+        // blacklisted because of THIS exit, not an independent cause.
         const rejectReasons = poolRejectReasons(live, defaultScannerConfig(blacklist), reScreenOpts);
+        // Short cooldown (LEFT_POOL_COOLDOWN_MS), not the long HARD_EXIT
+        // blacklist — see env.ts doc comment: without even a short cooldown,
+        // a pool that just failed re-screen but is still top-ranked gets
+        // re-entered next tick, whipsawing.
+        addToBlacklist(blacklist, position.poolAddress, now, env.LEFT_POOL_COOLDOWN_MS);
         const leaveReasons = [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening', ...rejectReasons];
         logEvent({
           type: 'LEAVE_POOL',
