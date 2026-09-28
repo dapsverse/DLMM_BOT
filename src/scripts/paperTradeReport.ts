@@ -39,9 +39,30 @@ function printRun(state: any): void {
   console.log(`  Pools entered: ${state.poolsEntered}  Rebalances: ${state.rebalances}  Hard exits: ${state.hardExits}`);
   if (state.currentPosition) {
     console.log(`  Currently in: ${state.currentPosition.pool} (${state.currentPosition.address})`);
-    console.log(`    capital=$${state.currentPosition.capitalUsd} (${state.currentPosition.capitalSol ?? 'n/a'} SOL)  unclaimed fees=$${state.currentPosition.feesEarnedUsd}`);
     const bin = state.currentPosition.bin;
     if (bin) {
+      // DLMM only: state.currentPosition.capitalUsd is the entry/last-compound
+      // deposit — frozen, NOT live mark-to-market (only reassigned on
+      // compound, see paperTrade.ts). The live LP principal (price/IL since
+      // then, excluding fees) is recoverable from fields already written by
+      // the running process, no writer change needed: currentValueUsd
+      // already = livePrincipal + feesEarnedUsd + harvestedFeesUsd (past
+      // positions' realized fees, 0 for a still-first position). Spot has no
+      // equivalent split — its capitalUsd IS already live (see
+      // spotExecutor.ts's writeState), so this branch is DLMM-specific
+      // (detected via the `bin` field, which spot never writes).
+      const entryCapitalUsd = state.currentPosition.capitalUsd;
+      const unclaimedFeesUsd = state.currentPosition.feesEarnedUsd ?? 0;
+      const harvestedFeesUsd = state.harvestedFeesUsd ?? 0;
+      const liveLpPrincipalUsd = +(state.currentValueUsd - unclaimedFeesUsd - harvestedFeesUsd).toFixed(2);
+      const solPriceUsd = state.currentValueSol ? state.currentValueUsd / state.currentValueSol : null;
+      const liveLpPrincipalSol = solPriceUsd ? +(liveLpPrincipalUsd / solPriceUsd).toFixed(4) : null;
+      const priceIlPct = entryCapitalUsd ? +(((liveLpPrincipalUsd - entryCapitalUsd) / entryCapitalUsd) * 100).toFixed(2) : null;
+      console.log(`    entry capital=$${entryCapitalUsd} (${state.currentPosition.capitalSol ?? 'n/a'} SOL) — frozen at last entry/compound, not live`);
+      console.log(
+        `    live LP principal=$${liveLpPrincipalUsd} (${liveLpPrincipalSol ?? 'n/a'} SOL)${priceIlPct !== null ? `  [price/IL since entry: ${priceIlPct >= 0 ? '+' : ''}${priceIlPct}%]` : ''}`,
+      );
+      console.log(`    unclaimed fees=$${unclaimedFeesUsd}  →  position total (principal+fees)=$${(liveLpPrincipalUsd + unclaimedFeesUsd).toFixed(2)}`);
       if (bin.currentBinId === null || bin.centerBinId === null) {
         console.log('    price range: unavailable (RPC read failed this tick)');
       } else if (bin.priceRangeSol) {
@@ -51,6 +72,10 @@ function printRun(state: any): void {
         );
         console.log(`    (bin ${bin.currentBinId}, range [${bin.rangeMinBinId}, ${bin.rangeMaxBinId}])`);
       }
+    } else {
+      // Spot: capitalUsd is already the live mark-to-market value and
+      // feesEarnedUsd is always 0 (no LP fees) — no breakdown needed.
+      console.log(`    capital=$${state.currentPosition.capitalUsd} (${state.currentPosition.capitalSol ?? 'n/a'} SOL)  unclaimed fees=$${state.currentPosition.feesEarnedUsd}`);
     }
   } else {
     console.log('  Currently: no open position (scanning)');
