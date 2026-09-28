@@ -253,8 +253,9 @@ export function evaluateSwitchOpportunity(input: SwitchEvaluationInput, now = Da
 
 // ── Blacklist manager ───────────────────────────────────────────────────
 
-export function addToBlacklist(blacklistPools: Map<string, number>, poolAddress: string, now = Date.now()): void {
-  const until = now + env.BLACKLIST_DURATION_MS;
+/** durationMs defaults to the long HARD_EXIT blacklist — pass env.LEFT_POOL_COOLDOWN_MS for a short, non-punitive re-screen cooldown instead (see its doc comment in env.ts). */
+export function addToBlacklist(blacklistPools: Map<string, number>, poolAddress: string, now = Date.now(), durationMs = env.BLACKLIST_DURATION_MS): void {
+  const until = now + durationMs;
   blacklistPools.set(poolAddress, until);
   logger.warn(`[riskManager] blacklisted pool ${poolAddress} until ${new Date(until).toISOString()}`);
 }

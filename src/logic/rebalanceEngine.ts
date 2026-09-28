@@ -171,6 +171,11 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
       pool: ctx.poolAddress,
       reasons: rejectionReasons,
     });
+    // Short cooldown (LEFT_POOL_COOLDOWN_MS), not the long HARD_EXIT
+    // blacklist — see env.ts doc comment: without even a short cooldown, a
+    // pool that just failed re-screen but is still top-ranked gets
+    // re-entered next tick, whipsawing (confirmed live in paper-trade).
+    addToBlacklist(scannerConfig.blacklistPools, ctx.poolAddress, Date.now(), env.LEFT_POOL_COOLDOWN_MS);
     if (otherAmount.gtn(0)) await emergencySwapAllToSol(otherMint, otherAmount);
     return null;
   }

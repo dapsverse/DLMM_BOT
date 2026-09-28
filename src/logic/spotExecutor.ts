@@ -285,6 +285,10 @@ export function createSpotExecutor(label: string, blacklist: Map<string, number>
     if (reasonType === 'HARD_EXIT') {
       addToBlacklist(blacklist, position!.poolAddress, now);
       summary.hardExits++;
+    } else if (reasonType === 'LEFT_POOL') {
+      // Short cooldown, not a violation — see LEFT_POOL_COOLDOWN_MS (env.ts)
+      // for the whipsaw bug this fixes.
+      addToBlacklist(blacklist, position!.poolAddress, now, env.LEFT_POOL_COOLDOWN_MS);
     }
     const visit = summary.poolHistory[summary.poolHistory.length - 1];
     if (visit) {

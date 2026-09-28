@@ -260,6 +260,22 @@ export const env = {
 
   BLACKLIST_DURATION_MS: num('BLACKLIST_DURATION_MS', 6 * 60 * 60_000),
 
+  // Short cooldown applied on LEFT_POOL/LEAVE_POOL exits (pool no longer
+  // passes the re-screen, NOT a HARD_EXIT violation) — added 2026-09-27/28
+  // after a 43h live run showed trend-optAB-spot round-tripping the SAME
+  // pool dozens of times back to back (parafactual-SOL, COLLECT-SOL,
+  // AQUA-SOL...), dragging capital from $137 to $28 purely on entry/exit
+  // cost + small crash-guard losses, even though TAKE_PROFIT fired
+  // correctly every time it got the chance. Root cause: a LEFT_POOL exit
+  // never blacklisted at all, so a pool that just failed its own
+  // re-screen (often a noisy metric like buyRatio1h oscillating right at
+  // its 50% threshold) was still the top-ranked candidate and got
+  // re-entered the very next tick — "reconsider it later if it recovers"
+  // (the original design intent) was never actually throttled. Much
+  // shorter than BLACKLIST_DURATION_MS since this isn't a risk violation,
+  // just breaking the immediate thrash loop.
+  LEFT_POOL_COOLDOWN_MS: num('LEFT_POOL_COOLDOWN_MS', 20 * 60_000),
+
   // Don't let capital sit idle out-of-range forever waiting on a fee
   // threshold that's stopped accruing — force a compound cycle after this
   // many minutes out-of-range, regardless of profit/loss (stop-loss/
