@@ -135,6 +135,46 @@ export const env = {
   // deliberately not paired with this mode) exists to validate.
   RANGE_MAX_VOLATILITY_PCT: num('RANGE_MAX_VOLATILITY_PCT', 15),
 
+  // Absolute (not capital-relative) TVL floor for 'range' mode entries only.
+  // MAX_CAPITAL_TVL_RATIO_PCT already protects against OUR OWN trade moving
+  // a thin pool's price too much (impact/slippage) — it scales with capital,
+  // so at small capital (e.g. 1.2 SOL) it lets entries into pools as thin as
+  // $11K-16K TVL through. Confirmed live 2026-09-29/30: 'range-optAB' (1.2
+  // SOL) entered o-SOL TWICE at $15,837 and $11,442 TVL — genuinely fragile
+  // regardless of how small our own capital is (any single large trader can
+  // move a pool that thin), and the second entry HARD_EXIT'd at -43%
+  // unrealized loss. 'range' mode's whole thesis needs genuinely deep
+  // liquidity to be a real "calm, fee-earning" pool, not just "calm relative
+  // to our tiny position" — that's a different risk than price impact, needs
+  // its own gate. Set from the same incident's data: disasters clustered at
+  // $11K-59K TVL, healthy range entries (SI-SOL) sat at $261K-574K — $60K
+  // floor clears the observed disaster zone without cutting into the healthy
+  // range. Entry-only (see FilterOpts.skipSizingChecks) — a held position
+  // whose pool TVL grew past this succeeded, it didn't go bad.
+  RANGE_MIN_TVL_USD: num('RANGE_MIN_TVL_USD', 60_000),
+
+  // Profit-aware override for 'range' mode's re-screen (see
+  // RANGE_MAX_VOLATILITY_PCT doc comment above): a held range position that
+  // gets idle-forced to re-screen (out-of-range too long) and fails ONLY on
+  // the volatility ceiling (i.e. the pool started trending, not a real
+  // crash/activity/authority problem) normally gets abandoned even mid-pump.
+  // Confirmed live 2026-09-29: 'range-optAB-90sol' left a SI-SOL position at
+  // ~28% unrealized profit (peak, right before the idle-timer+ceiling combo
+  // fired) — SI-SOL then kept climbing to ~2x further after the bot left.
+  // The existing sticky trailing-take-profit tiers (TAKE_PROFIT_TIERS,
+  // riskManager.ts) already handle "let a winner ride, only lock in on a
+  // real pullback from peak" — but they never got a chance to arm here
+  // because this idle-forced re-screen abandons the pool unconditionally,
+  // before profit ever reaches the first tier's 30% arm threshold. Fix:
+  // when the re-screen fails ONLY on the range-ceiling reasons (not crash
+  // guard / dead activity / authority — those still abandon as before) AND
+  // current profit is above this threshold, don't abandon — recenter the
+  // bin and keep holding in the SAME pool instead (identical to the normal
+  // "still eligible" reopen path), letting the existing trailing-tier
+  // system govern the eventual exit on subsequent ticks. Default 0 (any
+  // positive profit qualifies) per the "selama masih positif" call.
+  RANGE_CEILING_PROFIT_OVERRIDE_PCT: num('RANGE_CEILING_PROFIT_OVERRIDE_PCT', 0),
+
   // Activity cascade — 1h and 5m volume must each be at least this fraction
   // of the pool's own 24h average pace, or it's flagged as "24h number
   // looks fine but nothing's actually trading right now" (stale/wash-traded).

@@ -47,9 +47,10 @@ import {
   poolRejectReasons,
   scanForBetterOpportunity,
   volumeSpikeRatio,
+  recordChaseGuardExit,
   type MeteoraPair,
 } from '../services/meteoraScanner.js';
-import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from '../logic/riskManager.js';
+import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist, rangeCeilingProfitOverride } from '../logic/riskManager.js';
 import { computeOutOfRangeTracking } from '../logic/outOfRangeTracking.js';
 import { estimateCycleGasCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
@@ -139,6 +140,7 @@ let lastKnownSolPriceUsd = 0;
 let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
 const blacklist = new Map<string, number>();
+const chaseGuardPools = new Map<string, number>(); // see ScannerConfig.chaseGuardPools (meteoraScanner.ts)
 // Spot executor: same candidate/tick basis as the DLMM position below (see
 // mainTick), just buys/holds/sells the token instead of opening an LP
 // position. Off by default — see env.ts's ENABLE_SPOT_EXECUTOR doc comment.
@@ -465,6 +467,7 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       binsFromCenter,
     });
     addToBlacklist(blacklist, position.poolAddress, now);
+    recordChaseGuardExit(chaseGuardPools, meme.address, meme.priceUsd);
     summary.hardExits++;
     const visit = summary.poolHistory[summary.poolHistory.length - 1];
     if (visit) {
@@ -496,6 +499,7 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       peakProfitPct: +position.peakProfitPct.toFixed(2),
     });
     // No blacklist - profit-protection exit, not a violation. Matches LEAVE_POOL's policy.
+    recordChaseGuardExit(chaseGuardPools, meme.address, meme.priceUsd);
     const visit = summary.poolHistory[summary.poolHistory.length - 1];
     if (visit) {
       visit.exitedAtMs = now;
@@ -534,7 +538,18 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       // grew past those ceilings succeeded, it didn't go bad. See
       // FilterOpts in meteoraScanner.ts.
       const reScreenOpts = { skipSizingChecks: true };
-      const stillEligible = (await filterAndRankPools([live], defaultScannerConfig(blacklist), reScreenOpts)).length > 0;
+      const rejectReasons = poolRejectReasons(live, defaultScannerConfig(blacklist, chaseGuardPools), reScreenOpts);
+      // Profit-aware override for 'range' mode (see rangeCeilingProfitOverride,
+      // riskManager.ts, and RANGE_CEILING_PROFIT_OVERRIDE_PCT, env.ts): a
+      // held range position that fails re-screen ONLY on the volatility
+      // ceiling (it started trending, nothing actually went wrong) normally
+      // gets abandoned even mid-pump, before the sticky trailing-take-profit
+      // tiers ever get a chance to arm. If so, and current profit clears the
+      // threshold, treat it as still-eligible — recenter and keep holding
+      // instead of leaving, same as a genuine pass. Any OTHER reason (crash
+      // guard, dead activity, authority, etc) still abandons as before.
+      const rangeProfitOverride = rangeCeilingProfitOverride(rejectReasons, env.ENTRY_STRATEGY_MODE, currentProfitPct);
+      const stillEligible = rejectReasons.length === 0 || rangeProfitOverride;
       const visit = summary.poolHistory[summary.poolHistory.length - 1];
 
       if (stillEligible) {
@@ -542,6 +557,7 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
           type: 'REBALANCE',
           pool: position.poolName,
           reasons,
+          ...(rangeProfitOverride ? { note: `range-ceiling profit override: holding at ${currentProfitPct.toFixed(2)}% profit instead of leaving`, rejectReasons } : {}),
           compoundedFromUsd: +position.capitalUsd.toFixed(2),
           compoundedFromSol: +(position.capitalUsd / sol.priceUsd).toFixed(4),
           compoundedToUsd: +compoundedToUsd.toFixed(2),
@@ -576,16 +592,16 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       } else {
         // Pool no longer passes the entry screen (e.g. no longer trending)
         // — leave with the compounded capital instead of forcing a reopen
-        // here. Compute the real reject reasons BEFORE blacklisting — doing
-        // it after made the pool self-report "blacklisted" as one of its
-        // own reasons (confirmed live), which is circular: it only became
-        // blacklisted because of THIS exit, not an independent cause.
-        const rejectReasons = poolRejectReasons(live, defaultScannerConfig(blacklist), reScreenOpts);
+        // here. rejectReasons already computed above (before blacklisting —
+        // doing it after made the pool self-report "blacklisted" as one of
+        // its own reasons, confirmed live, circular: it only became
+        // blacklisted because of THIS exit, not an independent cause).
         // Short cooldown (LEFT_POOL_COOLDOWN_MS), not the long HARD_EXIT
         // blacklist — see env.ts doc comment: without even a short cooldown,
         // a pool that just failed re-screen but is still top-ranked gets
         // re-entered next tick, whipsawing.
         addToBlacklist(blacklist, position.poolAddress, now, env.LEFT_POOL_COOLDOWN_MS);
+        recordChaseGuardExit(chaseGuardPools, meme.address, meme.priceUsd);
         const leaveReasons = [...reasons, 'pool no longer passes entry screen — leaving for a fresh scan instead of reopening', ...rejectReasons];
         logEvent({
           type: 'LEAVE_POOL',
@@ -635,7 +651,7 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       lastOpportunityScanAtMs = opportunityNow;
       // finalPositionValueUsd/sol.priceUsd, not initialDepositUsd — a SWITCH
       // moves whatever the position is actually worth right now.
-      const scanResult = await scanForBetterOpportunity(position.poolAddress, defaultScannerConfig(blacklist), finalPositionValueUsd / sol.priceUsd);
+      const scanResult = await scanForBetterOpportunity(position.poolAddress, defaultScannerConfig(blacklist, chaseGuardPools), finalPositionValueUsd / sol.priceUsd);
       // initialDepositUsd basis, matching index.ts's switch-eval currentProfitPct — same reasoning as the TAKE_PROFIT fix above.
       const currentProfitPctForSwitch = position.initialDepositUsd > 0 ? ((finalPositionValueUsd - position.initialDepositUsd) / position.initialDepositUsd) * 100 : 0;
       const switchEval = evaluateSwitchOpportunity(
@@ -671,6 +687,7 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
           currentPriceTrendPct: scanResult.currentPriceTrendPct ?? null,
           candidateBuyRatio1h: scanResult.candidateBuyRatio1h ?? null,
         });
+        recordChaseGuardExit(chaseGuardPools, meme.address, meme.priceUsd);
         const visit = summary.poolHistory[summary.poolHistory.length - 1];
         if (visit) {
           visit.exitedAtMs = opportunityNow;
@@ -737,7 +754,7 @@ async function mainTick(): Promise<void> {
     // resolveIdleCapitalSol's doc comment (spotExecutor.ts) for the
     // 2026-09-26 pristine-bootstrap bug this guards against.
     const currentCapitalSol = dlmmIdle ? resolveIdleCapitalSol(lastKnownSolPriceUsd, idleCapitalUsd) : spotExec!.idleCapitalSol();
-    const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist), { currentCapitalSol });
+    const candidates = await filterAndRankPools(pairs, defaultScannerConfig(blacklist, chaseGuardPools), { currentCapitalSol });
     sharedCandidate = candidates[0] ?? null;
   }
 

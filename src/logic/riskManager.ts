@@ -29,6 +29,25 @@ export function trailingTakeProfitFloorPct(peakProfitPct: number, tiers = TAKE_P
   return floorPct;
 }
 
+/**
+ * Profit-aware override for 'range' mode's idle-forced re-screen (see
+ * RANGE_CEILING_PROFIT_OVERRIDE_PCT, env.ts) — shared by paperTrade.ts and
+ * rebalanceEngine.ts's compoundCycle so both callers make this call
+ * identically instead of each re-deriving it (see the session's own
+ * "paper-trade and real bot can silently drift out of parity on bases, not
+ * just decision branches" lesson). True when a held range position's
+ * re-screen failed ONLY on the volatility ceiling (it started trending,
+ * nothing actually went wrong — crash guard/dead activity/authority would
+ * be separate reasons in the list) AND current profit clears the
+ * threshold — in which case the caller should recenter and keep holding
+ * instead of abandoning the pool.
+ */
+export function rangeCeilingProfitOverride(rejectReasons: string[], entryStrategyMode: 'momentum' | 'trend' | 'range', currentProfitPct: number): boolean {
+  if (entryStrategyMode !== 'range' || rejectReasons.length === 0) return false;
+  const ceilingOnly = rejectReasons.every((r) => r.includes('no longer range-bound'));
+  return ceilingOnly && currentProfitPct > env.RANGE_CEILING_PROFIT_OVERRIDE_PCT;
+}
+
 export interface PositionHealthInput {
   /** USD value of capital deposited when the position was FIRST opened — deliberately NOT updated on a compound/rebalance within the same pool (only a fresh entry or a SWITCH into a different pool resets this), so STOP_LOSS_PCT/TAKE_PROFIT track cumulative gain/loss since the original deposit, not since the last compound. Stale wording fixed 2026-09-24 — this docstring used to say "opened/last compounded", which didn't match either caller: index.ts always passes ctx.initialDepositSol (never reset on compound, see PoolContext's own doc comment), and paper-trade had a real bug where it WAS reset on compound (via position.capitalUsd) until this fix. */
   initialDepositUsd: number;

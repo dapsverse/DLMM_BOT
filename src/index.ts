@@ -21,13 +21,14 @@ import { logger } from './utils/logger.js';
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
 
 const blacklistPools = new Map<string, number>();
+const chaseGuardPools = new Map<string, number>(); // see ScannerConfig.chaseGuardPools (meteoraScanner.ts)
 let currentPool: PoolContext | null = null;
 let currentCapitalSol = env.INITIAL_LP_CAPITAL_SOL;
 let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
 
 async function tryEnterPool(): Promise<void> {
-  const candidates = await scanPools(defaultScannerConfig(blacklistPools), currentCapitalSol);
+  const candidates = await scanPools(defaultScannerConfig(blacklistPools, chaseGuardPools), currentCapitalSol);
   for (const candidate of candidates) {
     const xIsSol = candidate.mint_x === WSOL_MINT;
     const yIsSol = candidate.mint_y === WSOL_MINT;
@@ -121,13 +122,13 @@ async function tick(): Promise<void> {
   });
 
   if (decision === 'HARD_EXIT') {
-    currentCapitalSol = await executeHardExit(ctx, blacklistPools);
+    currentCapitalSol = await executeHardExit(ctx, blacklistPools, chaseGuardPools);
     currentPool = null;
     return;
   }
 
   if (decision === 'TAKE_PROFIT') {
-    currentCapitalSol = await executeCleanExit(ctx, 'TAKE_PROFIT');
+    currentCapitalSol = await executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools);
     currentPool = null;
     return;
   }
@@ -146,7 +147,7 @@ async function tick(): Promise<void> {
     // whether this pool still passes the entry screen: null means it
     // doesn't (capital converted to SOL, no reopen) — next tick's
     // tryEnterPool() picks up from there.
-    currentPool = await compoundCycle(ctx, defaultScannerConfig(blacklistPools));
+    currentPool = await compoundCycle(ctx, defaultScannerConfig(blacklistPools, chaseGuardPools), currentProfitPct);
     if (!currentPool) currentCapitalSol = Math.max((await getWalletSolBalance()) - env.MIN_GAS_RESERVE_SOL, 0);
     return;
   }
@@ -155,7 +156,7 @@ async function tick(): Promise<void> {
     lastOpportunityScanAtMs = now;
     // currentValueSol, not ctx.initialDepositSol — a SWITCH moves whatever
     // the position is actually worth right now, not the original deposit.
-    const scanResult = await scanForBetterOpportunity(ctx.poolAddress, defaultScannerConfig(blacklistPools), currentValueSol);
+    const scanResult = await scanForBetterOpportunity(ctx.poolAddress, defaultScannerConfig(blacklistPools, chaseGuardPools), currentValueSol);
     const switchEval = evaluateSwitchOpportunity(
       {
         currentProfitPct,
@@ -178,7 +179,7 @@ async function tick(): Promise<void> {
     });
     if (switchEval.shouldSwitch && scanResult.candidate) {
       const candidate = scanResult.candidate;
-      currentCapitalSol = await executeCleanExit(ctx, 'SWITCH');
+      currentCapitalSol = await executeCleanExit(ctx, 'SWITCH', chaseGuardPools);
       const xIsSol = candidate.mint_x === WSOL_MINT;
       const yIsSol = candidate.mint_y === WSOL_MINT;
       if (xIsSol || yIsSol) {

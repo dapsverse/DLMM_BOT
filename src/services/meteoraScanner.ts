@@ -213,6 +213,8 @@ export interface ScannerConfig {
   trendMinSustainedPct: number;
   /** Ceiling on |1h| and |6h| price change for 'range' entryStrategyMode — unlike every other sizing check, NOT skipped on re-screen (see RANGE_MAX_VOLATILITY_PCT, env.ts): a held range-bound position that starts trending broke its own investment thesis. */
   rangeMaxVolatilityPct: number;
+  /** Entry-only absolute TVL floor for 'range' entryStrategyMode — see RANGE_MIN_TVL_USD (env.ts). Distinct from maxCapitalTvlRatioPct: that one protects against OUR trade moving a thin pool's price, this one protects against picking an inherently fragile pool regardless of our own capital size. */
+  rangeMinTvlUsd: number;
   /**
    * Entry-only ceiling on (capital about to enter this pool) / (pool TVL),
    * as a percent — e.g. 5 means our deposit can't exceed 5% of the pool's
@@ -229,6 +231,30 @@ export interface ScannerConfig {
    */
   maxCapitalTvlRatioPct: number;
   blacklistPools: Map<string, number>; // poolAddress -> blacklisted-until (epoch ms)
+  /**
+   * "Chase guard" (added 2026-09-30) — mint address -> USD price we last
+   * exited it at. Confirmed live: momentum-optAB-90sol sold SI-SOL on a
+   * crash-guard exit at ~$23.8M mcap, whipsawed through 2 losing rotations
+   * on OTHER tokens over ~7h (both cooldowns/blacklists long since
+   * expired), then re-bought the SAME token fresh as a "new" accelerating
+   * candidate at ~$48.6M mcap — buying back over 2x higher than where it
+   * sold, with zero memory of the prior loss. A time-based cooldown can't
+   * fix this (the 7h gap already exceeded both LEFT_POOL_COOLDOWN_MS and
+   * BLACKLIST_DURATION_MS) and a FIXED time window is the wrong tool anyway
+   * — a memecoin can reverse bear->bull faster than any reasonable window,
+   * so a blanket "no re-entry for N hours" would block genuinely valid
+   * reversals. Fixed instead on PRICE STRUCTURE, not time: keyed per mint
+   * (not pool address — the same token can list multiple Meteora pools at
+   * different bin-steps, confirmed live for this exact SI-SOL incident), an
+   * entry stays guarded (blocked from re-entering above the recorded exit
+   * price) until the pool's OWN current price has genuinely dipped back to
+   * or below that exit price at least once — real evidence of a reset/
+   * correction, not a guessed decay window. A fast reversal clears the
+   * guard fast (first tick price re-crosses the exit level); a token that
+   * never truly retraces stays guarded indefinitely, however much calendar
+   * time passes. See recordChaseGuardExit/updateChaseGuardResets below.
+   */
+  chaseGuardPools: Map<string, number>;
 }
 
 let lastScanAt = 0;
@@ -241,6 +267,54 @@ function isBlacklisted(poolAddress: string, blacklistPools: Map<string, number>)
     return false;
   }
   return true;
+}
+
+/** Called on every exit (HARD_EXIT/TAKE_PROFIT/LEFT_POOL/SWITCHED) to arm the chase guard for that token. Overwrites any stale prior entry — only the MOST RECENT exit price matters. */
+export function recordChaseGuardExit(chaseGuardPools: Map<string, number>, mint: string, exitPriceUsd: number): void {
+  chaseGuardPools.set(mint, exitPriceUsd);
+}
+
+/**
+ * Sweeps the chase guard against a freshly-fetched pair list (no extra API
+ * call — reuses whatever this tick already pulled) and clears any entry
+ * whose token has genuinely dipped back to/below its recorded exit price.
+ * Once cleared, a mint is never re-guarded except by a fresh exit — the
+ * reset is permanent, not a temporary window. Called once per tick, at the
+ * top of filterAndRankPools, so every real call site (scanPools, paper-trade,
+ * isPoolStillEligible) gets this for free.
+ */
+function updateChaseGuardResets(chaseGuardPools: Map<string, number>, pairs: MeteoraPair[]): void {
+  if (chaseGuardPools.size === 0) return;
+  for (const pair of pairs) {
+    const memecoin = nonSolToken(pair);
+    if (!memecoin) continue;
+    const guardedExitPrice = chaseGuardPools.get(memecoin.address);
+    if (guardedExitPrice !== undefined && memecoin.priceUsd <= guardedExitPrice) {
+      chaseGuardPools.delete(memecoin.address);
+    }
+  }
+}
+
+function isChaseGuarded(chaseGuardPools: Map<string, number>, mint: string): boolean {
+  return chaseGuardPools.has(mint);
+}
+
+/**
+ * Current USD price of a pool's non-SOL side, straight from Meteora's own
+ * /pools API (no DexScreener call needed — Meteora already reports it per
+ * token, see normalizeTokenMeta). Used by the real bot's exit paths
+ * (rebalanceEngine.ts) to record a chase-guard price at the moment of exit
+ * — the real bot otherwise prices everything in SOL-ratio terms with no
+ * USD feed of its own (see rpc.ts's doc comment), so this is a small,
+ * deliberate, one-off USD lookup just for that one purpose. Null if the
+ * pool has fallen out of the top-200-by-volume window.
+ */
+export async function getCurrentPriceUsd(poolAddress: string): Promise<number | null> {
+  const pairs = await fetchTopPools();
+  const pool = pairs.find((p) => p.address === poolAddress);
+  if (!pool) return null;
+  const memecoin = nonSolToken(pool);
+  return memecoin?.priceUsd ?? null;
 }
 
 /**
@@ -273,6 +347,7 @@ interface DexScreenerPair {
   priceChange?: { h1?: number; h6?: number; h24?: number };
   volume?: { m5?: number; h1?: number; h6?: number };
   txns?: { m5?: { buys?: number; sells?: number }; h1?: { buys?: number; sells?: number } };
+  liquidity?: { usd?: number };
 }
 
 /** Trailing 1h USD volume for a token, used by riskManager's volume-drop hard-exit check. */
@@ -304,6 +379,12 @@ export async function getVolume1hUsd(mint: string): Promise<number | null> {
  * shared by the batch hydration below so the field-mapping logic exists
  * in exactly one place.
  */
+/** Fallback pick when no dexId==='meteora' pair exists for a mint — highest-liquidity pair wins, undefined if the list is empty/missing. */
+function highestLiquidityPair(candidates: DexScreenerPair[] | undefined): DexScreenerPair | undefined {
+  if (!candidates?.length) return undefined;
+  return candidates.reduce((best, p) => ((p.liquidity?.usd ?? 0) > (best.liquidity?.usd ?? 0) ? p : best));
+}
+
 function applyDexScreenerFields(pair: MeteoraPair, dexPair: DexScreenerPair): void {
   const priceChange = dexPair.priceChange;
   if (typeof priceChange?.h1 === 'number') pair.priceChange1hPct = priceChange.h1;
@@ -339,24 +420,40 @@ export async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
         () => axios.get<DexScreenerPair[]>(`${DEXSCREENER_TOKENS_BATCH_URL}/${SOLANA_CHAIN_ID}/${addresses}`, { timeout: 10_000 }),
         { maxRetries: 2, baseDelayMs: HTTP_RETRY_BASE_DELAY_MS, isRetryable: isRateLimitError, label: 'dexscreener:tokens-batch' },
       );
-      const byMint = new Map<string, DexScreenerPair>();
+      // A mint can trade on multiple DEXs (Raydium/PumpSwap/Orca/...) —
+      // DexScreener returns all of them, not just our Meteora pool. Prefer a
+      // Meteora-specific pair when one exists (first match wins) — avoids
+      // hydrating our Meteora pool's signals from a completely different
+      // DEX's activity (confirmed live: a thin Meteora pool getting
+      // momentum-mode entry signals off a much busier Raydium pair for the
+      // same token).
+      //
+      // BUT: confirmed live 2026-09-29 that DexScreener frequently has NO
+      // dexId==='meteora' pair at all for a token even when Meteora's own
+      // /pools API shows a live, high-volume DLMM pool for it (its indexer
+      // only surfaces the token's pumpswap/meteoradbc/etc pair instead) —
+      // 77/94 (82%) of a real candidate batch hit this. Meteora-only
+      // matching left those pools' trend fields (volumeH6Usd etc) undefined
+      // forever, which volumeSpikeRatio treats as a hard 0 — guaranteed
+      // momentum-floor rejection regardless of real market strength, not
+      // "unknown, don't block" like every other DexScreener-sourced field.
+      // Fall back to the highest-liquidity pair (any DEX) when no
+      // Meteora-tagged pair exists, so these pools get SOME signal instead
+      // of none — reintroduces a little wrong-DEX-data risk only for the
+      // pools DexScreener doesn't track under Meteora, which beats
+      // structurally guaranteed rejection.
+      const byMintMeteora = new Map<string, DexScreenerPair>();
+      const allByMint = new Map<string, DexScreenerPair[]>();
       for (const dexPair of res.data) {
         const base = dexPair.baseToken?.address;
         if (!base) continue;
-        // A mint can trade on multiple DEXs (Raydium/PumpSwap/Orca/...) —
-        // DexScreener returns all of them, not just our Meteora pool. The
-        // old "first match wins per mint" behavior could hydrate our
-        // Meteora pool's trend/momentum/crash-guard signals from a
-        // completely different DEX's activity (confirmed live: a thin
-        // Meteora pool getting momentum-mode entry signals off a much
-        // busier Raydium pair for the same token). Only trust a
-        // Meteora-specific pair — first Meteora match wins if there's more
-        // than one Meteora pair for the same mint.
-        if (dexPair.dexId !== 'meteora') continue;
-        if (!byMint.has(base)) byMint.set(base, dexPair);
+        if (dexPair.dexId === 'meteora' && !byMintMeteora.has(base)) byMintMeteora.set(base, dexPair);
+        if (!allByMint.has(base)) allByMint.set(base, []);
+        allByMint.get(base)!.push(dexPair);
       }
       for (const pair of batch) {
-        const dexPair = byMint.get(nonSolToken(pair)!.address);
+        const mint = nonSolToken(pair)!.address;
+        const dexPair = byMintMeteora.get(mint) ?? highestLiquidityPair(allByMint.get(mint));
         if (dexPair) applyDexScreenerFields(pair, dexPair);
       }
     } catch (err) {
@@ -425,6 +522,8 @@ export interface FilterOpts {
  * network round-trip.
  */
 export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerConfig, opts: FilterOpts = {}): Promise<MeteoraPair[]> {
+  updateChaseGuardResets(config.chaseGuardPools, pairs);
+
   const preFiltered = pairs.filter((pair) => {
     if (isBlacklisted(pair.address, config.blacklistPools)) return false;
 
@@ -433,6 +532,13 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     if (!Number.isFinite(tvl) || !Number.isFinite(vol24h) || tvl <= 0) return false;
 
     if (tvl < config.minTvlUsd) return false;
+    // 'range' mode's own absolute TVL floor (see RANGE_MIN_TVL_USD, env.ts)
+    // — separate risk from maxCapitalTvlRatioPct below (that one's
+    // capital-relative, protects against OUR trade moving a thin pool;
+    // this one's absolute, protects against picking an inherently fragile
+    // pool at all, regardless of capital size). Entry-only, same as every
+    // other capital-sizing check here.
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && tvl < config.rangeMinTvlUsd) return false;
     // Real slippage-safety gate (see maxCapitalTvlRatioPct doc comment) —
     // scales with our actual capital instead of a fixed dollar floor.
     if (!opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
@@ -453,6 +559,12 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // pass market-cap ceiling / holder floor / freeze-authority checks.
     const memecoin = nonSolToken(pair);
     if (!memecoin) return false;
+    // Chase guard (see ScannerConfig.chaseGuardPools doc comment) — don't
+    // re-buy a token above the price we last exited it at, until it's
+    // genuinely dipped back down at least once. Entry-only, same as every
+    // other capital-sizing-style check here (a HELD position isn't a
+    // re-entry).
+    if (!opts.skipSizingChecks && isChaseGuarded(config.chaseGuardPools, memecoin.address)) return false;
     if (!opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) return false;
     if (memecoin.holders < config.minTokenHolders) return false;
     if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) return false;
@@ -742,6 +854,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
     reasons.push('invalid tvl/volume data');
   } else {
     if (tvl < config.minTvlUsd) reasons.push(`tvl $${tvl.toFixed(0)} < min $${config.minTvlUsd}`);
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && tvl < config.rangeMinTvlUsd) {
+      reasons.push(`tvl $${tvl.toFixed(0)} < range mode floor $${config.rangeMinTvlUsd}`);
+    }
     if (!opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
       const sol = solToken(pair);
       if (sol) {
@@ -762,6 +877,10 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   if (!memecoin) {
     reasons.push('no non-SOL side found');
   } else {
+    if (!opts.skipSizingChecks && isChaseGuarded(config.chaseGuardPools, memecoin.address)) {
+      const guardedExitPrice = config.chaseGuardPools.get(memecoin.address);
+      reasons.push(`chase guard: price $${memecoin.priceUsd} still above last exit price $${guardedExitPrice} - hasn't reset yet`);
+    }
     if (!opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) reasons.push(`market cap $${memecoin.marketCapUsd.toFixed(0)} > max $${config.maxMemecoinMarketCapUsd}`);
     if (memecoin.holders < config.minTokenHolders) reasons.push(`holders ${memecoin.holders} < min ${config.minTokenHolders}`);
     if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) reasons.push('freeze authority not disabled');
@@ -864,7 +983,7 @@ export async function scanPools(config: ScannerConfig, currentCapitalSol?: numbe
   return filterAndRankPools(pairs, config, { currentCapitalSol });
 }
 
-export function defaultScannerConfig(blacklistPools: Map<string, number>): ScannerConfig {
+export function defaultScannerConfig(blacklistPools: Map<string, number>, chaseGuardPools: Map<string, number> = new Map()): ScannerConfig {
   return {
     minTvlUsd: env.MIN_TVL_USD,
     minVolume24hUsd: env.MIN_24H_VOLUME_USD,
@@ -886,7 +1005,9 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>): Scann
     entryStrategyMode: env.ENTRY_STRATEGY_MODE,
     trendMinSustainedPct: env.TREND_MIN_SUSTAINED_PCT,
     rangeMaxVolatilityPct: env.RANGE_MAX_VOLATILITY_PCT,
+    rangeMinTvlUsd: env.RANGE_MIN_TVL_USD,
     maxCapitalTvlRatioPct: env.MAX_CAPITAL_TVL_RATIO_PCT,
     blacklistPools,
+    chaseGuardPools,
   };
 }

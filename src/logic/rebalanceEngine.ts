@@ -11,8 +11,8 @@ import {
 } from '../services/meteoraDLMM.js';
 import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from '../services/jupiterSwap.js';
 import { connection, wallet, getWalletSolBalance } from '../services/solana.js';
-import { isPoolStillEligible, type ScannerConfig } from '../services/meteoraScanner.js';
-import { addToBlacklist } from './riskManager.js';
+import { isPoolStillEligible, getCurrentPriceUsd, recordChaseGuardExit, type ScannerConfig } from '../services/meteoraScanner.js';
+import { addToBlacklist, rangeCeilingProfitOverride } from './riskManager.js';
 import { computeBinRadius } from './binRange.js';
 import { computeOutOfRangeTracking } from './outOfRangeTracking.js';
 import { logger } from '../utils/logger.js';
@@ -152,15 +152,34 @@ export { estimateCycleGasCostSol } from './costEstimate.js';
  * Only called for the idle-forced case (out-of-range too long) or when the
  * pool needs a fresh screen check — a fee-threshold rebalance while still
  * in-range goes through claimFeesOnly instead (see above), never here.
+ * currentProfitPct (caller-computed, same basis as evaluatePosition's
+ * peakProfitPct — see index.ts) enables the 'range' mode profit-aware
+ * override below; defaults to 0 (no override) for any caller that doesn't
+ * track it.
  */
-export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConfig): Promise<PoolContext | null> {
+export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConfig, currentProfitPct = 0): Promise<PoolContext | null> {
   const [position] = await getUserPositions(ctx.pool);
   if (!position) throw new Error(`[rebalanceEngine] no open position found for pool ${ctx.poolAddress}`);
 
   logger.info('[rebalanceEngine] closing position for compound cycle', { pool: ctx.poolAddress });
   await closePositionFull(ctx.pool, position);
 
-  const { eligible: stillEligible, reasons: rejectionReasons } = await isPoolStillEligible(ctx.poolAddress, scannerConfig);
+  const { eligible: eligibleRaw, reasons: rejectionReasons } = await isPoolStillEligible(ctx.poolAddress, scannerConfig);
+  // Profit-aware override for 'range' mode — see rangeCeilingProfitOverride
+  // (riskManager.ts) and RANGE_CEILING_PROFIT_OVERRIDE_PCT (env.ts) for the
+  // full rationale/incident. A held range position that fails re-screen
+  // ONLY on the volatility ceiling (started trending, nothing actually went
+  // wrong) shouldn't get abandoned mid-pump before the trailing-take-profit
+  // tiers ever get a chance to arm.
+  const rangeProfitOverride = rangeCeilingProfitOverride(rejectionReasons, scannerConfig.entryStrategyMode, currentProfitPct);
+  const stillEligible = eligibleRaw || rangeProfitOverride;
+  if (rangeProfitOverride) {
+    logger.info('[rebalanceEngine] range-ceiling profit override — recentering instead of leaving', {
+      pool: ctx.poolAddress,
+      currentProfitPct,
+      rejectionReasons,
+    });
+  }
 
   const [balX, balY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
   const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
@@ -176,6 +195,7 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
     // pool that just failed re-screen but is still top-ranked gets
     // re-entered next tick, whipsawing (confirmed live in paper-trade).
     addToBlacklist(scannerConfig.blacklistPools, ctx.poolAddress, Date.now(), env.LEFT_POOL_COOLDOWN_MS);
+    await recordExitForChaseGuard(ctx, scannerConfig.chaseGuardPools);
     if (otherAmount.gtn(0)) await emergencySwapAllToSol(otherMint, otherAmount);
     return null;
   }
@@ -298,13 +318,21 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promis
   return nextCapital;
 }
 
+/** Records this exit's price against the chase guard (see ScannerConfig.chaseGuardPools) — best-effort, a failed price lookup just skips arming the guard rather than blocking the exit. */
+async function recordExitForChaseGuard(ctx: PoolContext, chaseGuardPools: Map<string, number>): Promise<void> {
+  const mint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+  const exitPriceUsd = await getCurrentPriceUsd(ctx.poolAddress);
+  if (exitPriceUsd !== null) recordChaseGuardExit(chaseGuardPools, mint, exitPriceUsd);
+}
+
 /**
  * Hard-exit flow: close position, dump 100% of the non-SOL side to SOL,
  * blacklist the pool for BLACKLIST_DURATION_MS, and return the leftover SOL
  * capital available for the next pool.
  */
-export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<string, number>): Promise<number> {
+export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<string, number>, chaseGuardPools: Map<string, number>): Promise<number> {
   addToBlacklist(blacklistPools, ctx.poolAddress);
+  await recordExitForChaseGuard(ctx, chaseGuardPools);
   return closeAndConvertToSol(ctx, 'HARD_EXIT');
 }
 
@@ -314,6 +342,7 @@ export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<stri
  * in gains). Neither is a risk violation, so the pool stays a fully valid
  * candidate for the very next scan.
  */
-export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT'): Promise<number> {
+export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT', chaseGuardPools: Map<string, number>): Promise<number> {
+  await recordExitForChaseGuard(ctx, chaseGuardPools);
   return closeAndConvertToSol(ctx, reason);
 }
