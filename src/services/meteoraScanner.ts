@@ -15,7 +15,7 @@ import {
   HTTP_RETRY_BASE_DELAY_MS,
 } from '../config/constants.js';
 import { isRateLimitError, withRetry, mapWithConcurrency } from '../utils/retry.js';
-import { isMintAuthorityRevoked } from './rpc.js';
+import { isMintAuthorityRevokedViaRugCheck } from './rugcheck.js';
 import { logger } from '../utils/logger.js';
 
 // ponytail: flat concurrency cap for RPC hydration, not a real rate limiter —
@@ -370,16 +370,21 @@ export async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
 }
 
 /**
- * Hydrates `mintAuthorityRevoked` on the memecoin side via a direct RPC
- * mint-account read (Meteora's API doesn't expose mint-authority at all).
- * Only called on the short pre-filtered list — this is an RPC round-trip
- * per pool, not something to run against the full pool universe.
+ * Hydrates `mintAuthorityRevoked` on the memecoin side via RugCheck's
+ * report API (Meteora's own API doesn't expose mint-authority at all).
+ * Only called on the short pre-filtered list — one HTTP call per pool,
+ * not something to run against the full pool universe. Was a direct
+ * Solana RPC call (rpc.ts's isMintAuthorityRevoked) until 2026-09-29 —
+ * moved off Helius entirely after that RPC-per-pool pattern became the
+ * dominant load causing sustained 429s once multiple paper-trade
+ * instances ran in parallel; RugCheck's free single-token endpoint puts
+ * this load on a separate rate-limit bucket instead.
  */
 export async function hydrateMintAuthority(pairs: MeteoraPair[]): Promise<void> {
   await mapWithConcurrency(pairs, RPC_HYDRATION_CONCURRENCY, async (pair) => {
     const memecoin = nonSolToken(pair);
     if (!memecoin) return;
-    memecoin.mintAuthorityRevoked = await isMintAuthorityRevoked(memecoin.address);
+    memecoin.mintAuthorityRevoked = await isMintAuthorityRevokedViaRugCheck(memecoin.address);
   });
 }
 

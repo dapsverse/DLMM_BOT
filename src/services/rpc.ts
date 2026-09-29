@@ -1,5 +1,4 @@
 import { Connection, PublicKey } from '@solana/web3.js';
-import { getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { createRequire } from 'node:module';
 import { env } from '../config/env.js';
 import { FALLBACK_PRIORITY_FEE_MICRO_LAMPORTS, RPC_MAX_RETRIES, RPC_RETRY_BASE_DELAY_MS } from '../config/constants.js';
@@ -19,35 +18,12 @@ export const connection = new Connection(env.RPC_URL, {
   wsEndpoint: env.RPC_WS_URL || undefined,
 });
 
-/**
- * True if the mint's mint-authority has been revoked (set to null on-chain)
- * — i.e. supply is fixed forever, the dev can't print more tokens on top of
- * holders. This is a *different* authority than freeze-authority (which
- * only controls whether individual accounts can be frozen); Meteora's pool
- * API doesn't expose mint-authority at all, so this has to hit the RPC
- * directly. Tries the classic Token program first, then Token-2022 (many
- * newer memecoins use 2022 for transfer-fee/hook extensions).
- * Returns `null` if the mint can't be read at all (fail-closed: caller
- * should treat null as "don't trust this token", not as "assume safe").
- */
-export async function isMintAuthorityRevoked(mintAddress: string): Promise<boolean | null> {
-  const mint = new PublicKey(mintAddress);
-  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
-    try {
-      const info = await withRetry(() => getMint(connection, mint, 'confirmed', programId), {
-        maxRetries: 2,
-        baseDelayMs: RPC_RETRY_BASE_DELAY_MS,
-        label: 'getMint',
-      });
-      return info.mintAuthority === null;
-    } catch {
-      // wrong token program for this mint, or transient RPC error — try next program / give up below
-      continue;
-    }
-  }
-  logger.debug(`[rpc] could not read mint account for ${mintAddress} under either token program`);
-  return null;
-}
+// isMintAuthorityRevoked (direct Solana RPC mint-account read) removed
+// 2026-09-29 — was the dominant load causing sustained Helius 429s once
+// multiple paper-trade instances ran in parallel. Replaced by
+// rugcheck.ts's isMintAuthorityRevokedViaRugCheck, which gets the same
+// data (mint-authority null-or-not) from RugCheck's free report API
+// instead, off Helius entirely.
 
 /**
  * ponytail: @meteora-ag/dlmm has TWO separate problems, both worked around

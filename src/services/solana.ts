@@ -4,7 +4,7 @@ import { env } from '../config/env.js';
 import { RPC_MAX_RETRIES, RPC_RETRY_BASE_DELAY_MS } from '../config/constants.js';
 import { withRetry } from '../utils/retry.js';
 
-export { connection, isMintAuthorityRevoked, getDynamicPriorityFeeMicroLamports } from './rpc.js';
+export { connection, getDynamicPriorityFeeMicroLamports } from './rpc.js';
 import { connection } from './rpc.js';
 
 /**
