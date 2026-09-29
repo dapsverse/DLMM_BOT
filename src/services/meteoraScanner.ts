@@ -269,6 +269,7 @@ export async function fetchTopPools(): Promise<MeteoraPair[]> {
 
 interface DexScreenerPair {
   baseToken?: { address?: string };
+  dexId?: string;
   priceChange?: { h1?: number; h6?: number; h24?: number };
   volume?: { m5?: number; h1?: number; h6?: number };
   txns?: { m5?: { buys?: number; sells?: number }; h1?: { buys?: number; sells?: number } };
@@ -281,7 +282,14 @@ export async function getVolume1hUsd(mint: string): Promise<number | null> {
       () => axios.get<{ pairs?: DexScreenerPair[] }>(`${DEXSCREENER_TOKEN_URL}/${mint}`, { timeout: 10_000 }),
       { maxRetries: 2, baseDelayMs: HTTP_RETRY_BASE_DELAY_MS, isRetryable: isRateLimitError, label: 'dexscreener:volume1h' },
     );
-    const h1 = res.data.pairs?.[0]?.volume?.h1;
+    // A mint can trade on multiple DEXs (Raydium/PumpSwap/Orca/...) —
+    // DexScreener returns all of them, not just our Meteora pool. Taking
+    // pairs[0] blind (old behavior) could compare OUR held position's
+    // volume-drop against a completely different DEX's activity. Find the
+    // Meteora-specific pair; permissive-unknown (null) if none, same policy
+    // as every other DexScreener-sourced field in this file.
+    const meteoraPair = res.data.pairs?.find((p) => p.dexId === 'meteora');
+    const h1 = meteoraPair?.volume?.h1;
     return typeof h1 === 'number' ? h1 : null;
   } catch (err) {
     logger.debug(`[scanner] dexscreener volume1h lookup failed for ${mint}`, {
@@ -334,9 +342,18 @@ export async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
       const byMint = new Map<string, DexScreenerPair>();
       for (const dexPair of res.data) {
         const base = dexPair.baseToken?.address;
-        // First match wins per mint — same "take pairs[0]" behavior the old
-        // per-pool call already had when a mint has multiple DEX pairs.
-        if (base && !byMint.has(base)) byMint.set(base, dexPair);
+        if (!base) continue;
+        // A mint can trade on multiple DEXs (Raydium/PumpSwap/Orca/...) —
+        // DexScreener returns all of them, not just our Meteora pool. The
+        // old "first match wins per mint" behavior could hydrate our
+        // Meteora pool's trend/momentum/crash-guard signals from a
+        // completely different DEX's activity (confirmed live: a thin
+        // Meteora pool getting momentum-mode entry signals off a much
+        // busier Raydium pair for the same token). Only trust a
+        // Meteora-specific pair — first Meteora match wins if there's more
+        // than one Meteora pair for the same mint.
+        if (dexPair.dexId !== 'meteora') continue;
+        if (!byMint.has(base)) byMint.set(base, dexPair);
       }
       for (const pair of batch) {
         const dexPair = byMint.get(nonSolToken(pair)!.address);
