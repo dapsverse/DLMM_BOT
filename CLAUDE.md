@@ -509,6 +509,23 @@ logs deleted (not archived — decision is to drop it, not revisit later
 without a fresh reason to). ADVANCEBOT's `vs-dlmmbot` ladder instance is
 unaffected by this decision (separate codebase/strategy) and keeps running.
 
+**Update same day, few hours later**: the Helius RPC key hit its limit
+(sustained, non-recovering 429s for ~4.78h, confirmed zero progress across
+ALL instances including ADVANCEBOT — worse than every prior burst this
+session, which always settled within minutes). User swapped in a fresh
+Helius key (both DLMMBOT's and ADVANCEBOT's `.env` `RPC_URL` updated,
+value deliberately never printed to any tool output per the standing
+secrets-handling rule) and asked to restart again, PLUS add two more DLMM
+instances at **90 SOL capital** (`range-optAB-90sol`, `momentum-optAB-90sol`
+— same modes/config as the 1.2 SOL pair, just `INITIAL_LP_CAPITAL_SOL=90`)
+to see how the same strategies behave at a materially different capital
+scale (90 SOL pushes the `MAX_CAPITAL_TVL_RATIO_PCT` floor ~75x higher than
+at 1.2 SOL, likely a very different reachable pool universe). All 4 DLMM
+instances + ADVANCEBOT restarted fresh on the new key. **Go-live window
+clock restarted again from this point** (2026-09-29 ~05:15 UTC — 3 days
+still lands on 2026-10-02, Friday, just later in the day). Nothing else
+changed code-wise in this update — purely an infra swap + scale experiment.
+
 ## Next steps
 
 1. **Commit the 2026-09-26 work** (entry strategy modes + spot executor,
