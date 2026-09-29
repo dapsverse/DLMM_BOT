@@ -521,10 +521,28 @@ instances at **90 SOL capital** (`range-optAB-90sol`, `momentum-optAB-90sol`
 to see how the same strategies behave at a materially different capital
 scale (90 SOL pushes the `MAX_CAPITAL_TVL_RATIO_PCT` floor ~75x higher than
 at 1.2 SOL, likely a very different reachable pool universe). All 4 DLMM
-instances + ADVANCEBOT restarted fresh on the new key. **Go-live window
-clock restarted again from this point** (2026-09-29 ~05:15 UTC — 3 days
-still lands on 2026-10-02, Friday, just later in the day). Nothing else
-changed code-wise in this update — purely an infra swap + scale experiment.
+instances + ADVANCEBOT restarted fresh on the new key.
+
+**Same session, ~1.5h later — the REAL root cause found and fixed**: even
+on the fresh Helius key, all 4 DLMM instances stayed at 429 storm /
+zero-entries for 1.35h+ (1000+ 429s each) while ADVANCEBOT (same key) was
+fine — pointed at DLMMBOT-specific RPC load, not the key itself. Traced to
+`hydrateMintAuthority`'s per-candidate-pool direct Solana RPC `getMint`
+call (rpc.ts's `isMintAuthorityRevoked`) — 4x the instances now running
+this in parallel per scan tick was the dominant Helius load. Replaced with
+RugCheck.xyz's free, unauthenticated single-token report API
+(`src/services/rugcheck.ts`, `isMintAuthorityRevokedViaRugCheck`) — same
+fail-closed-on-failure contract, verified live against a revoked mint
+(BONK) and non-revoked one (USDC) before shipping. Old RPC version deleted
+entirely (zero callers after the swap). Moves this load to a completely
+separate rate-limit bucket instead of Helius. **Confirmed fixed**: 0 429s
+across all 4 instances within 15s of restarting on the fix (previously
+1000+ within 1.35h on the same fresh key). All 4 DLMM instances restarted
+again on this fix; ADVANCEBOT untouched (separate codebase, wasn't
+affected by this specific bug). **Go-live window clock restarted one more
+time from this point** (2026-09-29 ~06:49 UTC — 3 days still lands
+2026-10-02, Friday). This should be the last restart before the window
+counts for real — infra is now believed stable.
 
 ## Next steps
 
