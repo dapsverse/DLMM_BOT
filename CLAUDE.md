@@ -408,12 +408,16 @@ these just because one strategy currently looks best:
 1. **≥30 closed positions** for the specific strategy being promoted, not
    combined across strategies. 9 is not enough to distinguish skill from
    variance.
-2. **≥4 calendar days of continuous unattended runtime** (revised
-   2026-09-28 from an initial 5-day bar — user's call, targeting a Friday
-   start if 1-8 all check out), ideally spanning more than one visibly
-   different market condition (a clear uptrend stretch AND a choppy/down
-   stretch) — a single lucky window isn't evidence the edge generalizes.
-3. **A full run in that ≥4-day window with zero code changes needed** —
+2. **≥3 calendar days of continuous unattended runtime** (revised
+   2026-09-29 from 4 days, revised from an initial 5 — user's call,
+   targeting a Friday start if 1-8 all check out; the clock restarts from
+   the 2026-09-29 dexId=meteora fix + spot-drop restart, since criterion 3
+   requires zero code changes in the counted window — 2026-09-29 ~00:19 UTC
+   + 3 days lands exactly on 2026-10-02, Friday), ideally spanning more than
+   one visibly different market condition (a clear uptrend stretch AND a
+   choppy/down stretch) — a single lucky window isn't evidence the edge
+   generalizes.
+3. **A full run in that ≥3-day window with zero code changes needed** —
    i.e. the last stretch of data has to come from code that wasn't itself
    still being debugged. Two real bugs were found and fixed THIS session
    alone (2026-09-27/28); the run that counts toward criteria 1-2 has to
