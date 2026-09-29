@@ -1,6 +1,10 @@
-# meteora-dlmm-bot — session context (2026-09-28)
+# meteora-dlmm-bot — session context (2026-09-29)
 
 Single-pool auto-compounding Meteora DLMM LP bot for Solana memecoin pools.
+**As of 2026-09-29: spot executor dropped, focus is DLMM-only (`range` vs
+`momentum` mode) — see the "2026-09-29 decision" section below for why and
+for the current running-instance list. Sections above/before it (instance
+lists mentioning spot/trend-optAB-spot, etc.) are historical, superseded.**
 **Real-capital plan revised 2026-09-28: 1.3 SOL total (1.2 SOL working
 capital / 0.1 SOL gas reserve)** — down from the original 5 SOL design
 (4.2/0.8), user's call, start smaller for the first real cycle. Paper-trade
@@ -442,6 +446,64 @@ None of these are met yet for any strategy as of 2026-09-28. Re-evaluate
 against this exact list (don't re-negotiate the bar down) once the current
 1.2-SOL-capital paper-trade runs (started this session, whipsaw fix +
 bootstrap fix both live) have had time to accumulate.
+
+## 2026-09-29 decision: spot executor dropped, focus narrowed to DLMM only
+
+User asked why the scanner only ever looks at Meteora-listed tokens even
+though a token can trade on Raydium/PumpSwap/pump.fun long before (or
+without ever) getting a Meteora DLMM pool. Investigated whether to broaden
+discovery beyond Meteora's own `/pools` API, specifically for the spot
+executor (which doesn't need a Meteora pool at all — it can buy anything
+via Jupiter). Findings (full research trail in conversation history, not
+reproduced here):
+
+- **DexScreener cannot replace Meteora's `/pools` as a discovery source.**
+  Confirmed against current docs (docs.dexscreener.com/api/reference,
+  2026-09-29) and live: it has no "list/browse pairs" endpoint at all —
+  only token/pair-address lookup and free-text search. Tried the obvious
+  workaround (`q=solana`) live — returned wrapped-SOL pairs on Base/
+  Ethereum/BSC, not Solana pairs at all. Also tried its internal
+  (undocumented) API directly — `io.dexscreener.com/dex/screener/...` — got
+  an immediate Cloudflare 403, i.e. actively bot-blocked, not just
+  unsupported. Not viable at any reliability level.
+- **Real alternatives exist** (Raydium's own `/pools/info/list` API — free,
+  official, sortable by volume/liquidity; pump.fun — unofficial only, or
+  paid third-party wrappers like Solana Tracker/Codex for genuine
+  pre-graduation bonding-curve discovery) but each adds either a new paid
+  vendor dependency or an unsupported/breakable API — a real cost/risk
+  trade-off, not a free win.
+- **Reframe (user's own conclusion, and the actual reason to stop here):**
+  Meteora-only discovery is not an arbitrary limitation for the DLMM
+  execution path — DLMM *requires* a Meteora pool to exist, so discovery
+  and execution are already coherent for `range`/`momentum` modes. It's
+  ONLY a real limitation for spot, which doesn't need Meteora at all. Since
+  broadening spot's universe isn't cheaply achievable, and spot had
+  separately been the worst performer all session (see `trend-optAB-spot`'s
+  -77%+ run above) — **decision: drop the spot executor entirely, focus
+  exclusively on DLMM `range` vs `momentum`.** `ENABLE_SPOT_EXECUTOR` stays
+  in the codebase (still a valid toggle, still tested by
+  `checkSpotExecutor.ts`) but no running instance uses it going forward
+  unless this decision is revisited.
+
+**Related fix landed same session** (real bug, not just the above
+architecture question): `hydrateTrendData`/`getVolume1hUsd` queried
+DexScreener by token mint, and DexScreener returns pairs from ALL DEXs a
+mint trades on — the old "first match wins" behavior could hydrate a thin
+Meteora pool's trend/momentum/crash-guard/volume-drop signals from a
+completely different (possibly much busier) DEX's activity for the same
+token. Fixed by filtering to `dexId === 'meteora'` specifically (DexScreener
+pair objects already carry this field, just wasn't being used). TVL/volume
+screening itself was never affected — that comes straight from Meteora's
+own `/pools` API, only the DexScreener-sourced enrichment fields had this
+gap.
+
+**Current running instances as of this decision**: `range-optAB` (DLMM,
+`range` mode) and `momentum-optAB` (DLMM, `momentum` mode, default —
+active `evaluateSwitchOpportunity` switching, the one mode that has it),
+both restarted fresh on the dexId fix. `trend-optAB-spot` killed, all its
+logs deleted (not archived — decision is to drop it, not revisit later
+without a fresh reason to). ADVANCEBOT's `vs-dlmmbot` ladder instance is
+unaffected by this decision (separate codebase/strategy) and keeps running.
 
 ## Next steps
 
