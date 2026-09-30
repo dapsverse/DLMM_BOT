@@ -1,10 +1,16 @@
-# meteora-dlmm-bot — session context (2026-09-29)
+# meteora-dlmm-bot — session context (2026-09-30)
 
 Single-pool auto-compounding Meteora DLMM LP bot for Solana memecoin pools.
 **As of 2026-09-29: spot executor dropped, focus is DLMM-only (`range` vs
 `momentum` mode) — see the "2026-09-29 decision" section below for why and
 for the current running-instance list. Sections above/before it (instance
 lists mentioning spot/trend-optAB-spot, etc.) are historical, superseded.**
+**As of 2026-09-30: 3 more real bugs found/fixed (DexScreener hydration
+fallback, range mode TVL floor + profit-aware ceiling override, chase
+guard against buying back a token above its own last exit price) — see the
+"2026-09-30 session" section (near the bottom, before "Next steps") for
+the full detail. This is the current commit (`65f8534`) and the current
+go-live clock status (misses the Friday target, see that section).**
 **Real-capital plan revised 2026-09-28: 1.3 SOL total (1.2 SOL working
 capital / 0.1 SOL gas reserve)** — down from the original 5 SOL design
 (4.2/0.8), user's call, start smaller for the first real cycle. Paper-trade
@@ -33,15 +39,12 @@ the spec.**
   commit directly to main). All work is on `feature/trend-aware-entry` —
   current branch, matches the entry-strategy-mode work below. 42 commits on
   top of the original baseline scaffold as of `77735d5`.
-  **Working tree is NOT clean** — the whole 2026-09-26 session (entry
-  strategy modes + spot executor, see below) is uncommitted:
-  modified `SCREEN_RULE.MD`, `src/config/env.ts`, `src/logic/costEstimate.ts`,
-  `src/scripts/checkEntryPumpGuards.ts`, `src/scripts/paperTrade.ts`,
-  `src/services/meteoraScanner.ts`; untracked `src/logic/spotExecutor.ts`,
-  `src/scripts/checkRangeMode.ts`, `src/scripts/checkSpotExecutor.ts`,
-  `src/scripts/checkTrendMode.ts`. No PR opened yet (no git remote
-  configured). **Commit this before doing anything else that touches these
-  files** — next session shouldn't have to reconstruct it from code again.
+  **Update 2026-09-30: the 2026-09-26 uncommitted work described below WAS
+  committed** (this paragraph is otherwise historical/stale, kept for
+  narrative continuity — see git log for the real commit history). Working
+  tree is clean as of commit `65f8534` (2026-09-30) — see the "2026-09-30
+  session" section further down for what that commit contains. No PR
+  opened yet (no git remote configured).
 - **Five live paper-trade instances running right now** (restarted this
   session on the new entry-strategy-mode code), all on the SAME capital
   config (`INITIAL_LP_CAPITAL_SOL=1.15`, `MIN_GAS_RESERVE_SOL=0.1`). This
@@ -543,24 +546,133 @@ affected by this specific bug). **Go-live window clock restarted one more
 time from this point** (2026-09-29 ~06:49 UTC — 3 days still lands
 2026-10-02, Friday). This should be the last restart before the window
 counts for real — infra is now believed stable.
+**Superseded same day — see "2026-09-30 session" below: 3 more real bugs
+were found and fixed that same infra-stable window, restarting the clock
+again to 2026-09-30 ~00:02 UTC, which now misses the Friday target
+(lands 2026-10-03, Saturday instead).**
+
+## 2026-09-30 session: DexScreener hydration fallback + range mode TVL/profit refinements + chase guard
+
+Continuation of the same 4-instance run (`momentum-optAB`, `range-optAB`,
+`momentum-optAB-90sol`, `range-optAB-90sol`) from the 2026-09-29 dexId fix.
+Three real, distinct bugs/gaps found and fixed, all from watching live
+paper-trade behavior — no speculative changes. Committed as `65f8534`.
+
+**1. The 2026-09-29 dexId==='meteora' fix had a real regression.** After
+3.68h of zero entries across all 4 instances (both `momentum` and `range`
+screens independently returning "no candidate"), investigated whether
+RugCheck's own rate limit was the new bottleneck (tested directly: 90 mints
+at concurrency 4 resolved cleanly in 8.7s, 0 failures — ruled out). Traced
+instead to `hydrateTrendData`: the `dexId === 'meteora'` filter (correct in
+principle, fixes cross-DEX contamination) left **77/94 (82%) of real
+candidates with zero DexScreener data at all** — confirmed live for
+PAID-SOL/ANSEM-SOL/HOOKED-SOL/STOXES-SOL specifically, each a genuinely
+live, high-volume Meteora pool per Meteora's own API, but DexScreener's
+token-lookup endpoint only returns their `pumpswap`/`meteoradbc` pair, never
+a `meteora`-tagged one. With no `volumeH6Usd` ever hydrated,
+`volumeSpikeRatio` hard-defaults to 0 — guaranteed momentum-floor rejection
+regardless of real market strength, and likely degraded trend/range's
+DexScreener-sourced checks too. **Fix**: fall back to the highest-liquidity
+pair (any DEX) when no meteora-tagged pair exists, instead of leaving the
+field undefined forever (`highestLiquidityPair()`, `meteoraScanner.ts`).
+Verified: candidate hydration coverage went from 17/94 to 94/94 in a live
+re-test. Re-accepts a little of the original wrong-DEX-data risk, but only
+for the 82% of pools that would otherwise get zero signal and guaranteed
+rejection — net better. All 4 instances restarted on this fix.
+
+**2. `range` mode refinements**, from watching `range-optAB` (1.2 SOL) vs
+`range-optAB-90sol` (90 SOL) diverge to **-45.11% vs +24.06%** on the
+*identical* strategy over the same ~11h window:
+- **`RANGE_MIN_TVL_USD` (new, default 60,000, absolute not capital-relative)**
+  — `range-optAB` entered `o-SOL` TWICE at $15,837 and $11,442 TVL
+  (`MAX_CAPITAL_TVL_RATIO_PCT` scales with capital and let this through at
+  1.2 SOL; at 90 SOL the same ratio would have blocked it). The second
+  entry HARD_EXIT'd at -43% unrealized loss. TVL that thin is fragile
+  regardless of how small our own position is — a genuinely different risk
+  from price-impact, needed its own absolute floor. $60K chosen from the
+  data itself: disasters clustered $11K-59K, healthy range entries
+  (SI-SOL) sat $261K-574K.
+- **`RANGE_CEILING_PROFIT_OVERRIDE_PCT` (new, default 0) +
+  `rangeCeilingProfitOverride()` (`riskManager.ts`, shared by
+  `paperTrade.ts` and `rebalanceEngine.ts` so both stay in parity)** —
+  `range-optAB-90sol` left a SI-SOL position at ~28% peak profit (right
+  before the idle-timer + volatility-ceiling combo fired) — SI-SOL then
+  ran ~2x further. The existing sticky trailing-take-profit tiers
+  (`TAKE_PROFIT_TIERS`, arm at 30%) never got a chance to engage because
+  the idle-forced re-screen abandons the pool unconditionally, before
+  profit could ever reach that arm threshold. Fix: when a held range
+  position's re-screen fails ONLY on the volatility-ceiling reasons (not
+  crash guard / dead activity / authority — those still abandon as
+  before) AND current profit clears the threshold, don't abandon —
+  recenter the bin and keep holding, letting the existing trailing-tier
+  system govern the eventual exit. User explicitly rejected a time-based
+  cooldown alternative for this same reasoning (see chase guard below) —
+  profit-gating was judged the safer mechanism here specifically because
+  the existing take-profit tiers already provide the downside protection
+  once armed.
+
+**3. Chase guard (`ScannerConfig.chaseGuardPools`, all modes)** — found
+while explaining `momentum-optAB-90sol`'s worse-than-range behavior:
+sold SI-SOL on a legitimate crash-guard exit at ~$23.8M mcap, whipsawed
+through 2 losing rotations on other tokens (GP-SOL: dead activity, -8.2%;
+PAID-SOL: another crash-guard, -8%) over ~7h, then re-bought the SAME
+token fresh as a "new" accelerating candidate at ~$48.6M mcap — over 2x
+higher than where it sold, zero memory of the prior loss. **A time-based
+cooldown cannot fix this** (the 7h gap already exceeded both
+`LEFT_POOL_COOLDOWN_MS` 20min and `BLACKLIST_DURATION_MS` 6h) and user
+correctly rejected a fixed retention window as the fix on principle: a
+memecoin can reverse bear→bull faster than any reasonable window, so a
+blanket "no re-entry for N hours" would also block genuinely valid
+reversals. **Fixed on price structure instead of time**: record the exit
+price per mint (not pool address — the same token can list multiple
+Meteora pools at different bin-steps, confirmed for this exact SI-SOL
+case) on every exit; a mint stays guarded against re-entry above that
+price until its OWN price has genuinely dipped back to/below it at least
+once (checked every scan tick against data already fetched, no extra API
+call) — then the guard clears **permanently**, not on a timer. A fast
+reversal clears the guard fast; a token that never truly retraces stays
+blocked indefinitely, however much calendar time passes. Wired into all 4
+of `paperTrade.ts`'s exit paths (HARD_EXIT/TAKE_PROFIT/LEFT_POOL/SWITCHED)
+and into `rebalanceEngine.ts`'s real-bot exit paths (`executeHardExit`,
+`executeCleanExit`, `compoundCycle`'s abandon branch) via a new
+`getCurrentPriceUsd()` lookup against Meteora's own `/pools` API (the real
+bot otherwise prices everything in SOL-ratio terms with no USD feed of its
+own, by design — see `rpc.ts`'s doc comment — so this is a deliberate,
+narrow, one-off USD lookup just for this one purpose, not a broader
+architecture change).
+
+Two new self-checks (`checkRangeTvlFloorAndProfitOverride.ts`,
+`checkChaseGuard.ts`), all 12 self-checks in the repo pass, TypeScript
+clean. All 4 paper-trade instances restarted again on this combined fix
+(restart timestamp 2026-09-30 ~00:02 UTC).
+
+**Go-live clock restarted again, and it now misses the Friday target.**
+Criterion 3 (below) requires the counted window to start AFTER the last
+code change — today's 3 fixes are exactly that kind of change. New restart
+timestamp 2026-09-30 ~00:02 UTC + 3 days lands **2026-10-03, Saturday**,
+not the 2026-10-02 Friday target from the prior restart. Flagging this
+explicitly rather than quietly re-deriving a new date that happens to still
+say Friday — it doesn't, one more day slipped. If a fresh session or the
+user wants a hard Friday start regardless, that would mean accepting a
+window shorter than 3 days on the current code, a deliberate trade-off to
+surface, not decide silently.
 
 ## Next steps
 
-1. **Commit the 2026-09-26 work** (entry strategy modes + spot executor,
-   currently uncommitted — see git status note up top) before it's at risk
-   of being lost again. New branch not needed, `feature/trend-aware-entry`
-   already matches; normal new-branch-+-PR rule still applies if/when this
-   is ready to land on `main`.
-2. **Let the 5 running instances keep going** — the comparison is now
-   `ENTRY_STRATEGY_MODE` (momentum/trend/range) × volume-drop optA/optB/optAB,
-   crossed with LP-vs-spot execution on the `range` instance specifically,
-   all on identical capital. Watch for: does `trend` keep beating `momentum`
-   past today's single sample; does `range`'s DLMM instance actually earn
-   steadier fee income than a momentum-target DLMM would have; does the
-   post-whipsaw-fix spot-vs-LP cost gap narrow; does the capital/TVL ratio
-   change (point 6, prior session) surface more small-mcap entries without
-   more bad outcomes; does the A+B-vs-false-positive tension (point 5,
-   prior session) resolve one way with more samples.
+1. **Let the 4 running instances keep going** on the combined dexId-fallback
+   + range TVL/profit-override + chase-guard fixes — this is now the
+   cleanest run of the session (fewest known bugs). Watch for: does
+   `range-optAB`'s TVL floor keep it out of another o-SOL-style disaster;
+   does the range-ceiling profit override actually let a future winner run
+   further without giving back the gain on a reversal that never comes back
+   (the symmetric risk the user flagged); does momentum's chase guard
+   actually stop a repeat of the SI-SOL buy-high pattern; does `range`
+   keep beating `momentum` at both capital scales now that the TVL floor
+   is capital-scale-independent.
+2. **Chase guard is paper-trade + real-bot code-complete but the real bot
+   has never executed a single real transaction** — first real use will be
+   whatever pool it first tries to exit, so there's no live-fire validation
+   of the `getCurrentPriceUsd()` lookup path yet, only the self-check.
 3. Decide on the still-open spec gaps: `HARD_EXIT` profit-guard, absolute
    switch-margin floor (both from 2026-09-23), the volume-drop Option A/B
    magnitude (currently 1h, arbitrary), and now also whether `trend`/`range`
@@ -569,10 +681,7 @@ counts for real — infra is now believed stable.
 4. Once behavior looks solid over a longer window across multiple episodes
    (not just one): re-check `.env.live` wallet balance, decide on a first
    real cycle. Same "no devnet dry-run, watch the first cycle closely"
-   plan as every prior session — nothing about that has changed. Given
-   this session found a real (paper-trade-only, but still) basis-tracking
-   bug purely by watching a long-running instance, err toward MORE
-   observation time before real money, not less.
+   plan as every prior session — nothing about that has changed.
 
 ## Security notes (do not relax these)
 
