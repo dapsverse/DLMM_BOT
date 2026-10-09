@@ -18,6 +18,7 @@ import {
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
 import { WSOL_MINT } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
+import { getEntryPriceContext } from './services/candleContext.js';
 import { logger } from './utils/logger.js';
 
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
@@ -116,6 +117,7 @@ async function tryEnterPool(): Promise<void> {
       continue;
     }
 
+    const priceContext = await getEntryPriceContext(candidate.address); // observability only, never gates entry
     try {
       const pool = await openPool(candidate.address);
       currentPool = await openInitialPosition(
@@ -140,6 +142,8 @@ async function tryEnterPool(): Promise<void> {
         priceChange24hPct: candidate.priceChange24hPct ?? null,
         volumeSpikeRatio: +volumeSpikeRatio(candidate).toFixed(3),
         buyRatio1h: candidate.buyRatio1h ?? null,
+        priceContext,
+        dollarFlow: { buyRatioUsd: +dollarFlow.buyRatioUsd.toFixed(3), txSampled: dollarFlow.txSampled },
       });
       return;
     } catch (err) {
