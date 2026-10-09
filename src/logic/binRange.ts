@@ -1,4 +1,10 @@
 import { env } from '../config/env.js';
+import { MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX } from '../services/meteoraDLMM.js';
+
+// A position spans (2*radius + 1) bins — clamp so a single
+// openPosition() transaction never exceeds the SDK's own per-tx bin limit.
+// See MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX's doc comment for the live incident.
+const SDK_SAFE_MAX_RADIUS = Math.floor((MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX - 1) / 2);
 
 /**
  * Converts a target ± price-range coverage (TARGET_RANGE_PCT, e.g. 15%)
@@ -21,6 +27,7 @@ import { env } from '../config/env.js';
 export function computeBinRadius(binStep: number): number {
   const targetFactor = 1 + env.TARGET_RANGE_PCT / 100;
   const raw = Math.log(targetFactor) / Math.log(1 + binStep / 10_000);
-  const clamped = Math.min(Math.max(raw, env.MIN_BIN_RADIUS), env.MAX_BIN_RADIUS);
+  const maxRadius = Math.min(env.MAX_BIN_RADIUS, SDK_SAFE_MAX_RADIUS);
+  const clamped = Math.min(Math.max(raw, env.MIN_BIN_RADIUS), maxRadius);
   return Math.round(clamped);
 }

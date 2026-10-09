@@ -1,6 +1,34 @@
-# meteora-dlmm-bot — session context (2026-09-30)
+# meteora-dlmm-bot — session context (2026-10-08)
 
 Single-pool auto-compounding Meteora DLMM LP bot for Solana memecoin pools.
+**As of 2026-10-08: REAL MONEY IS LIVE, bot currently STOPPED (deliberately)
+for a batch fix.** First real-capital cycle started 2026-10-07 (wallet
+`<LIVE_WALLET_ADDRESS>`, `range` mode,
+`INITIAL_LP_CAPITAL_SOL=1.3`). 6 real bugs found and fixed live against
+actual mainnet transactions on 2026-10-07 (logger silently swallowing all
+output, gas reserve not subtracted on first entry, DLMM SDK ComputeBudget
+duplicate-instruction rejection, 1000x token-value undercounting from a
+hardcoded 9-decimals assumption, a real balance-race causing a SOL-only
+"phantom position", and a bin-radius SDK ceiling causing "InvalidRealloc").
+A 7th bug (opportunistic SWITCH not gated to momentum-only in the real bot)
+fired live and triggered an 8th (`currentPool` state desync after an
+exit/reopen call throws post-close) that recurred twice before being fully
+root-fixed. **2026-10-08: 3 more real bugs found via live log tracing
+(Jupiter swap retrying a stale already-expired VersionedTransaction instead
+of rebuilding fresh — likely the dominant cause of nearly every "block
+height exceeded" failure all session; the bin-slippage retry bug reusing a
+stale active-bin snapshot across retries; and the 8th bug's remaining gap),
+PLUS a user-requested range-mode ranking upgrade (rank by Meteora's own
+feeTvlRatio24h instead of raw vol/TVL turnover, + a base-fee-rate floor) and
+a user-requested fee-handling change (keep the fee-sized token portion
+unswapped on every close instead of auto-dumping it to SOL). All 8 are now
+fixed and verified (tsc clean, 24 self-checks pass, build clean) — see the
+"2026-10-08 session: batch fix" section (near the bottom, before "Next
+steps") for full detail. **Bot is currently stopped, position-free,
+pending a decision on `.env.live`'s capital/gas-reserve split before
+relaunch** (balance has drifted down to ~1.4007 SOL — see that section for
+the exact trade-off this creates against the user's fixed `1.3` capital
+instruction).**
 **As of 2026-09-29: spot executor dropped, focus is DLMM-only (`range` vs
 `momentum` mode) — see the "2026-09-29 decision" section below for why and
 for the current running-instance list. Sections above/before it (instance
@@ -395,6 +423,61 @@ knob in this file.
 - The LP-vs-spot cost comparison (spot executor's whole reason for
   existing) is still confounded by the pre-fix re-screen whipsaw bug —
   needs a clean run on the fixed code before it means anything.
+- ~~**`range` mode's candidate ranking is missing the fee-rate dimension
+  entirely**~~ — **FIXED 2026-10-08, see that session's section below**
+  (`RANGE_MIN_BASE_FEE_PCT` floor + `rankRangeCandidates` now sorts by
+  `feeTvlRatio24h`). Left the original note below for the discussion
+  context/history. Found while looking at the real HIGGS-SOL
+  position (`DQyGMAGx8nB6ykixotLNFC6eVVQjrMqz7AkRyinNkEm1`, entered
+  2026-10-07 23:59): user noticed its `base_fee_pct` is only 0.3% ("dikit
+  banget"). Confirmed live against Meteora's own `/pools` API
+  (`dlmm.datapi.meteora.ag/pools/<address>`) that the response already
+  includes `pool_config.base_fee_pct`/`max_fee_pct`/`protocol_fee_pct`,
+  `dynamic_fee_pct`, AND a pre-computed `fee_tvl_ratio` per window (30m/1h/
+  2h/4h/12h/24h) — all free on the SAME API call `fetchTopPools()` already
+  makes, but `normalizePool()` (`meteoraScanner.ts`) only extracts `tvl`/
+  `volume`/`fees_$`/`bin_step` and discards the rest. `rankRangeCandidates`
+  currently ranks by raw vol/TVL turnover with NO fee-rate multiplier at
+  all — two pools with identical turnover but 0.3% vs 1% base fee rank
+  identically today, even though the 1% pool yields ~3x more fee $ for the
+  same capital. **Agreed fix (combined, not yet implemented)**: (a) add a
+  modest floor on `pool_config.base_fee_pct` (discussed ~0.2%, NOT the
+  user's initial 0.5% suggestion — a hard 0.5% floor risks rejecting a
+  high-turnover pool with a lower rate that still out-yields a low-turnover
+  0.5%+ pool) as a backstop against the lowest stable-pair-style fee tiers;
+  (b) replace `rankRangeCandidates`'s raw vol/TVL turnover with Meteora's
+  own `fee_tvl_ratio` (pick a window — 4h or 24h, TBD) as the ranking
+  score, since it already captures both volume AND fee rate in one number
+  — a strictly better proxy for range mode's actual "maximize fee yield"
+  thesis. **Caveat found along the way**: Meteora's own `apr`/`apy` fields
+  in the same response are NOT reliable — confirmed live on this exact pool
+  they showed `apy: 3,086,522,374%` (a naive over-compounding of a volatile
+  24h fee/TVL ratio, meaningless for decision-making). Use `fee_tvl_ratio`'s
+  raw per-window values directly, never `apr`/`apy`.
+- **`buyRatio1h` is a transaction-COUNT ratio, not a dollar-volume ratio —
+  blind to "many small buys vs a few large sells" distribution/whale-dump
+  patterns. Found 2026-10-08, NOT yet fixed, noted only.** User looked at
+  the live HIGGS-SOL position and asked why buying volume looked so much
+  lower than selling across every timeframe. Checked the code:
+  `meteoraScanner.ts` computes `pair.buyRatio1h = h1Txns.buys / (h1Txns.buys
+  + h1Txns.sells)` — purely a count of buy vs sell transactions, with zero
+  weighting by how big each one is. Confirmed live on HIGGS at the time:
+  tx counts actually favored buys at every window (h1 145/148, h6 904/792,
+  h24 4975/4546 buy/sell) — the existing check would call this healthy —
+  while the ACTUAL price was falling hard the whole time (h1 -9.04%, h6
+  -10.46%, h24 -36.89%, confirmed via DexScreener at the same moment). That
+  combination (tx-count ratio looks fine, price falling anyway) is the
+  classic signature of a few large sellers outweighing many small buyers in
+  dollar terms — exactly the risk a COUNT-based ratio structurally cannot
+  see. **Why it's not simply fixed**: DexScreener's public `/pairs` endpoint
+  (our data source for this field) only exposes `txns.{buys,sells}` as
+  counts and an undifferentiated total `volume` — no buy-volume vs
+  sell-volume split is available from it. A real fix needs either a
+  different data provider that exposes a per-side dollar-volume split, or
+  parsing individual on-chain swap transactions ourselves to classify each
+  by direction and size — more engineering than swapping a field name.
+  Not yet scoped or designed, just flagged as a real, confirmed gap to
+  revisit in a future batch.
 
 ## Go-live criteria (real capital) — added 2026-09-28
 
@@ -656,6 +739,575 @@ say Friday — it doesn't, one more day slipped. If a fresh session or the
 user wants a hard Friday start regardless, that would mean accepting a
 window shorter than 3 days on the current code, a deliberate trade-off to
 surface, not decide silently.
+
+## 2026-10-07 session: real-money go-live — 6 bugs fixed live, 2 more found
+   (1 partially fixed, 1 still open), bot left running deliberately to
+   collect more real sample data
+
+Real capital actually deployed for the first time this session. Wallet
+`<LIVE_WALLET_ADDRESS>` (rotated twice earlier in the
+real-money prep phase after two separate accidental key-exposure incidents
+— both handled by migrating funds via a fee-exact on-chain transfer, no
+funds at risk, see security notes). Config: `range` mode,
+`INITIAL_LP_CAPITAL_SOL=1.3` (fixed per user's explicit instruction),
+`MIN_GAS_RESERVE_SOL` re-tuned by hand to the wallet's actual balance each
+restart (drifts every cycle from swap slippage/fees — **re-check the actual
+balance before any future restart**, don't just reuse the last value in
+`.env.live`).
+
+**6 bugs found and fixed, each confirmed live against a real mainnet tx
+before moving on:**
+
+1. **Logger silently swallowed all output** (`src/utils/logger.ts`) — a
+   custom winston `format()` returned a fresh plain object instead of
+   mutating `info` in place, dropping winston's internal Symbol-keyed
+   properties. Every `logger.error`/`info`/`warn` call since the file was
+   written produced zero output, console or file — no crash, no hint
+   anything was wrong. This was the FIRST thing found (nothing else could
+   be debugged until this was fixed) and is almost certainly why earlier
+   real-bot problems were invisible. Self-check: `checkLoggerRedaction.ts`.
+2. **Gas reserve not subtracted on first-ever entry** (`openInitialPosition`,
+   `rebalanceEngine.ts`) — tried to deposit the ENTIRE wallet SOL balance
+   including the reserve, "insufficient lamports" on the real bot's very
+   first live attempt. `compoundCycle` already did this correctly;
+   `openInitialPosition` never had to until this session. Fixed via shared
+   `reserveGasFromSolSide()`. Self-check: `checkGasReserve.ts`.
+3. **DLMM SDK ComputeBudget duplicate-instruction rejection**
+   (`meteoraDLMM.ts`) — `@meteora-ag/dlmm`'s
+   `initializePositionAndAddLiquidityByStrategy` already embeds its own
+   ComputeBudget instructions; `withPriorityFee` blindly added a second
+   pair on top, Solana's runtime rejects the duplicate outright. Fixed via
+   `stripComputeBudgetInstructions()`. Self-check:
+   `checkComputeBudgetDedup.ts`.
+4. **1000x token-value undercounting** (`otherTokenValueInSol`,
+   `rebalanceEngine.ts`) — hardcoded `LAMPORTS_PER_SOL` (9 decimals) to
+   convert the non-SOL side's raw amount; most memecoins (pump.fun
+   Token-2022 mints included) use 6 decimals. A brand-new, healthy position
+   read as "49.90% unrealized loss" within 15 seconds and got HARD_EXIT'd.
+   Fixed via `getMintDecimals()` + `rawAmountToSol()`. Self-check:
+   `checkDecimalsFix.ts`.
+5. **Real balance-race producing a genuinely SOL-only "phantom position"**
+   — a swap's `confirmTransaction` resolving at 'confirmed' commitment
+   doesn't guarantee the VERY NEXT RPC call (load-balanced provider) lands
+   on a backend that's caught up; reading the post-swap token balance
+   immediately afterward returned stale/empty data, so `openPosition` was
+   called with a real 0 for the non-SOL side — confirmed via the actual
+   on-chain tx showing IDENTICAL pre/post token balances during
+   "AddLiquidity". Fixed via `waitForTokenBalance()` (polls until the
+   balance clears an expected-minimum threshold derived from the swap's own
+   `outAmount`), shared between `openInitialPosition` and
+   `balanceTokenRatio` (`compoundCycle`'s rebalance path has the identical
+   vulnerability) via `services/solana.ts` to avoid a circular import.
+6. **Bin radius exceeding the SDK's own per-tx limit ("InvalidRealloc")**
+   — `env.MAX_BIN_RADIUS` (50) let `computeBinRadius` return a radius whose
+   position (2×radius+1 bins) exceeded `@meteora-ag/dlmm`'s own
+   `MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX` (26) — a hard per-tx ceiling enforced
+   via account realloc size, confirmed by reading the SDK's own exported
+   constant. Entry failed simulation with "Failed to reallocate account
+   data" on `InitializePosition`. Fixed by clamping
+   `computeBinRadius`'s max to `min(env.MAX_BIN_RADIUS, SDK-safe radius)`
+   in code (not just `.env.live`, so a misconfigured env value can't
+   reintroduce this). Also added a rollback: if `openPosition` fails AFTER
+   the pre-swap already landed (this bug's exact failure mode), the
+   swapped-into token balance used to sit stuck in the wallet with zero
+   tracking — now `openInitialPosition` best-effort swaps it straight back
+   to SOL before rethrowing. Self-check: `checkBinRadiusSdkCap.ts`.
+
+**7th bug found live, by the user noticing it in the logs
+("udah ada switch cok lo liat lognya deh"):** opportunistic SWITCH
+(`evaluateSwitchOpportunity`) is a momentum-only concept (spike-ratio
+chasing) — `paperTrade.ts` already gates it to
+`env.ENTRY_STRATEGY_MODE === 'momentum'` (line ~669), but `index.ts` (the
+real bot) never got the same gate. It ran unconditionally regardless of
+mode, and on a `range`-mode position it actually fired
+(`"candidate spike 4.09x >= current 0.96x * margin 1.5"`) — a momentum
+signal switching a range position away from its own thesis (hold through
+volatility, let the trailing take-profit tiers govern the exit). Fixed:
+`index.ts`'s opportunity-scan block is now gated the same way paper-trade's
+is.
+
+**8th bug found from the SAME incident, more serious, ONLY PARTIALLY
+FIXED:** the SWITCH above closed the old position on-chain successfully
+(`closePositionFull`, irreversible), but the FOLLOW-UP step
+(`emergencySwapAllToSol` on the leftover token) then failed (transient
+Jupiter quote 5xx). `index.ts` has no try/catch around its
+`executeHardExit`/`executeCleanExit`/`compoundCycle` calls, so the throw
+left `currentPool` still pointing at the now-closed position. Every
+subsequent tick's health check then read `currentValueSol` as 0 (no
+position found) and misread it as a 100% loss, looping
+HARD_EXIT/blacklist/retry on a pool with no position left for ~5 minutes,
+until a retry's own swap attempt happened to succeed by luck and the state
+resynced. **Patched the specific sub-step that failed this time**
+(`closeAndConvertToSol` in `rebalanceEngine.ts` now swallows a
+swap-back failure instead of throwing, since the position close itself —
+the irreversible, state-defining step — had already succeeded). **This is
+NOT the root-cause fix.** Confirmed the same bug class recurred ~6 hours
+later via a DIFFERENT path: `compoundCycle` does `closePositionFull`
+(irreversible) THEN, much later in the same function, `openPosition` to
+reopen at the recentered bin — when the reopen failed 4x in a row
+(`ExceededBinSlippageTolerance`, price moved past tolerance during
+retries), the whole function threw, `index.ts`'s
+`currentPool = await compoundCycle(...)` never executed, same phantom
+"100% loss" misread fired. It self-healed in ONE HARD_EXIT cycle this time
+(lucky — the leftover-swap succeeded on the first try) instead of looping
+5 minutes, but the underlying race (any call that physically closes a
+position on-chain, followed by ANY further step that can throw, with no
+try/catch at the `index.ts` call site to reconcile `currentPool` regardless
+of outcome) is still live and can recur through yet another path.
+**Real fix still needed**: wrap all three `index.ts` call sites
+(`executeHardExit`, `executeCleanExit`, `compoundCycle`) so that once the
+on-chain close is confirmed to have happened, `currentPool` always gets
+reconciled to `null` (or re-synced) no matter what fails afterward — not
+patched sub-step by sub-step as each one gets discovered.
+
+**Other anomalies observed this session, not yet acted on (data points,
+not confirmed bugs):**
+
+- **Entries seem to land near a post-pump rollover.** Both real entries
+  examined in detail had a big 24h pump (56-75%) already behind them and a
+  flat-to-negative 1h change AT entry time — i.e. `RANGE_MAX_VOLATILITY_PCT`
+  (15%) checks magnitude of recent change, not direction or "is this a
+  pump that's just started cooling" — a token can be in the very early
+  stage of rolling over from a huge pump and still read as "low volatility,
+  range-bound" by this check. Both observed entries drifted down afterward.
+  Sample size is tiny (2-3 entries) — not yet confirmed as a structural
+  flaw vs. noise, needs more entries to know.
+- **Swap transactions expiring before confirmation**
+  ("block height exceeded" / "Blockhash not found") recurred multiple times
+  across the session (worst cluster: 3 consecutive failed entry attempts in
+  ~3.5 minutes). Infra/RPC-latency issue (retries + 429 backoff eating into
+  Solana's ~60-90s blockhash validity window), not a logic bug — no funds
+  lost (the swap itself never lands when this happens), but costs time and
+  occasionally a missed entry/exit.
+- **High churn, zero TAKE_PROFIT.** 6 entries in ~11.5h (avg hold ~2h) —
+  short for a "low-turnover, fee-yield" range thesis. Every exit seen so far
+  was HARD_EXIT or a re-screen-driven abandon; the trailing take-profit
+  tiers never fired once this session.
+- **Net capital down over the observed window**: start of this run
+  (10:32 UTC) 1.564941301 SOL → ~21:59 UTC check: 0.208070167 SOL liquid +
+  ~1.239 SOL in the open position ≈ 1.447 SOL total, roughly **-7.5% over
+  ~11.5h**. Real, not phantom — consistent with the rollover-entry pattern
+  above plus repeated churn costs (slippage/fees across 6 entries + exits).
+
+**Deliberate decision (user's call, 2026-10-07 ~22:0X UTC): stop finding
+and fixing bugs for now, leave the bot running UN-PATCHED** on the known
+state above (7th bug fixed, 8th bug only partially fixed) specifically to
+accumulate more real sample data while it's behaving "normally" (no crash,
+no stuck funds right now) — explicitly trading known-imperfect code for a
+longer, uninterrupted real data window, rather than restarting again. This
+CLAUDE.md update is that "write it down, don't touch the bot" checkpoint.
+**Next session: re-read this section before changing anything** — the 8th
+bug (state desync on a throw after an irreversible on-chain close) is
+still live and can recur through any of the three `index.ts` exit/reopen
+call sites, not just the two paths already observed.
+
+## 2026-10-08 session: batch fix — 8th bug root-fixed, 2 more root-causes
+   traced from live logs, 2 user-requested range-mode/fee changes
+
+Continuation of the same real-money run. User asked to investigate a few
+things live (why a specific out-of-range position wasn't acting, DARK-SOL's
+in/out history, a fee-rate parameter question), which surfaced enough new
+findings that the user then said: stop the bot cleanly at the next natural
+breakpoint, implement everything found/discussed, then restart. All work
+below is implemented and verified (not just designed) as of this write-up.
+
+**Investigation trail (led to the fixes below):**
+- Traced `DARK-SOL` (`5csr5JWTCUAUrGE8rverZ9sH9LmBekyk3cb7BkPsnoZG`) — bot
+  entered/exited it 3 separate times over the session, net **+3.2%** on the
+  3rd cycle despite the 8th bug firing mid-cycle. User asked "would it have
+  ridden the pump (+112%/+128% by the time we checked) if the bug hadn't
+  hit?" — answer: only partially. `post-close balances` showed the bin
+  mechanics had ALREADY swept ~99% of principal into SOL by the time of the
+  forced rebalance (DLMM auto-sells the non-SOL side into SOL progressively
+  as price rises through bins — it doesn't "ride" a pump the way holding
+  the raw token would). Separately, `RANGE_CEILING_PROFIT_OVERRIDE_PCT` is
+  0 (disabled) in `.env.live`, so even a successful reopen would have been
+  unconditionally abandoned the moment the move's magnitude breached
+  `RANGE_MAX_VOLATILITY_PCT` — same mechanism as this pool's own Round 2
+  exit. Net: the bug cost a modest amount of additional runway, not the
+  full headline pump (that's structurally out of range mode's reach by
+  design, same as every other mode-mismatch case already on file).
+- User asked why an out-of-range position "wasn't doing anything" —
+  confirmed this is `MAX_IDLE_OUT_OF_RANGE_MINUTES=10` working as designed
+  (debounce against noise), not a bug. Watched it live past the 10-minute
+  mark: `REBALANCE (idle-forced)` fired correctly, re-screen failed (crash
+  guard + sell-dominant buy ratio), position genuinely left the pool and
+  converted to SOL cleanly — no bug this time. User then said stop here
+  (clean breakpoint, nothing orphaned) and implement the batch.
+- User asked about a "fee parameter" they saw on a HIGGS-SOL position
+  (`base_fee_pct: 0.3%`, confirmed live via Meteora's own
+  `dlmm.datapi.meteora.ag/pools/<address>` endpoint) and proposed a 0.5%
+  minimum floor. Investigation found the same `/pools` response (already
+  being fetched by `fetchTopPools()`, zero extra cost) also includes
+  `max_fee_pct`, `protocol_fee_pct`, `dynamic_fee_pct`, and a pre-computed
+  `fee_tvl_ratio` per window (30m/1h/2h/4h/12h/24h) — none of it was being
+  read. `rankRangeCandidates` was ranking by raw vol/TVL turnover with NO
+  fee-rate dimension at all, so two pools with identical turnover but
+  0.3% vs 1% base fee ranked identically despite a ~3x real yield
+  difference. Agreed combined fix (below): a modest floor (0.2%, not the
+  initially-discussed 0.5% — a hard 0.5% floor risks rejecting a
+  high-turnover/lower-rate pool that still out-yields a low-turnover 0.5%+
+  one) PLUS ranking by `feeTvlRatio24h` directly. **Caveat found along the
+  way, do not forget**: Meteora's own `apr`/`apy` fields in the same
+  response are NOT reliable — confirmed live on the HIGGS pool they showed
+  `apy: 3,086,522,374%` (naive over-compounding of a volatile 24h ratio).
+  Never use `apr`/`apy`; `feeTvlRatio24h`'s raw value is what's used.
+- Separately, user proposed: on any close, keep the fee-sized portion of
+  the non-SOL side as raw token (their own call when to sell it) instead of
+  auto-swapping 100% of the leftover balance to SOL — only the SOL-side
+  keeps recompounding through `currentCapitalSol`. Confirmed
+  `position.positionData.feeX`/`feeY` (read BEFORE closing) are already the
+  exact raw-unit fee amounts needed, same basis already correctly used
+  elsewhere (`getPositionHealthSnapshot`) — no new unit-conversion risk.
+
+**8 bugs/changes implemented this session (all verified: `tsc --noEmit`
+clean, 24 self-checks pass — up from 23, build clean):**
+
+1. **8th bug (state desync), root-fixed** — the 2026-10-07 patch only
+   covered one specific sub-step (`closeAndConvertToSol`'s swap-back
+   failure). It recurred hours later via `compoundCycle`'s reopen step
+   (`ExceededBinSlippageTolerance`, 4 identical failures, same phantom
+   "100% loss" misread — self-healed in 1 cycle instead of 5 minutes, but
+   confirmed NOT actually fixed). Real fix: `index.ts` now wraps all 3
+   call sites (`executeHardExit`, `executeCleanExit` for TAKE_PROFIT/
+   SWITCH, `compoundCycle`) in try/catch; on ANY throw, a new
+   `reconcilePoolStateAfterFailure()` re-checks ground truth via
+   `getUserPositions` instead of guessing — clears `currentPool` (and
+   recomputes capital from the real wallet balance) only if the position
+   is confirmed gone, otherwise keeps tracking it normally.
+2. **Jupiter swap stale-transaction retry bug** (`jupiterSwap.ts`,
+   `executeSwap`) — built+signed a `VersionedTransaction` ONCE, then
+   retried `sendTransaction` on that SAME object. A `VersionedTransaction`'s
+   blockhash is baked into its compiled message and can't be patched in
+   place (unlike the legacy `Transaction` bug already fixed in
+   `meteoraDLMM.ts`'s `sendTx`) — every retry resent an increasingly stale
+   blockhash, so once the first attempt didn't land in time, every
+   subsequent retry was doomed before it started. Almost certainly the
+   dominant cause of nearly every "block height exceeded"/"Blockhash not
+   found" failure seen all session (entries, swap-backs, emergency swaps).
+   Fixed: the entire `jupiter.swapPost` → sign → send → confirm sequence
+   now lives inside ONE retry closure, so each attempt gets a fresh
+   transaction with a fresh blockhash.
+3. **Bin-slippage retry bug** (`meteoraDLMM.ts`'s `openPosition` +
+   `rebalanceEngine.ts` callers) — `minBinId`/`maxBinId` were computed ONCE
+   from a single `getActiveBin()` snapshot before any retry loop; `sendTx`'s
+   retry only refreshed the blockhash, not the bin-range baked into the
+   deposit instruction itself. During a fast price move (DARK-SOL), every
+   retry resent the SAME now-stale range, failing identically 4/4 times
+   with `ExceededBinSlippageTolerance` — a doomed loop, not a transient
+   one. Fixed: `openPosition` now takes a `binRadius` (not a precomputed
+   `minBinId`/`maxBinId`) and fetches the active bin FRESH inside its own
+   retry closure (also generates a fresh position keypair per attempt).
+   Both callers (`openInitialPosition`, `compoundCycle`) updated to read
+   the actually-used `centerBinId` back from the result instead of a
+   pre-fetched value.
+4. **Range mode: base-fee-rate floor** — `RANGE_MIN_BASE_FEE_PCT` (new env
+   var, default 0.2) rejects the lowest stable-pair-style fee tiers at
+   entry (entry-only, same pattern as `RANGE_MIN_TVL_USD`). `MeteoraPair`
+   gained `baseFeePct` (from `pool_config.base_fee_pct`).
+5. **Range mode: ranking by fee yield, not raw turnover** —
+   `rankRangeCandidates` now sorts by `feeTvlRatio24h` (new `MeteoraPair`
+   field, from the API's own `fee_tvl_ratio['24h']`) instead of raw
+   vol/TVL turnover, falling back to the old turnover calc only if that
+   field is somehow missing. Never uses `apr`/`apy` (see caveat above).
+6. **Fee-split-on-close** — new pure `splitFeeFromOtherBalance(feeOtherRaw,
+   totalOtherRaw)` (`rebalanceEngine.ts`) keeps exactly the fee-sized
+   portion of the non-SOL side as raw token, swaps only the rest
+   (principal). Wired into `closeAndConvertToSol` (shared by
+   `executeHardExit`/`executeCleanExit`) and `compoundCycle`'s
+   abandon-and-convert branch. Deliberately NOT applied to the normal
+   "still eligible, reopen" path — that one keeps 100% (principal+fee) in
+   LP to keep compounding, per the user's own framing ("yang bentuknya SOL
+   tetep direcompound"). Self-check: `checkFeeTokenSplit.ts`.
+
+**Manual interventions this session** (both clean, no funds lost beyond
+normal network fees): closed the DARK-SOL-round-3-successor position
+manually before the batch-fix work started (user: "stop dulu botnya,
+implement dulu bug2nya"), and again after confirming the 10-minute
+idle-forced-rebalance behaved correctly — both times via
+`closePositionFull` + `emergencySwapAllToSol` run directly against the
+compiled `dist/` (not through the live bot process), since `index.ts` still
+has no resume-on-boot and a bare `kill`/SIGTERM does not close an open
+position. Wallet balance after the second close: **1.400764281 SOL**.
+
+**Open decision before relaunch**: user's standing instruction is
+`INITIAL_LP_CAPITAL_SOL` fixed at `1.3`, only the gas reserve adjusts to
+the wallet's actual balance. At the current balance (1.400764281), that
+only leaves **~0.0908 SOL** for `MIN_GAS_RESERVE_SOL` before even a safety
+margin — noticeably thinner than every prior reserve this run (0.25-0.32).
+Flag this explicitly before picking a value rather than silently setting a
+thin reserve: options are (a) accept the thin reserve as-is, (b) reduce
+capital below 1.3 this one cycle to restore a healthier reserve, or (c) top
+up the wallet. **Resolved later same session: user picked (a)**, accept it
+as-is — see continuation below.
+
+## 2026-10-08 session (continued): gas/slippage quantified (negligible),
+   DARK-vs-HIGGS explained (range mode working as designed), a real $
+   buy/sell blind spot found + a new signal shipped for it, and — found
+   WHILE validating that new signal — a severe pre-existing stuck-funds bug
+   on every position close, now fixed
+
+Direct continuation of the same real-money run (same wallet, same `range`
+mode). User picked option (a) above (accept the thin ~0.09 SOL reserve),
+bot relaunched on it, then asked a series of analysis questions that led to
+real findings.
+
+**1. Quantified gas + slippage — neither explains the -11% all-time
+loss.** Pulled every on-chain tx since the 10:32 UTC restart directly (not
+estimated): **total gas paid since then: 0.000808854 SOL (~$0.09)** across
+36 landed transactions — most of the night's "failed retry" drama never
+actually landed on-chain at all (Solana doesn't charge for a
+simulation-rejected or never-confirmed send), so it cost zero, just time.
+Separately computed **slippage** by comparing each swap's Jupiter-quoted
+`outAmount` (already logged) against the REAL on-chain balance delta
+received: **0.000811146 SOL (~$0.09) total across 16 swaps**, average
+0.008%/swap. Combined, gas+slippage is under $0.20 for the whole run —
+execution quality is excellent. The real loss is 100% coming from token
+price action itself (the entry-near-rollover pattern already on file), not
+transaction costs.
+
+**2. Explained why the bot picked HIGGS-SOL over DARK-SOL re-pumping.**
+Traced the exact scan (`02:17:16`, only 1/200 pools passed — not a
+head-to-head ranking, DARK simply wasn't a candidate that tick). DARK's
+6-hour HARD_EXIT blacklist (from the earlier phantom-loss bug) had JUST
+expired 25 minutes before the scan, but that SAME `executeHardExit` also
+armed the chase guard on DARK's mint (`recordExitForChaseGuard` — DARK's
+price never dipped back to the exit level since, so it's likely still
+guarded). Independently confirmed LIVE: DARK's 6h change was +123% at
+check time — 8x past `RANGE_MAX_VOLATILITY_PCT` (15%) — range mode would
+reject it outright on the ceiling alone regardless of the chase guard.
+Two independent mechanisms both correctly declining a move this violent;
+working exactly as designed, not a bug. (Catching a move like this is
+`trend` mode's job, not `range`'s.)
+
+**3. Found a real blind spot in `buyRatio1h`, user's own observation.**
+User noticed HIGGS-SOL's tx-count buy ratio looked healthy (buys actually
+outnumbered sells at every window: h1 145/148, h6 904/792, h24 4975/4546)
+while its price fell hard the whole time (-9%/-10%/-37%). Confirmed in
+code: `meteoraScanner.ts`'s `buyRatio1h = h1Txns.buys / (h1Txns.buys +
+h1Txns.sells)` is a pure transaction-COUNT ratio — structurally blind to
+"many small buys vs a few large sells" (classic whale-dump signature).
+DexScreener/Meteora's public REST APIs expose only tx counts and an
+undifferentiated total volume, no $ split by side — the only real fix is
+reading on-chain reserve-account balance deltas directly.
+
+**Shipped `src/services/flowAnalysis.ts` (`getDollarVolumeBuyRatio` /
+`classifyDollarFlow`)** — reads a pool's own SOL-side reserve account's
+recent balance history directly via RPC, classifies each transaction as
+buy (SOL reserve increased) or sell (decreased), and computes a genuine
+$-weighted ratio. Deliberately scoped LAZY per user's explicit choice (not
+applied to the full ~200-pool scan, which would re-trigger this session's
+RPC 429-storms): only checked for (a) the single top candidate right
+before actually entering, and (b) the currently-held position on a
+periodic timer (`OPPORTUNITY_SCAN_INTERVAL_MS`, runs for ANY
+`ENTRY_STRATEGY_MODE` — unlike the momentum-only switch check, whale-dump
+detection is a general risk signal). New `MIN_DOLLAR_BUY_RATIO` (env.ts,
+default 0.4). `PoolContext` gained `reserveSolAccount` (threaded through
+`openInitialPosition`). Self-check: `checkDollarFlow.ts`.
+
+**4. The new signal's FIRST live trigger exposed something much worse.**
+At `04:28:52`, it fired on the held BATON-SOL position: `buyRatioUsd: 0,
+sellVolumeUsd: $3.08, txSampled: 1` — a single $3 sample, clearly too thin
+to act on (root cause: most real swap activity routes through Address
+Lookup Tables, which `getAccountKeys()` wasn't resolving — the reserve
+account was invisible in `staticAccountKeys` for almost every transaction,
+undercounting severely). The bot exited BATON on this near-zero-data
+signal. **While investigating this false positive, a FAR more serious,
+PRE-EXISTING bug was found**: the health check right before exit showed
+BATON's position worth **1.2968 SOL**; wallet balance right after "TAKE_PROFIT
+complete" was only **0.74285859 SOL** — roughly 0.66 SOL unaccounted for.
+Pulled the actual close transaction from chain: the position's non-SOL
+side returned **8,712.014436 tokens** to the wallet on close, but
+`closeAndConvertToSol`'s very next line read the balance via plain
+`getTokenBalance()` with NO staleness guard — got back the STALE pre-close
+value (**7 raw units**, not 8712 whole tokens) — the exact same
+read-after-write RPC race `waitForTokenBalance` already fixed for the
+entry/rebalance-swap paths, just never applied to this specific read site
+(present since this function was first written, NOT something introduced
+by tonight's fee-split feature — the fee-split code just happened to make
+the tiny stale "7" value visible in a log line for the first time, which
+is how this was noticed). Net effect: 8712 tokens of BATON's mint (~$77,
+~0.66 SOL) sat completely unswapped and untracked by `currentCapitalSol` —
+**directly causing the very next entry (CRAWL) to open with only half
+capital** (user's own observation: "cuma setengah"), exactly matching
+`nextCapital` being computed from the already-short wallet balance.
+
+**Fixed, all three, same incident:**
+1. `closeAndConvertToSol` and `compoundCycle` (`rebalanceEngine.ts`) both
+   now compute an `expectedOtherAmount` (principal+fee, read from
+   `position.positionData` BEFORE closing) and use `waitForTokenBalance`
+   (95% threshold) instead of a bare `getTokenBalance()` call immediately
+   after `closePositionFull`. `compoundCycle`'s `balX`/`balY` read (used by
+   BOTH the abandon path and, critically, the normal reopen path's
+   `balanceTokenRatio` rebalancing) got the same fix — this bug could have
+   silently corrupted the reopen path's 50:50 rebalancing too, not just the
+   abandon-and-convert path, though that wasn't directly observed yet.
+2. `flowAnalysis.ts` now resolves account indices via
+   `getAccountKeys({ accountKeysFromLookups: tx.meta.loadedAddresses })`
+   (static + lookup-writable + lookup-readonly, in the order that matches
+   preBalances/postBalances indexing) instead of `staticAccountKeys` alone.
+3. New `MIN_DOLLAR_FLOW_SAMPLE_SIZE` (5) — `classifyDollarFlow` returns
+   null (unknown, don't act) below this many classified transactions,
+   regardless of how lopsided they look. Self-check updated to cover both
+   the pre-fix incident shape (1 sample, still returns null) and the
+   boundary (exactly 5 is enough).
+
+**Recovered the stuck funds**: swapped the 8712.014436 BATON tokens back
+to SOL directly (independent of the bot process, same pattern as prior
+incidents) — **+0.667542749 SOL recovered**, confirmed 0 token balance
+remaining afterward (double-checked after a short delay, since the FIRST
+balance read in the recovery script itself also returned stale — a live,
+in-the-moment reproduction of the exact race this fix addresses).
+
+All fixes verified: `tsc --noEmit` clean, self-checks pass (still 25 —
+`checkDollarFlow.ts` updated in place, not added new), `npm run build`
+clean. Manually closed the live position (CRAWL,
+`52By9szJr4qEnRCgaddfunEFw7o1CqFdfs7ve12oE3je`) before restarting (per the
+same no-resume-on-boot discipline as every prior restart this run).
+
+**Still open / not yet re-validated**: whether the `balanceTokenRatio`
+corruption risk in `compoundCycle`'s normal reopen path (point 1 above)
+ever actually fired silently on a PRIOR close tonight before this fix —
+not retroactively checked, flagged here so a future session doesn't assume
+every past "nextCapital" figure in this file's logs was necessarily
+accurate.
+
+**Live validation after restart (04:48 UTC onward)**: all fixes confirmed
+working in the very next scan cycle — `waitForTokenBalance` caught a stale
+read during a fresh entry swap and correctly retried (`"balance read below
+expected, retrying"`); the dollar-flow pre-entry check skipped 2 real
+sell-dominant candidates with healthy sample sizes (9 and 6, not 1); and a
+SECOND BATON-SOL dollar-flow exit fired ~1h later with `txSampled:55,
+buyRatioUsd:0.002` — a high-confidence, legitimate whale-dump read this
+time — and the capital carried over cleanly to the next entry (no more
+stuck funds, `nextCapital` even came out slightly ABOVE the pre-close
+capital).
+
+**Immediately after, found the dollar-flow window design itself was too
+sensitive** — user noticed and asked directly. The original design sampled
+"last 60 transactions, whatever time span that happens to cover" — on
+BATON-SOL specifically (confirmed live) 60 tx spans only ~8 minutes, so a
+brief few-minute flurry could trigger an exit before the picture
+stabilizes. Also flagged a related concern: the original per-signature
+`getTransaction` loop (up to 60 sequential RPC calls) felt like unnecessary
+load. **Both fixed together**: switched to a genuine TIME window (default
+1h, matching every other "1h" signal in this codebase) instead of a raw
+transaction count, with a `maxTx` hard cap (300) to bound worst-case batch
+size on an extremely active pool — `getSignaturesForAddress`'s own
+`blockTime` is read for free to determine which signatures fall in the
+window BEFORE fetching any transaction detail. Separately, replaced the
+sequential `getTransaction` loop with `connection.getTransactions`
+(PLURAL) — one batched JSON-RPC request for every sampled signature
+instead of N round-trips — a free efficiency win found while answering the
+user's RPC-load question, unrelated to the windowing change but landed in
+the same pass. No silent truncation: logs a warning if `maxTx` is hit
+before the window is fully covered (result is a partial hour, not the
+complete picture). Verified: `tsc --noEmit` clean, self-checks pass (still
+25 — `classifyDollarFlow`'s own unit tests were unaffected, the window/
+batching logic lives in the RPC-calling wrapper which was never unit-tested
+to begin with, same as its first version), `npm run build` clean. Not yet
+re-validated live on this exact revision as of this write-up — next
+restart should confirm the 1h-window behavior live.
+
+**Live validation**: confirmed the TWEETCRAFT-SOL exit at `06:02:54` (right
+before this restart) was on the OLD count-based logic (`txSampled:7`,
+exited on what turned out to be a short burst while the user says the 1h
+picture was still healthy) — a textbook case of exactly the bug the
+window-size fix addresses, caught right at the boundary of the old code's
+last live use.
+
+## 2026-10-08 session (continued further): researched sibling DLMM bots on
+   GitHub, decided NOT to switch, ported 2 ideas instead (equity-scaled gas
+   reserve, bin-array rent cost estimate)
+
+User asked to survey GitHub for similar Meteora DLMM bots. Found
+`CryptoGnome/dlmmbot` (+ fork `asterfi/dlmmbot`) as the closest match —
+same thesis (scan/vet/one-sided-SOL-entry/rule-based-exit/paper-first) but
+a much more mature, productized sibling: web dashboard, CLI, Railway/PM2
+deploy automation, Kelly-criterion sizing with multi-sleeve portfolios,
+backtesting/sim engine, full vitest test suite, TOML config with
+hot-reload + operator "profiles" (aggressive/balanced/conservative), and a
+commercial model (1% fee skimmed on live wins, PolyForm Shield license).
+Read several of its actual source files (`scanner/gates.ts`, `risk/
+limits.ts`, `ranges/planner.ts`, `vetting/rugcheck.ts`) for a real
+comparison, not just the README.
+
+**Decision: do NOT switch to it.** Reasoning (user asked for an honest
+opinion, this was the answer): (1) their live executor automatically skims
+profit, meaning adopting it means trusting unaudited third-party code with
+real wallet custody — a direct regression against this session's own
+private-key-safety discipline; (2) "production ready" (dashboard, tests,
+TOML config) is tooling polish, not evidence of actual live profitability
+— no visibility into their real track record, and the repo has only 3
+stars; (3) this project's own codebase is now something we have full,
+hard-won operational understanding of (every bug found/fixed tonight is
+documented) — switching means starting that understanding from zero on
+~2400 lines of someone else's `loop.ts`; (4) some of our own mechanisms are
+arguably more rigorous already (the dollar-flow check reads real on-chain
+reserve deltas directly, vs. their candle-color-based "red volume" proxy;
+the chase guard is price-structure-based, not time-based).
+
+**Ported 2 ideas instead** (into our own, fully-understood codebase):
+
+1. **Equity-scaled gas reserve** — directly solves the exact pain from
+   tonight's multiple restarts (manually re-tuning `MIN_GAS_RESERVE_SOL` by
+   hand after nearly every restart: 0.8 → 0.35 → ... → 0.06, chasing the
+   wallet's actual balance each time). New `computeGasReserveSol(equitySol)`
+   (`rebalanceEngine.ts`) = `max(MIN_GAS_RESERVE_SOL as a FLOOR,
+   equitySol * MIN_GAS_RESERVE_PCT/100)` (new env var, default 5%). Scoped
+   deliberately narrow per explicit user instruction: ONLY the reserve
+   scales with equity — `INITIAL_LP_CAPITAL_SOL` stays a fixed 1.3, same
+   standing rule as before, not touched. Wired into all 4 places that used
+   to read `env.MIN_GAS_RESERVE_SOL` directly as an absolute (both
+   `reserveGasFromSolSide` call sites, `closeAndConvertToSol`'s
+   `nextCapital`, `compoundCycle`'s pre-swap spendable estimate, and all 3
+   `index.ts` call sites including the boot sufficiency check). Self-check
+   `checkGasReserve.ts` rewritten to cover floor-wins-small/pct-wins-large/
+   monotonic-scaling behavior, not just the original subtract-from-correct-
+   side cases.
+2. **Bin-array rent cost estimate** — this project never modeled DLMM
+   bin-array rent at all before. New `estimateBinRentSol(radius)`
+   (`costEstimate.ts`, `BIN_ARRAY_RENT_SOL=0.075`, `BINS_PER_ARRAY=70`) —
+   deliberately an approximate, never-under-estimating ceiling (plain
+   `ceil` + 1 safety array for alignment straddling), not the sibling
+   project's alignment-exact version, since this is purely informational
+   (logged at both `openInitialPosition` and `compoundCycle`'s reopen, not
+   a hard budget gate yet). Self-check: `checkBinRent.ts`.
+
+Both verified: `tsc --noEmit` clean, self-checks pass (27 now, +2 new:
+`checkBinRent.ts`, `checkGasReserve.ts` extended), `npm run build` clean.
+
+**First restart attempt immediately failed boot** — real validation, not a
+bug: at the actual wallet balance (1.366484111), the OLD default
+`MIN_GAS_RESERVE_PCT=5%` computed a reserve (0.0683) that, added to the
+fixed 1.3 capital, exceeded the balance by ~0.002 SOL. This is the feature
+working correctly (it computed a MORE accurate reserve than the stale
+manual 0.06 that used to be there) — it just revealed that 5% (borrowed
+directly from the sibling bot's default, tuned for presumably a much
+larger scale) doesn't fit this project's current ~1.3-1.4 SOL scale
+comfortably against a fixed 1.3 capital. Lowered to `MIN_GAS_RESERVE_PCT=3`
++ `MIN_GAS_RESERVE_SOL=0.03` (both in `.env.live`) — fits with ~0.025 SOL
+of headroom at the current balance. Second restart booted clean.
+
+**Not done, explicitly deferred**: Kelly-criterion sizing, multi-sleeve
+portfolios, backtesting/sim engine, dashboard UI, TOML hot-reload config —
+noted as real ideas worth considering in a FUTURE session, not pulled in
+tonight (scope was explicitly limited to the 2 items above).
+
+## 2026-10-08/09 session: entry reliability, fail-closed entry, loss analysis, exit tuning
+
+Real-money run continued (wallet HvXAEv…, `range` mode, capital 1 SOL, kill-switch 1 SOL).
+
+- **0.1 SOL "vanished" root cause**: position rent (~0.0434, up to 0.0582 SOL, refundable) is paid ON TOP of the deposit; entry failed on rent shortfall after the swap, rolled back, repeated round trips (~1.15%/leg Jupiter spread). Fix: `POSITION_RENT_BUFFER_SOL=0.07` in the reserve + pre-flight BEFORE any swap in `openInitialPosition`. The first pre-flight double-counted the gas reserve (nextCapital is already wallet-minus-reserve) and deadlocked every entry for ~5h; now effective capital = `min(requested, wallet - reserve - rent)`, throw only if < 90% of requested.
+- **Fail-closed entry (user rule: any failed check = don't enter)**: `missingEntryData()` (meteoraScanner.ts) skips candidates with unhydrated fields; dollar-flow null/insufficient sample skips entry. Held-position re-screen stays permissive.
+- **Kill-switch**: `MIN_EQUITY_STOP_SOL` (checked only while flat) exits the process when wallet < threshold (.env.live = 1).
+- **flowAnalysis**: `getTransactions` chunked (25) + retried (Helius 429 was blocking every entry). Every reading is now logged (`[flowAnalysis] reading`: ratio, volumes, txSampled, sigsInWindow, coveredMin, partial). `maxTx` cap (300) hit constantly: the "1h" window usually covers only ~8 min.
+- **Dollar-flow EXIT loosened** (SI-SOL / TWEETCRAFT exited on thin/partial reads, price later +14% / +60%): exit needs >=25 samples, >=$2000 volume, ratio < 0.25, 2 consecutive qualified breaches (`DOLLAR_FLOW_EXIT_*`). Entry threshold unchanged (0.4).
+- **Trailing take-profit** got a first tier: arm 12% / floor 6% (constants.ts; checkTakeProfitTiers updated).
+- **Correction**: `RANGE_CEILING_PROFIT_OVERRIDE_PCT=0` is NOT disabled; it means "any positive profit qualifies" and applies only when re-screen fails SOLELY on the volatility ceiling (an extra sell-dominant reason still abandons).
+- **Backtest (21 real entries, Meteora 5m/1h OHLCV)**: no entry-timing feature (higher-low, 1h change, distance to 6h/24h low, 15m change) separated good from bad entries; median 60m forward return -0.5%, mean 2h drawdown -7.5%. Do NOT add timing filters on this evidence. Meteora OHLCV: timeframes 5m..24h (no 1m), `start_time`/`end_time` required for ranges, 5m max ~97 candles per request.
+- **Loss accounting**: ~1.6522 SOL funded -> ~1.17 SOL now; Meteora PnL excludes swap friction. Idea not built: one-sided SOL entry below price (no entry swap).
+- **Still open**: unguarded `waitForTokenBalance` throw before the rollback block in `openInitialPosition`; dollar-flow exits are logged as TAKE_PROFIT (cosmetic); `MAX_IDLE_OUT_OF_RANGE_MINUTES` now 5 in `.env.live`.
 
 ## Next steps
 

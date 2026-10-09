@@ -8,21 +8,36 @@ import { env } from '../config/env.js';
  */
 const REDACT_KEYS = new Set(['privateKey', 'secretKey', 'seed', 'PRIVATE_KEY']);
 
-function redact(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redact);
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = REDACT_KEYS.has(k) ? '[REDACTED]' : redact(v);
+/**
+ * Mutates in place, deep, recursing into nested objects/arrays. Must NOT
+ * return a new object — winston's `info` carries internal Symbol-keyed
+ * properties (e.g. Symbol.for('message')) that later format steps and
+ * transports depend on to render the final log line. A format function
+ * that returns a fresh plain object (as this used to) silently drops those
+ * symbols, and every downstream format/transport then emits nothing at
+ * all — no error, no console output, no file output. Found live
+ * 2026-10-07: this broke 100% of logger.error/info/warn output for the
+ * real bot (index.ts) since the file was written; paper-trade.ts was never
+ * affected since it uses its own separate logEvent/fs.createWriteStream
+ * JSONL pipeline, not this logger.
+ */
+function redactInPlace(obj: Record<string, unknown>): void {
+  for (const key of Object.keys(obj)) {
+    if (REDACT_KEYS.has(key)) {
+      obj[key] = '[REDACTED]';
+    } else if (Array.isArray(obj[key])) {
+      for (const item of obj[key] as unknown[]) {
+        if (item && typeof item === 'object') redactInPlace(item as Record<string, unknown>);
+      }
+    } else if (obj[key] && typeof obj[key] === 'object') {
+      redactInPlace(obj[key] as Record<string, unknown>);
     }
-    return out;
   }
-  return value;
 }
 
 const redactFormat = winston.format((info) => {
-  const { level, message, timestamp, ...rest } = info;
-  return { level, message, timestamp, ...(redact(rest) as object) };
+  redactInPlace(info as unknown as Record<string, unknown>);
+  return info;
 });
 
 export const logger = winston.createLogger({

@@ -10,7 +10,7 @@ import {
   type DlmmPool,
 } from '../services/meteoraDLMM.js';
 import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from '../services/jupiterSwap.js';
-import { connection, wallet, getWalletSolBalance } from '../services/solana.js';
+import { connection, getWalletSolBalance, getTokenBalance, waitForTokenBalance } from '../services/solana.js';
 import { isPoolStillEligible, getCurrentPriceUsd, recordChaseGuardExit, type ScannerConfig } from '../services/meteoraScanner.js';
 import { addToBlacklist, rangeCeilingProfitOverride } from './riskManager.js';
 import { computeBinRadius } from './binRange.js';
@@ -48,19 +48,68 @@ export interface PoolContext {
   inRangeSinceMs: number | null;
   /** Highest unrealized profit % this position has ever reached, since openInitialPosition. Not reset on compoundCycle (initialDepositSol itself is never reset on compound either — this mirrors that existing basis). Reset only by starting a fresh PoolContext (new entry or switch). */
   peakProfitPct: number;
+  /** Decimals of the non-SOL mint — fetched once at entry, used by otherTokenValueInSol so it converts raw token amounts correctly regardless of the mint's actual decimals (most memecoins use 6, NOT the 9 SOL/WSOL uses). */
+  otherMintDecimals: number;
+  /** Pool's own on-chain SOL-side reserve account — constant for the pool's lifetime, used by flowAnalysis.ts's getDollarVolumeBuyRatio for the held position's periodic dollar-flow check (index.ts). */
+  reserveSolAccount: string;
 }
 
-async function getTokenBalance(mint: string): Promise<BN> {
-  if (mint === WSOL_MINT) {
-    const lamports = await connection.getBalance(wallet.publicKey);
-    return new BN(lamports);
+/**
+ * Decimals of an SPL mint — works for both the legacy Token program and
+ * Token-2022 (getParsedAccountInfo's built-in parser handles either
+ * transparently, no need to know which one up front). Found live
+ * 2026-10-07 (real bot's first position): otherTokenValueInSol used to
+ * hardcode LAMPORTS_PER_SOL (10^9) to convert the non-SOL side's raw
+ * amount to a whole-token count, assuming it shared SOL's 9 decimals.
+ * Most memecoins (this one included — a pump.fun Token-2022 mint) use 6
+ * decimals, undercounting that side's value by 1000x — enough to make a
+ * brand-new, healthy position read as "49.90% unrealized loss" within one
+ * tick and get HARD_EXIT'd 16 seconds after opening.
+ */
+async function getMintDecimals(mint: string): Promise<number> {
+  const info = await connection.getParsedAccountInfo(new PublicKey(mint));
+  const parsed = info.value?.data;
+  if (!parsed || typeof parsed !== 'object' || !('parsed' in parsed)) {
+    throw new Error(`[rebalanceEngine] could not read decimals for mint ${mint} — unparseable account data`);
   }
-  const resp = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: new PublicKey(mint) });
-  const total = resp.value.reduce((sum, acc) => {
-    const amount = acc.account.data.parsed.info.tokenAmount.amount as string;
-    return sum.add(new BN(amount));
-  }, new BN(0));
-  return total;
+  return (parsed as { parsed: { info: { decimals: number } } }).parsed.info.decimals;
+}
+
+/**
+ * Converts a raw (not-yet-decimal-adjusted) token amount to its SOL value,
+ * given that mint's own decimals and the SOL-per-whole-token price. Pure,
+ * no I/O — exported for a self-check. Use the token's OWN decimals here,
+ * never LAMPORTS_PER_SOL (SOL's decimals, 9) — see getMintDecimals's doc
+ * comment for the live incident this fixes (most memecoins use 6).
+ */
+export function rawAmountToSol(rawAmount: BN, decimals: number, priceInSol: number): number {
+  return (Number(rawAmount.toString()) / 10 ** decimals) * priceInSol;
+}
+
+/**
+ * Splits a post-close non-SOL token balance into "swap to SOL" (principal)
+ * and "keep as token" (fee) portions, instead of converting the whole
+ * balance to SOL on every close. Discussed 2026-10-07/08 after watching a
+ * real position (DARK-SOL) close with bin mechanics having ALREADY swept
+ * nearly all of its principal into SOL as price rose — the tiny leftover
+ * non-SOL balance was almost entirely fee, not principal. User's call: on
+ * ANY close, deliberately leave the fee-sized portion of the non-SOL side
+ * as raw token (their own choice when/whether to sell it) rather than
+ * auto-dumping it into SOL — only the principal portion keeps recompounding
+ * through currentCapitalSol. feeOtherRaw is read from the position's own
+ * positionData.feeX/feeY BEFORE closing (see getPositionHealthSnapshot for
+ * the same pattern) — already-correct raw units, same basis as
+ * totalXAmount/totalYAmount, no new unit-conversion risk. Clamped so it
+ * never tries to keep more than what's actually in the wallet (e.g. a tiny
+ * amount of extra fee can accrue between reading feeOtherRaw and the close
+ * tx landing — that goes into toSwap, not toKeepAsToken, erring toward
+ * swapping slightly more rather than keeping slightly more). Pure, no I/O —
+ * exported for a self-check.
+ */
+export function splitFeeFromOtherBalance(feeOtherRaw: BN, totalOtherRaw: BN): { toSwap: BN; toKeepAsToken: BN } {
+  const toKeepAsToken = BN.min(feeOtherRaw, totalOtherRaw);
+  const toSwap = totalOtherRaw.sub(toKeepAsToken);
+  return { toSwap, toKeepAsToken };
 }
 
 /** Non-SOL token amount, expressed in SOL, using the pool's active-bin price. */
@@ -69,9 +118,7 @@ async function otherTokenValueInSol(ctx: PoolContext, otherAmount: BN): Promise<
   const activeBin = await getActiveBin(ctx.pool);
   const pricePerToken = Number(activeBin.pricePerToken); // price of X in terms of Y
   const priceOtherInSol = ctx.xIsSol ? 1 / pricePerToken : pricePerToken;
-  // NOTE: assumes both tokens use standard decimals already baked into pricePerToken
-  // by the SDK. Verify against actual mint decimals before trusting on mainnet.
-  return (Number(otherAmount.toString()) / LAMPORTS_PER_SOL) * priceOtherInSol;
+  return rawAmountToSol(otherAmount, ctx.otherMintDecimals, priceOtherInSol);
 }
 
 export function isCooldownActive(ctx: PoolContext, now = Date.now()): boolean {
@@ -131,6 +178,7 @@ export async function getPositionHealthSnapshot(ctx: PoolContext): Promise<Posit
 }
 
 export { estimateCycleGasCostSol } from './costEstimate.js';
+import { estimateBinRentSol } from './costEstimate.js';
 
 // claimFeesOnly (fee-threshold REBALANCE while still in-range) removed
 // 2026-09-26 — see riskManager.ts's removal note. Fees are now only ever
@@ -157,9 +205,66 @@ export { estimateCycleGasCostSol } from './costEstimate.js';
  * override below; defaults to 0 (no override) for any caller that doesn't
  * track it.
  */
+
+/**
+ * Equity-scaled gas reserve — max(MIN_GAS_RESERVE_SOL floor,
+ * equitySol * MIN_GAS_RESERVE_PCT/100). Idea borrowed 2026-10-08 from
+ * comparing against CryptoGnome/dlmmbot's reserveSol(): a flat reserve
+ * value goes stale as the wallet's actual balance drifts — this project
+ * manually re-tuned MIN_GAS_RESERVE_SOL by hand after nearly every restart
+ * the night real money went live. Pure, no I/O — exported for a self-check.
+ */
+/**
+ * Rent for the new position account + ATAs, paid from the wallet ON TOP of
+ * the deposit (InitializePosition). Found live 2026-10-08 (live-1791441428):
+ * a ~0.03 SOL gas reserve was smaller than this rent, so every entry died in
+ * simulation with "Transfer: insufficient lamports X, need X+13.4M" AFTER
+ * the pre-swap had already landed — 10 swap/rollback round trips, ~0.146 SOL
+ * lost to spread. Measured from the failed sims' own numbers: 0.0434 SOL on 19 of 20, 0.0582 on one (wider position — rent scales with bin count), so 0.07 keeps ~0.012 headroom over the worst seen. Position rent is refundable on close.
+ */
+export const POSITION_RENT_BUFFER_SOL = 0.07;
+
+export function computeGasReserveSol(equitySol: number): number {
+  return Math.max(env.MIN_GAS_RESERVE_SOL, equitySol * (env.MIN_GAS_RESERVE_PCT / 100));
+}
+
+/**
+ * Subtracts the equity-scaled gas reserve (computeGasReserveSol) from
+ * whichever side is SOL before a deposit — a fresh on-chain balance query
+ * for the SOL side includes the gas/slippage reserve, which must stay
+ * untouched. The SOL-side balance passed in doubles as the equity figure
+ * for the reserve calc (this bot holds no SOL anywhere else). Shared by
+ * openInitialPosition and compoundCycle so both compute this identically
+ * (pulled out 2026-10-07 after openInitialPosition was found to be missing
+ * this entirely — see its own doc comment for the live incident). Pure,
+ * no I/O — exported for a self-check.
+ */
+export function reserveGasFromSolSide(balX: BN, balY: BN, xIsSol: boolean): { depositX: BN; depositY: BN } {
+  const solBalanceLamports = xIsSol ? balX : balY;
+  const equitySol = Number(solBalanceLamports.toString()) / LAMPORTS_PER_SOL;
+  const reserveLamports = new BN(Math.round((computeGasReserveSol(equitySol) + POSITION_RENT_BUFFER_SOL) * LAMPORTS_PER_SOL));
+  const depositX = xIsSol ? BN.max(balX.sub(reserveLamports), new BN(0)) : balX;
+  const depositY = xIsSol ? balY : BN.max(balY.sub(reserveLamports), new BN(0));
+  return { depositX, depositY };
+}
 export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConfig, currentProfitPct = 0): Promise<PoolContext | null> {
   const [position] = await getUserPositions(ctx.pool);
   if (!position) throw new Error(`[rebalanceEngine] no open position found for pool ${ctx.poolAddress}`);
+
+  // Read BEFORE closing. feeOtherRaw: see splitFeeFromOtherBalance's doc
+  // comment, only used if this cycle ends up abandoning the pool (the
+  // normal reopen path keeps 100% of principal+fee in LP). expectedOtherAmount
+  // (principal+fee combined, the OTHER side's full pre-close claimable
+  // total): used as waitForTokenBalance's threshold right below — see its
+  // doc comment for the live incident (BATON-SOL, 2026-10-08) this fixes:
+  // reading the other-side balance immediately after closePositionFull,
+  // with no staleness guard, returned a STALE near-zero value (7 raw units)
+  // instead of the TRUE post-close balance (8712+ whole tokens) — the
+  // same read-after-write RPC race waitForTokenBalance already fixed for
+  // the entry/rebalance-swap paths, just never applied to THIS read site.
+  const { feeX, feeY, totalXAmount, totalYAmount } = position.positionData;
+  const feeOtherRaw = new BN(ctx.xIsSol ? feeY : feeX);
+  const expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(feeOtherRaw);
 
   logger.info('[rebalanceEngine] closing position for compound cycle', { pool: ctx.poolAddress });
   await closePositionFull(ctx.pool, position);
@@ -181,9 +286,14 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
     });
   }
 
-  const [balX, balY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
   const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
-  const otherAmount = ctx.xIsSol ? balY : balX;
+  const solSideMint = ctx.xIsSol ? ctx.mintX : ctx.mintY;
+  const [otherAmount, solSideAmount] = await Promise.all([
+    expectedOtherAmount.gtn(0) ? waitForTokenBalance(otherMint, expectedOtherAmount.muln(95).divn(100)) : getTokenBalance(otherMint),
+    getTokenBalance(solSideMint),
+  ]);
+  const balX = ctx.xIsSol ? solSideAmount : otherAmount;
+  const balY = ctx.xIsSol ? otherAmount : solSideAmount;
 
   if (!stillEligible) {
     logger.info('[rebalanceEngine] pool no longer passes entry screen — converting to SOL for a fresh scan', {
@@ -196,12 +306,20 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
     // re-entered next tick, whipsawing (confirmed live in paper-trade).
     addToBlacklist(scannerConfig.blacklistPools, ctx.poolAddress, Date.now(), env.LEFT_POOL_COOLDOWN_MS);
     await recordExitForChaseGuard(ctx, scannerConfig.chaseGuardPools);
-    if (otherAmount.gtn(0)) await emergencySwapAllToSol(otherMint, otherAmount);
+    const { toSwap, toKeepAsToken } = splitFeeFromOtherBalance(feeOtherRaw, otherAmount);
+    if (toKeepAsToken.gtn(0)) {
+      logger.info('[rebalanceEngine] keeping fee portion as token, user\'s call to sell manually', {
+        pool: ctx.poolAddress,
+        otherMint,
+        keptRaw: toKeepAsToken.toString(),
+      });
+    }
+    if (toSwap.gtn(0)) await emergencySwapAllToSol(otherMint, toSwap);
     return null;
   }
 
   const solBalance = await getWalletSolBalance();
-  const reserveLamports = new BN(Math.round(env.MIN_GAS_RESERVE_SOL * LAMPORTS_PER_SOL));
+  const reserveLamports = new BN(Math.round(computeGasReserveSol(solBalance) * LAMPORTS_PER_SOL));
   const solAmount = ctx.xIsSol ? balX : balY;
   const spendableSolLamports = BN.max(solAmount.sub(reserveLamports), new BN(0));
   const otherValueSol = await otherTokenValueInSol(ctx, otherAmount);
@@ -224,23 +342,26 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
 
   // Re-check balances after swap before reopening.
   const [freshX, freshY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
-  const activeBin = await getActiveBin(ctx.pool);
   const radius = computeBinRadius(ctx.binStep);
-  const minBinId = activeBin.binId - radius;
-  const maxBinId = activeBin.binId + radius;
+  const { depositX, depositY } = reserveGasFromSolSide(freshX, freshY, ctx.xIsSol);
 
-  const depositX = ctx.xIsSol ? BN.max(freshX.sub(reserveLamports), new BN(0)) : freshX;
-  const depositY = ctx.xIsSol ? freshY : BN.max(freshY.sub(reserveLamports), new BN(0));
-
-  await openPosition({ pool: ctx.pool, totalXAmount: depositX, totalYAmount: depositY, minBinId, maxBinId });
+  // binRadius only (not a precomputed minBinId/maxBinId) — openPosition
+  // fetches the active bin itself, FRESH, inside its own retry loop. See
+  // its doc comment: reusing a bin range computed once outside the retry
+  // loop is what caused repeated ExceededBinSlippageTolerance failures
+  // during fast price moves (confirmed live 2026-10-07, DARK-SOL).
+  const result = await openPosition({ pool: ctx.pool, totalXAmount: depositX, totalYAmount: depositY, binRadius: radius });
 
   const now = Date.now();
   ctx.rebalanceTimestamps.push(now);
   ctx.lastRebalanceAt = now;
-  ctx.centerBinId = activeBin.binId;
+  ctx.centerBinId = result.centerBinId;
   ctx.outOfRangeSinceMs = null;
   ctx.inRangeSinceMs = null;
-  logger.info('[rebalanceEngine] compound cycle complete', { pool: ctx.poolAddress });
+  logger.info('[rebalanceEngine] compound cycle complete', {
+    pool: ctx.poolAddress,
+    estBinRentSol: estimateBinRentSol(radius),
+  });
   return ctx;
 }
 
@@ -257,18 +378,49 @@ export async function openInitialPosition(
   xIsSol: boolean,
   capitalSol: number,
   binStep: number,
+  reserveSolAccount: string,
 ): Promise<PoolContext> {
   const otherMint = xIsSol ? mintY : mintX;
+  // Pre-flight BEFORE any swap: a failure after the swap costs a full round-trip of spread.
+  // capitalSol may already be wallet-minus-reserve (nextCapital after an exit), so cap it by what the
+  // wallet can really fund instead of adding the reserve on top again.
+  const walletSol = await getWalletSolBalance();
+  const maxFundableSol = walletSol - computeGasReserveSol(walletSol) - POSITION_RENT_BUFFER_SOL;
+  const effectiveCapitalSol = Math.min(capitalSol, maxFundableSol);
+  if (effectiveCapitalSol < capitalSol * 0.9) {
+    throw new Error(`[rebalanceEngine] wallet ${walletSol} SOL can fund only ${Math.max(0, effectiveCapitalSol).toFixed(4)} SOL < 90% of requested ${capitalSol} (after gas reserve + position rent) — skipping entry before swap`);
+  }
+  if (effectiveCapitalSol < capitalSol) {
+    logger.warn('[rebalanceEngine] capital capped by wallet funds', { requested: capitalSol, effectiveCapitalSol });
+  }
+  capitalSol = effectiveCapitalSol;
   const halfLamports = new BN(Math.round((capitalSol * LAMPORTS_PER_SOL) / 2));
+  const otherMintDecimals = await getMintDecimals(otherMint);
 
-  logger.info('[rebalanceEngine] opening initial position', { poolAddress, capitalSol });
-  await swapExactIn(WSOL_MINT, otherMint, halfLamports);
+  logger.info('[rebalanceEngine] opening initial position', { poolAddress, capitalSol, otherMintDecimals });
+  const swapResult = await swapExactIn(WSOL_MINT, otherMint, halfLamports);
+
+  // Don't trust a single immediate balance read after the swap — see
+  // waitForTokenBalance's doc comment for the live incident (a stale read
+  // here silently deposited 0 of the non-SOL side, producing a SOL-only
+  // position that then correctly-but-confusingly read as "50% down").
+  // 95% of the swap's own expected outAmount as the threshold — leaves
+  // room for quote-vs-actual slippage without masking a genuinely stale 0.
+  const expectedOtherAmount = new BN(swapResult.outAmount).muln(95).divn(100);
+  await waitForTokenBalance(otherMint, expectedOtherAmount);
 
   const [balX, balY] = await Promise.all([getTokenBalance(mintX), getTokenBalance(mintY)]);
-  const activeBin = await getActiveBin(pool);
   const radius = computeBinRadius(binStep);
-  const minBinId = activeBin.binId - radius;
-  const maxBinId = activeBin.binId + radius;
+
+  // Reserve MIN_GAS_RESERVE_SOL on the SOL side before depositing — balX/balY
+  // above is the FULL on-chain balance, which for the SOL side includes the
+  // gas/slippage reserve that must stay untouched. compoundCycle already
+  // did this correctly; this path (first-ever entry) didn't, and it was
+  // never exercised until the real bot's first live run (2026-10-07) —
+  // confirmed live: it tried to deposit the ENTIRE wallet SOL balance,
+  // leaving nothing for rent/fees, and failed simulation with "insufficient
+  // lamports". See reserveGasFromSolSide's doc comment.
+  const { depositX, depositY } = reserveGasFromSolSide(balX, balY, xIsSol);
 
   const ctx: PoolContext = {
     poolAddress,
@@ -282,14 +434,48 @@ export async function openInitialPosition(
     volume1hBaselineUsd: 0,
     volume1hBaselineSetAtMs: 0, // placeholder — index.ts sets the real value right after this call, alongside volume1hBaselineUsd
     binStep,
-    centerBinId: activeBin.binId,
+    centerBinId: null, // set from openPosition's actual result below — see its doc comment for why it's fetched fresh inside the retry loop, not precomputed here
     outOfRangeSinceMs: null,
     inRangeSinceMs: null,
     peakProfitPct: 0,
+    otherMintDecimals,
+    reserveSolAccount,
   };
 
-  await openPosition({ pool, totalXAmount: balX, totalYAmount: balY, minBinId, maxBinId });
-  logger.info('[rebalanceEngine] initial position opened', { poolAddress });
+  try {
+    const result = await openPosition({ pool, totalXAmount: depositX, totalYAmount: depositY, binRadius: radius });
+    ctx.centerBinId = result.centerBinId;
+  } catch (err) {
+    // Found live 2026-10-07 (real bot's first entry attempt): the swap above
+    // already landed before this point — if openPosition then fails (e.g.
+    // the InvalidRealloc bug this same session found, or any other
+    // simulation/send failure), the swapped-into otherMint balance used to
+    // just sit in the wallet with no rollback, un-tracked by
+    // currentCapitalSol, a real stuck-funds state (confirmed live: ~half
+    // capital sat as 11538 tokens of an abandoned pool's mint until manually
+    // swapped back). Best-effort swap it straight back to SOL before
+    // rethrowing, so a failed entry always leaves the wallet in the same
+    // all-SOL state it started in.
+    logger.error('[rebalanceEngine] openPosition failed after swap — swapping stuck balance back to SOL', {
+      poolAddress,
+      otherMint,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    const stuckBalance = await getTokenBalance(otherMint);
+    if (stuckBalance.gtn(0)) {
+      try {
+        await emergencySwapAllToSol(otherMint, stuckBalance);
+      } catch (swapBackErr) {
+        logger.error('[rebalanceEngine] rollback swap-back ALSO failed — funds remain stuck, manual intervention needed', {
+          otherMint,
+          stuckBalance: stuckBalance.toString(),
+          error: swapBackErr instanceof Error ? swapBackErr.message : String(swapBackErr),
+        });
+      }
+    }
+    throw err;
+  }
+  logger.info('[rebalanceEngine] initial position opened', { poolAddress, estBinRentSol: estimateBinRentSol(radius) });
   return ctx;
 }
 
@@ -301,19 +487,67 @@ export async function openInitialPosition(
  */
 async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promise<number> {
   const [position] = await getUserPositions(ctx.pool);
+  let feeOtherRaw = new BN(0);
+  let expectedOtherAmount = new BN(0);
   if (position) {
+    // Read BEFORE closing. feeOtherRaw: see splitFeeFromOtherBalance's doc
+    // comment. expectedOtherAmount (principal+fee, the OTHER side's full
+    // pre-close claimable total): waitForTokenBalance's threshold below —
+    // see its doc comment in compoundCycle for the live incident
+    // (BATON-SOL, 2026-10-08) this fixes: reading the other-side balance
+    // immediately after closePositionFull, with no staleness guard,
+    // returned a STALE near-zero value instead of the TRUE post-close
+    // balance, leaving thousands of dollars of tokens un-swapped and
+    // un-tracked.
+    const { feeX, feeY, totalXAmount, totalYAmount } = position.positionData;
+    feeOtherRaw = new BN(ctx.xIsSol ? feeY : feeX);
+    expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(feeOtherRaw);
     logger.warn(`[rebalanceEngine] ${logPrefix}: closing position`, { pool: ctx.poolAddress });
     await closePositionFull(ctx.pool, position);
   }
 
   const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
-  const otherAmount = await getTokenBalance(otherMint);
-  if (otherAmount.gtn(0)) {
-    await emergencySwapAllToSol(otherMint, otherAmount);
+  const otherAmount = expectedOtherAmount.gtn(0)
+    ? await waitForTokenBalance(otherMint, expectedOtherAmount.muln(95).divn(100))
+    : await getTokenBalance(otherMint);
+  const { toSwap, toKeepAsToken } = splitFeeFromOtherBalance(feeOtherRaw, otherAmount);
+  if (toKeepAsToken.gtn(0)) {
+    logger.info(`[rebalanceEngine] ${logPrefix}: keeping fee portion as token, user's call to sell manually`, {
+      pool: ctx.poolAddress,
+      otherMint,
+      keptRaw: toKeepAsToken.toString(),
+    });
+  }
+  if (toSwap.gtn(0)) {
+    try {
+      await emergencySwapAllToSol(otherMint, toSwap);
+    } catch (err) {
+      // Found live 2026-10-07 (real bot's first SWITCH): a transient
+      // RPC/Jupiter hiccup here (quote 5xx, blockhash expiry under load)
+      // used to throw all the way up through executeHardExit/
+      // executeCleanExit — but closePositionFull above had ALREADY
+      // succeeded on-chain (irreversible) by this point. index.ts has no
+      // try/catch around its executeHardExit/executeCleanExit calls, so the
+      // throw left currentPool still pointing at the now-closed position —
+      // every subsequent tick's health check then read currentValueSol as 0
+      // (no position found) and misread it as a 100% loss, looping
+      // HARD_EXIT/blacklist/retry on a pool with no position left, for 5
+      // minutes until a retry's own swap attempt happened to succeed.
+      // Swallow here instead: the position close is the irreversible step
+      // that matters for state tracking; a leftover unconverted token
+      // balance is a smaller, recoverable problem, not worth corrupting
+      // currentPool/currentCapitalSol over.
+      logger.error(`[rebalanceEngine] ${logPrefix}: leftover-token swap-back failed, continuing with SOL-only balance`, {
+        pool: ctx.poolAddress,
+        otherMint,
+        stuckAmount: toSwap.toString(),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const solBalance = await getWalletSolBalance();
-  const nextCapital = Math.max(solBalance - env.MIN_GAS_RESERVE_SOL, 0);
+  const nextCapital = Math.max(solBalance - computeGasReserveSol(solBalance), 0);
   logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital });
   return nextCapital;
 }

@@ -38,6 +38,20 @@ import { withRetry } from '../utils/retry.js';
 const require = createRequire(import.meta.url);
 const DLMMPkg = require('@meteora-ag/dlmm');
 
+/**
+ * Max bins a single transaction can safely initialize/add-liquidity-to —
+ * re-exported from the SDK's own constant rather than hardcoded, so a
+ * version bump that changes it doesn't silently drift. Found live
+ * 2026-10-07 (real bot's first entry attempt): computeBinRadius (binRange.ts)
+ * could produce a radius up to env.MAX_BIN_RADIUS (50) — a 101-bin position
+ * on a wide range — but initializePositionAndAddLiquidityByStrategy only
+ * supports MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX (26) bins per tx; exceeding it
+ * fails simulation with "Failed to reallocate account data" (InvalidRealloc)
+ * on the InitializePosition instruction, not something withPriorityFee or
+ * retries can work around — it's a hard per-tx ceiling.
+ */
+export const MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX: number = DLMMPkg.MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX;
+
 export enum StrategyType {
   Spot = 0,
   Curve = 1,
@@ -98,17 +112,41 @@ export interface OpenPositionParams {
   pool: DlmmPool;
   totalXAmount: BN;
   totalYAmount: BN;
-  minBinId: number;
-  maxBinId: number;
+  /** Bin radius only, NOT a precomputed minBinId/maxBinId — see openPosition's doc comment for why. */
+  binRadius: number;
 }
 
 export interface OpenPositionResult {
   positionPubkey: PublicKey;
   signature: string;
+  /** Active bin id actually used for this position's range — may differ from any snapshot the caller took before calling, since this is fetched fresh on every retry attempt. */
+  centerBinId: number;
+}
+
+const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58();
+
+/**
+ * Strips any ComputeBudget instructions already present, so the caller can
+ * safely add its own without creating duplicates. Found live 2026-10-07
+ * (real bot's first-ever position-open): @meteora-ag/dlmm's
+ * initializePositionAndAddLiquidityByStrategy already estimates and embeds
+ * its own SetComputeUnitLimit/SetComputeUnitPrice instructions into the
+ * Transaction it returns (visible in its own stack —
+ * getEstimatedComputeUnitUsageWithBuffer/getEstimatedComputeUnitIxWithBuffer).
+ * Blindly unshifting a SECOND pair on top, as withPriorityFee used to,
+ * produces a transaction with duplicate ComputeBudget instructions —
+ * Solana's runtime rejects that outright with "Transaction contains a
+ * duplicate instruction that is not allowed", failing simulation before the
+ * tx is ever broadcast (every real position-open attempt tonight failed
+ * this way). Pure/exported for a self-check.
+ */
+export function stripComputeBudgetInstructions<T extends { programId: PublicKey }>(instructions: T[]): T[] {
+  return instructions.filter((ix) => ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID);
 }
 
 async function withPriorityFee(tx: Transaction, writableAccounts: PublicKey[]): Promise<Transaction> {
   const microLamports = await getDynamicPriorityFeeMicroLamports(writableAccounts);
+  tx.instructions = stripComputeBudgetInstructions(tx.instructions);
   tx.instructions.unshift(
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
     ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
@@ -116,14 +154,28 @@ async function withPriorityFee(tx: Transaction, writableAccounts: PublicKey[]): 
   return tx;
 }
 
+/**
+ * Refreshes blockhash and re-signs from a clean signature state on EVERY
+ * attempt, inside the retry closure — not just once before the first try.
+ * Found live 2026-10-07 (real bot's first-ever run): retrying
+ * sendAndConfirmTransaction on the SAME already-signed Transaction object
+ * (stale blockhash, stale tx.signatures from the failed attempt) produced
+ * "Transaction contains a duplicate instruction (2) that is not allowed" on
+ * every retry — a known class of issue with reusing a legacy Transaction
+ * object across multiple send attempts. Clearing signatures + refreshing
+ * blockhash before each attempt avoids resending stale signed state.
+ */
 async function sendTx(tx: Transaction, extraSigners: Keypair[] = [], label = 'tx'): Promise<string> {
   tx.feePayer = wallet.publicKey;
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-  tx.recentBlockhash = blockhash;
-  tx.lastValidBlockHeight = lastValidBlockHeight;
 
   return withRetry(
-    () => sendAndConfirmTransaction(connection, tx, [wallet, ...extraSigners], { commitment: 'confirmed' }),
+    async () => {
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+      tx.recentBlockhash = blockhash;
+      tx.lastValidBlockHeight = lastValidBlockHeight;
+      tx.signatures = [];
+      return sendAndConfirmTransaction(connection, tx, [wallet, ...extraSigners], { commitment: 'confirmed' });
+    },
     { maxRetries: 3, baseDelayMs: 1_000, label },
   );
 }
@@ -153,23 +205,53 @@ export async function getUserPositions(pool: DlmmPool): Promise<LbPosition[]> {
  * pre-balancing X/Y 50:50 via jupiterSwap.balanceTokenRatio before calling
  * this.
  */
+/**
+ * Opens a new DLMM position, fetching the active bin FRESH on every retry
+ * attempt (inside the retry closure), not once beforehand. Found live
+ * 2026-10-07 (DARK-SOL, pumping fast): the old version computed
+ * minBinId/maxBinId ONCE from a single getActiveBin() snapshot, then
+ * sendTx's own retry loop only refreshed the blockhash/signature on each
+ * attempt — the bin-range parameters baked into the deposit instruction
+ * itself stayed frozen. During a fast price move, every retry kept
+ * resending the SAME now-stale bin range, failing identically 4 times in a
+ * row with ExceededBinSlippageTolerance (the active bin had moved further
+ * than the fixed range's own slippage tolerance allows) — a doomed retry
+ * loop, not a transient one. Fetching the active bin fresh inside the
+ * retry closure means each attempt reflects the current price, giving
+ * retries an actual chance to succeed instead of repeating a guaranteed
+ * failure. A fresh position keypair is generated per attempt too (cheap,
+ * and removes any chance of colliding with a prior attempt's account).
+ */
 export async function openPosition(params: OpenPositionParams): Promise<OpenPositionResult> {
-  const { pool, totalXAmount, totalYAmount, minBinId, maxBinId } = params;
-  const positionKeypair = Keypair.generate();
+  const { pool, totalXAmount, totalYAmount, binRadius } = params;
 
-  const tx = await pool.initializePositionAndAddLiquidityByStrategy({
-    positionPubKey: positionKeypair.publicKey,
-    user: wallet.publicKey,
-    totalXAmount,
-    totalYAmount,
-    strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk },
-  });
+  return withRetry(
+    async () => {
+      const positionKeypair = Keypair.generate();
+      const activeBin = await getActiveBin(pool);
+      const minBinId = activeBin.binId - binRadius;
+      const maxBinId = activeBin.binId + binRadius;
 
-  await withPriorityFee(tx, [wallet.publicKey, positionKeypair.publicKey]);
-  const signature = await sendTx(tx, [positionKeypair], 'openPosition');
-  logger.info('[dlmm] position opened', { position: positionKeypair.publicKey.toBase58(), signature });
+      const tx = await pool.initializePositionAndAddLiquidityByStrategy({
+        positionPubKey: positionKeypair.publicKey,
+        user: wallet.publicKey,
+        totalXAmount,
+        totalYAmount,
+        strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk },
+      });
 
-  return { positionPubkey: positionKeypair.publicKey, signature };
+      await withPriorityFee(tx, [wallet.publicKey, positionKeypair.publicKey]);
+      const signature = await sendTx(tx, [positionKeypair], 'openPosition');
+      logger.info('[dlmm] position opened', {
+        position: positionKeypair.publicKey.toBase58(),
+        signature,
+        centerBinId: activeBin.binId,
+      });
+
+      return { positionPubkey: positionKeypair.publicKey, signature, centerBinId: activeBin.binId };
+    },
+    { maxRetries: 3, baseDelayMs: 1_000, label: 'openPositionFreshBin' },
+  );
 }
 
 /** Claims accrued swap fees without touching principal/liquidity. */

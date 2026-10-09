@@ -72,6 +72,9 @@ export interface MeteoraPair {
   name: string;
   mint_x: string;
   mint_y: string;
+  /** Pool's own on-chain token reserve accounts — used by flowAnalysis.ts's getDollarVolumeBuyRatio to read real $-volume buy/sell flow directly (DexScreener/Meteora's REST APIs only expose tx counts, not a $ split by side). */
+  reserve_x: string;
+  reserve_y: string;
   liquidity: string; // TVL in USD, stringified number
   trade_volume_24h: number;
   fees_24h: number;
@@ -80,6 +83,10 @@ export interface MeteoraPair {
   createdAtMs: number;
   volume1hUsd: number;
   fees1hUsd: number;
+  /** pool_config.base_fee_pct from Meteora's own /pools response — fixed per-pool fee rate, NOT the dynamic/variable component. Used by 'range' mode's RANGE_MIN_BASE_FEE_PCT floor. */
+  baseFeePct: number;
+  /** fee_tvl_ratio['24h'] from the same response — Meteora's own pre-computed 24h fee/TVL yield, already incorporating both the fee rate AND actual turnover. Used by rankRangeCandidates instead of raw vol/TVL turnover. Do NOT use the response's apr/apy fields — confirmed live 2026-10-07 they're naive over-compounded extrapolations of this same ratio (one example showed apy=3,086,522,374%), meaningless for ranking. */
+  feeTvlRatio24h: number;
   tokenX: TokenMeta;
   tokenY: TokenMeta;
   /** Not part of the raw API — hydrated from DexScreener if available. */
@@ -126,11 +133,14 @@ interface RawMeteoraPool {
   name: string;
   token_x: RawTokenMeta;
   token_y: RawTokenMeta;
+  reserve_x: string;
+  reserve_y: string;
   tvl: number;
   current_price: number;
-  pool_config: { bin_step: number };
+  pool_config: { bin_step: number; base_fee_pct: number };
   volume: { '1h': number; '24h': number };
   fees: { '1h': number; '24h': number };
+  fee_tvl_ratio: { '24h': number };
   created_at: number; // epoch ms
 }
 
@@ -157,6 +167,8 @@ function normalizePool(raw: RawMeteoraPool): MeteoraPair {
     name: raw.name,
     mint_x: raw.token_x.address,
     mint_y: raw.token_y.address,
+    reserve_x: raw.reserve_x,
+    reserve_y: raw.reserve_y,
     liquidity: String(raw.tvl),
     trade_volume_24h: raw.volume['24h'],
     fees_24h: raw.fees['24h'],
@@ -165,6 +177,8 @@ function normalizePool(raw: RawMeteoraPool): MeteoraPair {
     createdAtMs: raw.created_at,
     volume1hUsd: raw.volume['1h'],
     fees1hUsd: raw.fees['1h'],
+    baseFeePct: raw.pool_config.base_fee_pct,
+    feeTvlRatio24h: raw.fee_tvl_ratio['24h'],
     tokenX: normalizeTokenMeta(raw.token_x),
     tokenY: normalizeTokenMeta(raw.token_y),
   };
@@ -215,6 +229,8 @@ export interface ScannerConfig {
   rangeMaxVolatilityPct: number;
   /** Entry-only absolute TVL floor for 'range' entryStrategyMode — see RANGE_MIN_TVL_USD (env.ts). Distinct from maxCapitalTvlRatioPct: that one protects against OUR trade moving a thin pool's price, this one protects against picking an inherently fragile pool regardless of our own capital size. */
   rangeMinTvlUsd: number;
+  /** Entry-only floor on pool_config.base_fee_pct for 'range' entryStrategyMode — see RANGE_MIN_BASE_FEE_PCT (env.ts). A backstop against stable-pair-style fee tiers, not the primary yield-quality signal (that's rankRangeCandidates sorting on feeTvlRatio24h). */
+  rangeMinBaseFeePct: number;
   /**
    * Entry-only ceiling on (capital about to enter this pool) / (pool TVL),
    * as a percent — e.g. 5 means our deposit can't exceed 5% of the pool's
@@ -315,6 +331,15 @@ export async function getCurrentPriceUsd(poolAddress: string): Promise<number | 
   if (!pool) return null;
   const memecoin = nonSolToken(pool);
   return memecoin?.priceUsd ?? null;
+}
+
+/** Same fetch pattern as getCurrentPriceUsd, but the SOL side's price — needed by flowAnalysis.ts's getDollarVolumeBuyRatio to value reserve-account SOL deltas in USD. */
+export async function getSolPriceUsd(poolAddress: string): Promise<number | null> {
+  const pairs = await fetchTopPools();
+  const pool = pairs.find((p) => p.address === poolAddress);
+  if (!pool) return null;
+  const sol = solToken(pool);
+  return sol?.priceUsd ?? null;
 }
 
 /**
@@ -694,6 +719,11 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
       if (Math.abs(pair.priceChange6hPct ?? Infinity) > config.rangeMaxVolatilityPct) return false;
     }
 
+    // 'range' mode's base-fee-rate floor — see RANGE_MIN_BASE_FEE_PCT
+    // (env.ts). Entry-only backstop, not the primary yield signal (that's
+    // rankRangeCandidates's feeTvlRatio24h sort below).
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && pair.baseFeePct < config.rangeMinBaseFeePct) return false;
+
     return true;
   });
 
@@ -724,14 +754,27 @@ export function rankTrendCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
  * 'range' entryStrategyMode's ranking (see ENTRY_STRATEGY_MODE, env.ts) —
  * candidates already cleared the rangeMaxVolatilityPct ceiling (genuinely
  * calm, not trending), so the remaining question is which generates the
- * most fee yield relative to capital. vol/TVL ratio (turnover) descending
- * is the direct proxy — more $ traded per $ of liquidity means a bigger
- * pro-rata fee share for the same deposit, with the volatility ceiling
- * above already having screened out the IL risk that would normally come
- * with high turnover. Single sort key, same reasoning as rankTrendCandidates.
+ * most fee yield relative to capital.
+ *
+ * Changed 2026-10-07/08 from raw vol/TVL turnover to Meteora's own
+ * feeTvlRatio24h: turnover alone is missing the fee-RATE dimension
+ * entirely — two pools with identical turnover but 0.3% vs 1% base fee
+ * ranked identically under the old metric, even though the 1% pool yields
+ * ~3x more fee $ for the same capital. feeTvlRatio24h already incorporates
+ * both the rate AND actual turnover in one number (it's literally
+ * fees_24h/tvl, computed server-side), so it's a strictly better proxy for
+ * this mode's actual thesis. Confirmed live: Meteora's own apr/apy fields
+ * are NOT a usable substitute — they naively over-annualize this same
+ * ratio (one real pool showed apy=3,086,522,374%), so feeTvlRatio24h's raw
+ * value is used directly, never apr/apy. Falls back to the old vol/TVL
+ * turnover for any candidate missing feeTvlRatio24h (shouldn't happen in
+ * practice — it comes from the same API call as everything else — but
+ * stay defensive rather than crash or silently rank it as zero).
  */
 export function rankRangeCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
-  return [...candidates].sort((a, b) => Number(b.trade_volume_24h) / Number(b.liquidity) - Number(a.trade_volume_24h) / Number(a.liquidity));
+  const yieldScore = (pair: MeteoraPair): number =>
+    pair.feeTvlRatio24h ?? Number(pair.trade_volume_24h) / Number(pair.liquidity);
+  return [...candidates].sort((a, b) => yieldScore(b) - yieldScore(a));
 }
 
 /**
@@ -940,6 +983,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
       reasons.push(`6h |change| ${pair.priceChange6hPct?.toFixed(2) ?? 'unknown'}% > range ceiling ${config.rangeMaxVolatilityPct}% - no longer range-bound`);
     }
   }
+  if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && pair.baseFeePct < config.rangeMinBaseFeePct) {
+    reasons.push(`base fee ${pair.baseFeePct}% < range mode floor ${config.rangeMinBaseFeePct}%`);
+  }
 
   return reasons;
 }
@@ -1006,8 +1052,24 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>, chaseG
     trendMinSustainedPct: env.TREND_MIN_SUSTAINED_PCT,
     rangeMaxVolatilityPct: env.RANGE_MAX_VOLATILITY_PCT,
     rangeMinTvlUsd: env.RANGE_MIN_TVL_USD,
+    rangeMinBaseFeePct: env.RANGE_MIN_BASE_FEE_PCT,
     maxCapitalTvlRatioPct: env.MAX_CAPITAL_TVL_RATIO_PCT,
     blacklistPools,
     chaseGuardPools,
   };
+}
+
+/**
+ * Entry-only fail-closed gate (2026-10-08, user's call after entering BATON-SOL
+ * with its dollar-flow check 429'd to "unknown"): the screen itself is
+ * permissive-on-unknown by design (so a held position isn't force-exited on
+ * a transient lookup failure), but a NEW entry should only happen when every
+ * signal was actually read. Returns the names of DexScreener-sourced fields
+ * that never hydrated; empty = safe to proceed. Pure, no I/O.
+ */
+export function missingEntryData(pair: MeteoraPair): string[] {
+  const required = ['priceChange1hPct', 'priceChange6hPct', 'priceChange24hPct', 'volumeM5Usd', 'volumeH6Usd', 'txCountM5', 'buyRatio1h'] as const;
+  const missing: string[] = required.filter((k) => pair[k] === undefined);
+  if (pair.dexHydrationFailed) missing.push('dexHydrationFailed');
+  return missing;
 }

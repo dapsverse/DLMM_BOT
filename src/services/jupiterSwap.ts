@@ -1,7 +1,7 @@
 import { createJupiterApiClient, type QuoteResponse } from '@jup-ag/api';
 import { VersionedTransaction } from '@solana/web3.js';
 import BN from 'bn.js';
-import { connection, wallet } from './solana.js';
+import { connection, wallet, waitForTokenBalance } from './solana.js';
 import { env } from '../config/env.js';
 import { WSOL_MINT } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
@@ -21,11 +21,25 @@ async function quote(inputMint: string, outputMint: string, amount: BN): Promise
   );
 }
 
-/** Executes a single swap for the given quote and returns the confirmed signature. */
+/**
+ * Executes a single swap for the given quote and returns the confirmed
+ * signature. Rebuilds and re-signs a FRESH swap transaction from Jupiter on
+ * every retry attempt, inside the retry closure — not built once and resent.
+ * Found live 2026-10-07/08: a VersionedTransaction's blockhash is baked into
+ * its compiled message at build time (unlike a legacy Transaction, it can't
+ * be patched in place — see sendTx's doc comment in meteoraDLMM.ts for the
+ * same class of bug already fixed there). The old version here built +
+ * signed the tx ONCE, then retried `sendTransaction` on that SAME object —
+ * every retry resent an increasingly stale blockhash, so once the first
+ * attempt didn't land in time, every subsequent retry was doomed before it
+ * even started. Confirmed this was the dominant cause of nearly every
+ * "block height exceeded" / "Blockhash not found" failure seen all session,
+ * across both entry swaps and emergency swap-backs.
+ */
 async function executeSwap(quoteResponse: QuoteResponse): Promise<SwapResult> {
-  const { swapTransaction } = await withRetry(
-    () =>
-      jupiter.swapPost({
+  const signature = await withRetry(
+    async () => {
+      const { swapTransaction } = await jupiter.swapPost({
         swapRequest: {
           quoteResponse,
           userPublicKey: wallet.publicKey.toBase58(),
@@ -33,21 +47,16 @@ async function executeSwap(quoteResponse: QuoteResponse): Promise<SwapResult> {
           // ponytail: default (no explicit prioritizationFeeLamports) lets Jupiter pick;
           // wire in a PriorityLevelWithMaxLamports object here if fee-spike misses show up.
         },
-      }),
-    { maxRetries: 3, baseDelayMs: 1_000, label: 'jupiter:swap' },
-  );
+      });
+      const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
+      tx.sign([wallet]);
 
-  const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
-  tx.sign([wallet]);
-
-  const signature = await withRetry(
-    async () => {
       const sig = await connection.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
       const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
       await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
       return sig;
     },
-    { maxRetries: 2, baseDelayMs: 1_500, label: 'jupiter:sendSwapTx' },
+    { maxRetries: 3, baseDelayMs: 1_500, label: 'jupiter:sendSwapTx' },
   );
 
   logger.info('[jupiter] swap executed', { signature, outAmount: quoteResponse.outAmount });
@@ -99,6 +108,12 @@ export async function balanceTokenRatio(params: {
   if (swapAmount.lten(0)) return { swapped: false };
 
   const result = await swapExactIn(fromMint, toMint, swapAmount);
+  // Same read-after-write RPC staleness race as openInitialPosition (see
+  // waitForTokenBalance's doc comment in solana.ts) — compoundCycle reads
+  // balances again right after this resolves, so confirm the swap's own
+  // output actually landed before returning control to the caller.
+  const expectedMinimum = new BN(result.outAmount).muln(95).divn(100);
+  await waitForTokenBalance(toMint, expectedMinimum);
   return { swapped: true, result };
 }
 

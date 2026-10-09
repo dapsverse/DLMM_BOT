@@ -57,6 +57,7 @@ export const TREND_SHORTLIST_SIZE = 3;
  * not yet validated over multiple live episodes.
  */
 export const TAKE_PROFIT_TIERS: ReadonlyArray<{ armPct: number; floorPct: number }> = [
+  { armPct: 12, floorPct: 6 }, // 2026-10-08: protect small wins (SI/TWEETCRAFT-style 0-30% band had no protection but stop-loss)
   { armPct: 30, floorPct: 25 },
   { armPct: 100, floorPct: 50 },
   { armPct: 125, floorPct: 100 },

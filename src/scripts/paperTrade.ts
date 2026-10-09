@@ -16,13 +16,17 @@
  * ── Simulation model (approximation, read before trusting the numbers) ──
  * Fee accrual: pro-rata share of the pool's trailing fee rate —
  *   ourShare = capitalUsd / (poolTvlUsd + capitalUsd), applied to
- *   pool.fees_24h prorated over the elapsed tick interval. This assumes
- *   our liquidity earns the SAME rate as the pool average. Real DLMM is
- *   concentrated (bins): a position held tight around the active bin
- *   (radius derived per-pool from bin_step, see logic/binRange.ts) usually captures MORE than a naive TVL-share
- *   while price stays in range, and captures ZERO once price exits the
- *   range (liquidity goes idle, one-sided). This sim does not model bin
- *   exit — treat its fee number as a rough floor, not a ceiling.
+ *   pool.fees_24h prorated over the elapsed tick interval, ONLY while
+ *   confirmed in-range (fixed 2026-09-30 — see computeFeeAccrual). This
+ *   still assumes our liquidity earns the SAME rate as the pool average
+ *   while in-range. Real DLMM is concentrated (bins): a position held
+ *   tight around the active bin (radius derived per-pool from bin_step,
+ *   see logic/binRange.ts) usually captures MORE than a naive TVL-share
+ *   while price stays in range — this sim doesn't model that upside, so
+ *   treat its in-range fee number as a rough floor, not a ceiling. The
+ *   out-of-range side (zero fees) is now modeled correctly, not just a
+ *   caveat — see computeFeeAccrual's doc comment for the incident that
+ *   motivated the fix.
  * Price PnL / IL: standard constant-product impermanent-loss formula
  *   (2*sqrt(r)/(1+r), r = price-ratio change since entry) applied to the
  *   memecoin/SOL price ratio. Real DLMM IL inside a narrow range is
@@ -52,6 +56,7 @@ import {
 } from '../services/meteoraScanner.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist, rangeCeilingProfitOverride } from '../logic/riskManager.js';
 import { computeOutOfRangeTracking } from '../logic/outOfRangeTracking.js';
+import { computeFeeAccrual } from '../logic/feeAccrual.js';
 import { estimateCycleGasCostSol } from '../logic/costEstimate.js';
 import { computeBinRadius } from '../logic/binRange.js';
 import { getActiveBinId } from '../services/rpc.js';
@@ -394,11 +399,12 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
   position.outOfRangeSinceMs = outOfRangeTracking.outOfRangeSinceMs;
   position.inRangeSinceMs = outOfRangeTracking.inRangeSinceMs;
 
-  // Fee accrual since last tick, pro-rata TVL share (see file header caveat).
+  // Fee accrual since last tick — see computeFeeAccrual doc comment.
+  // lastFeeAccrualAtMs still advances every tick regardless of whether we
+  // accrued, so a later back-in-range tick only accrues for the time since
+  // THEN, not retroactively for the skipped out-of-range window.
   const elapsedHours = (now - position.lastFeeAccrualAtMs) / 3_600_000;
-  const ourShare = position.capitalUsd / (tvlUsd + position.capitalUsd);
-  const feeThisTick = ourShare * live.fees_24h * (elapsedHours / 24);
-  position.feesEarnedUsd += feeThisTick;
+  position.feesEarnedUsd += computeFeeAccrual(position.capitalUsd, tvlUsd, live.fees_24h, elapsedHours, inRange);
   position.lastFeeAccrualAtMs = now;
 
   // Price PnL via constant-product IL proxy (see file header caveat).
@@ -538,7 +544,22 @@ async function dlmmTick(pairs: MeteoraPair[], sharedCandidate: MeteoraPair | nul
       // grew past those ceilings succeeded, it didn't go bad. See
       // FilterOpts in meteoraScanner.ts.
       const reScreenOpts = { skipSizingChecks: true };
-      const rejectReasons = poolRejectReasons(live, defaultScannerConfig(blacklist, chaseGuardPools), reScreenOpts);
+      const rescreenConfig = defaultScannerConfig(blacklist, chaseGuardPools);
+      // filterAndRankPools hydrates `live` in place (hydrateTrendData +
+      // hydrateMintAuthority) as a side effect before filtering — required
+      // here, not just a formality: without it, priceChange1hPct/6hPct and
+      // mintAuthorityRevoked stay undefined, which makes EVERY re-screen
+      // report "mint authority not confirmed revoked" and a fail-closed
+      // "unknown% > range ceiling" regardless of the pool's real state.
+      // Found live 2026-09-30: this used to be exactly this hydrating call;
+      // an earlier edit tonight replaced it with a bare poolRejectReasons
+      // call to capture reasons for rangeCeilingProfitOverride, which
+      // silently dropped the hydration and made the override permanently
+      // unreachable (mint-authority's phantom reason always rides along).
+      // Re-derive reasons from the SAME now-hydrated `live` object afterward
+      // instead of skipping the hydrating call.
+      const stillEligibleGenuine = (await filterAndRankPools([live], rescreenConfig, reScreenOpts)).length > 0;
+      const rejectReasons = stillEligibleGenuine ? [] : poolRejectReasons(live, rescreenConfig, reScreenOpts);
       // Profit-aware override for 'range' mode (see rangeCeilingProfitOverride,
       // riskManager.ts, and RANGE_CEILING_PROFIT_OVERRIDE_PCT, env.ts): a
       // held range position that fails re-screen ONLY on the volatility

@@ -21,6 +21,8 @@ function healthyPair(overrides: Partial<MeteoraPair>): MeteoraPair {
     name: 'FAKE-SOL',
     mint_x: 'FAKE_MINT',
     mint_y: 'So11111111111111111111111111111111111111112',
+    reserve_x: 'FAKE_RESERVE_X',
+    reserve_y: 'FAKE_RESERVE_Y',
     liquidity: '10000', // small on purpose — this is exactly the case the ratio check is meant to admit or reject
     trade_volume_24h: config.minVolume24hUsd + 1,
     fees_24h: 0,
@@ -30,6 +32,8 @@ function healthyPair(overrides: Partial<MeteoraPair>): MeteoraPair {
     volume1hUsd: config.minVolume24hUsd,
     volumeH6Usd: (config.minVolume24hUsd) * 2,
     fees1hUsd: 0,
+    baseFeePct: 1,
+    feeTvlRatio24h: 1,
     tokenX: { address: 'FAKE_MINT', priceUsd: 1, marketCapUsd: 300_000, holders: config.minTokenHolders + 1, freezeAuthorityDisabled: true },
     tokenY: { address: 'So11111111111111111111111111111111111111112', priceUsd: 100, marketCapUsd: 0, holders: 0, freezeAuthorityDisabled: true }, // SOL @ $100
     priceChange6hPct: config.minPriceChange6hPct + 1,

@@ -12,7 +12,9 @@ import assert from 'node:assert';
 import { trailingTakeProfitFloorPct } from '../logic/riskManager.js';
 
 // Below the first tier's armPct: not armed at all.
-assert(trailingTakeProfitFloorPct(29.9) === null, 'expected not-yet-armed (peak < 30%) to return null');
+assert(trailingTakeProfitFloorPct(11.9) === null, 'expected not-yet-armed (peak < 12%) to return null');
+assert(trailingTakeProfitFloorPct(12) === 6, 'expected peak=12 (first tier) to floor at 6');
+assert(trailingTakeProfitFloorPct(29.9) === 6, 'expected peak=29.9 (still in the 12-30 band) to floor at 6');
 
 // Sticky within a band: floor stays at the tier's floorPct across the WHOLE
 // band, doesn't recompute toward the next tier as peak climbs within it.

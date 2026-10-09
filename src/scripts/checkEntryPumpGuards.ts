@@ -31,6 +31,8 @@ function healthyPair(overrides: Partial<MeteoraPair>): MeteoraPair {
     name: 'FAKE-SOL',
     mint_x: 'FAKE_MINT',
     mint_y: 'So11111111111111111111111111111111111111112',
+    reserve_x: 'FAKE_RESERVE_X',
+    reserve_y: 'FAKE_RESERVE_Y',
     liquidity: String(config.minTvlUsd + 1),
     trade_volume_24h: config.minVolume24hUsd + 1,
     fees_24h: 0,
@@ -40,6 +42,8 @@ function healthyPair(overrides: Partial<MeteoraPair>): MeteoraPair {
     volume1hUsd: config.minVolume24hUsd,
     volumeH6Usd: config.minVolume24hUsd * 2, // spikeRatio ~5x by default — a genuinely healthy baseline, overridden per-test below
     fees1hUsd: 0,
+    baseFeePct: 1,
+    feeTvlRatio24h: 1,
     tokenX: { address: 'FAKE_MINT', priceUsd: 1, marketCapUsd: 0, holders: config.minTokenHolders + 1, freezeAuthorityDisabled: true },
     tokenY: { address: 'So11111111111111111111111111111111111111112', priceUsd: 1, marketCapUsd: 0, holders: 0, freezeAuthorityDisabled: true },
     priceChange6hPct: config.minPriceChange6hPct + 1,

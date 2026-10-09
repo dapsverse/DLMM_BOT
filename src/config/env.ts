@@ -42,7 +42,22 @@ export const env = {
 
   // Capital allocation
   INITIAL_LP_CAPITAL_SOL: num('INITIAL_LP_CAPITAL_SOL', 4.2),
-  MIN_GAS_RESERVE_SOL: num('MIN_GAS_RESERVE_SOL', 0.8),
+  // MIN_GAS_RESERVE_SOL is now an ABSOLUTE FLOOR, not the full reserve — see
+  // computeGasReserveSol (rebalanceEngine.ts). Idea borrowed 2026-10-08 from
+  // comparing against CryptoGnome/dlmmbot's reserveSol(): a flat reserve
+  // value goes stale as the wallet's actual balance drifts (this project
+  // manually re-tuned MIN_GAS_RESERVE_SOL by hand after nearly every restart
+  // the night real money went live — 0.8 -> 0.35 -> ... -> 0.06, chasing the
+  // balance by hand each time). The real reserve is now
+  // max(MIN_GAS_RESERVE_SOL floor, equity * MIN_GAS_RESERVE_PCT/100) —
+  // scales automatically, the floor only matters at very small balances.
+  // INITIAL_LP_CAPITAL_SOL deliberately stays a FIXED absolute value, not
+  // equity-scaled — user's explicit call 2026-10-08 ("capital tetep 1.3"):
+  // only the reserve needed to stop being hand-tuned.
+  MIN_GAS_RESERVE_SOL: num('MIN_GAS_RESERVE_SOL', 0.05),
+  MIN_GAS_RESERVE_PCT: num('MIN_GAS_RESERVE_PCT', 5),
+  /** Equity kill-switch (2026-10-08, user's call): when FLAT (no open position) and wallet SOL < this, the bot logs and exits instead of entering again. 0 = off. Only checked while flat — a held position is governed by its own stop-loss/hard-exit, and the check fires right after it closes. */
+  MIN_EQUITY_STOP_SOL: num('MIN_EQUITY_STOP_SOL', 0),
   ENABLE_AUTO_COMPOUND: bool('ENABLE_AUTO_COMPOUND', true),
   MAX_CONCURRENT_POOLS: num('MAX_CONCURRENT_POOLS', 1),
 
@@ -153,6 +168,23 @@ export const env = {
   // whose pool TVL grew past this succeeded, it didn't go bad.
   RANGE_MIN_TVL_USD: num('RANGE_MIN_TVL_USD', 60_000),
 
+  // Discussed 2026-10-07/08 after watching a real HIGGS-SOL position
+  // (base_fee_pct 0.3%) earn very little fee relative to its TVL. Meteora's
+  // own /pools response already includes pool_config.base_fee_pct AND a
+  // pre-computed fee_tvl_ratio per window — both unused until now. This is
+  // a backstop floor against the lowest stable-pair-style fee tiers (e.g.
+  // 0.01-0.04%, seen on SOL-USDC/SOL-USDC pools in the same response) that
+  // are structurally wrong for range mode's memecoin-pair fee-yield thesis,
+  // even though they'd otherwise pass every other range-mode filter.
+  // Deliberately modest (0.2%, not the initially-discussed 0.5%) — a hard
+  // 0.5% floor risks rejecting a high-turnover pool with a lower rate that
+  // still out-yields a low-turnover 0.5%+ pool; the real yield-quality
+  // question is answered by rankRangeCandidates sorting on feeTvlRatio24h
+  // instead of raw turnover (see its doc comment), not by this floor alone.
+  // Entry-only (see FilterOpts.skipSizingChecks), same reasoning as
+  // RANGE_MIN_TVL_USD above.
+  RANGE_MIN_BASE_FEE_PCT: num('RANGE_MIN_BASE_FEE_PCT', 0.2),
+
   // Profit-aware override for 'range' mode's re-screen (see
   // RANGE_MAX_VOLATILITY_PCT doc comment above): a held range position that
   // gets idle-forced to re-screen (out-of-range too long) and fails ONLY on
@@ -221,6 +253,36 @@ export const env = {
   // rejected 65/123 (53%) of real candidates — moved to env so it can be
   // tuned/A-B'd instead of requiring a code change.
   ENTRY_MIN_BUY_RATIO_1H: num('ENTRY_MIN_BUY_RATIO_1H', 0.5),
+
+  // Floor on a DOLLAR-volume-weighted buy ratio (flowAnalysis.ts's
+  // getDollarVolumeBuyRatio), NOT the same thing as ENTRY_MIN_BUY_RATIO_1H
+  // above (that one's a tx-COUNT ratio from DexScreener). Found live
+  // 2026-10-08 on HIGGS-SOL: tx counts favored buys at every window
+  // (h1 145/148, h6 904/792, h24 4975/4546) while price fell hard the
+  // whole time (-9%/-10%/-37%) — classic signature of a few large sellers
+  // outweighing many small buyers in $ terms, invisible to a count-based
+  // ratio. DexScreener/Meteora's REST APIs don't expose a $ volume split by
+  // side at all, so this reads real on-chain reserve-account balance
+  // deltas instead (real RPC cost — deliberately scoped to ONLY the
+  // pre-entry top candidate and the currently-held position's periodic
+  // check, never the full ~200-pool scan, to stay affordable after this
+  // session's repeated 429-storm incidents). Default 0.4 (not 0.5, unlike
+  // the tx-count version) — deliberately more lenient since $ volume is
+  // naturally lumpier (one legitimate whale trade can swing it hard even
+  // on an otherwise healthy pool); this is a brand-new, unvalidated signal,
+  // same "low-confidence starting guess" caveat as other knobs here.
+  MIN_DOLLAR_BUY_RATIO: num('MIN_DOLLAR_BUY_RATIO', 0.4),
+
+  // EXIT-side thresholds for the held-position dollar-flow check (looser than
+  // entry on purpose). Live 2026-10-08: SI-SOL (partial window) and
+  // TWEETCRAFT-SOL (7 tx, ~$435 total) were both exited on thin reads and
+  // the price later recovered above the exit (+14% / +60%); the one correct
+  // exit (BATON) had 55 samples. So: stricter ratio, a real sample/volume
+  // floor, and N consecutive qualified breaches before acting.
+  DOLLAR_FLOW_EXIT_MIN_RATIO: num('DOLLAR_FLOW_EXIT_MIN_RATIO', 0.25),
+  DOLLAR_FLOW_EXIT_MIN_SAMPLES: num('DOLLAR_FLOW_EXIT_MIN_SAMPLES', 25),
+  DOLLAR_FLOW_EXIT_MIN_VOLUME_USD: num('DOLLAR_FLOW_EXIT_MIN_VOLUME_USD', 2000),
+  DOLLAR_FLOW_EXIT_CONFIRMATIONS: num('DOLLAR_FLOW_EXIT_CONFIRMATIONS', 2),
 
   // Entry-only floor on volumeSpikeRatio (see meteoraScanner.ts) — below
   // this, a pool isn't accelerating at all (1.0x = running exactly at its
@@ -382,6 +444,9 @@ if (env.MAX_CONCURRENT_POOLS !== 1) {
 }
 if (env.MIN_GAS_RESERVE_SOL <= 0) {
   throw new Error('[env] MIN_GAS_RESERVE_SOL must be > 0');
+}
+if (env.MIN_GAS_RESERVE_PCT <= 0 || env.MIN_GAS_RESERVE_PCT >= 100) {
+  throw new Error('[env] MIN_GAS_RESERVE_PCT must be between 0 and 100 (exclusive)');
 }
 if (env.INITIAL_LP_CAPITAL_SOL <= 0) {
   throw new Error('[env] INITIAL_LP_CAPITAL_SOL must be > 0');
