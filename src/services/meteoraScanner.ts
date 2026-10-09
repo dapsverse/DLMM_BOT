@@ -87,6 +87,8 @@ export interface MeteoraPair {
   baseFeePct: number;
   /** fee_tvl_ratio['24h'] from the same response — Meteora's own pre-computed 24h fee/TVL yield, already incorporating both the fee rate AND actual turnover. Used by rankRangeCandidates instead of raw vol/TVL turnover. Do NOT use the response's apr/apy fields — confirmed live 2026-10-07 they're naive over-compounded extrapolations of this same ratio (one example showed apy=3,086,522,374%), meaningless for ranking. */
   feeTvlRatio24h: number;
+  /** fee_tvl_ratio['4h'] — recent yield. A pool whose 24h ratio is front-loaded (volume decayed) shows 4h*6 far below 24h; ranking/floor use the lower of the two (2026-10-09, EMBER-SOL: 24h 2.6% vs 4h*6 0.37%). */
+  feeTvlRatio4h?: number;
   tokenX: TokenMeta;
   tokenY: TokenMeta;
   /** Not part of the raw API — hydrated from DexScreener if available. */
@@ -140,7 +142,7 @@ interface RawMeteoraPool {
   pool_config: { bin_step: number; base_fee_pct: number };
   volume: { '1h': number; '24h': number };
   fees: { '1h': number; '24h': number };
-  fee_tvl_ratio: { '24h': number };
+  fee_tvl_ratio: { '24h': number; '4h'?: number };
   created_at: number; // epoch ms
 }
 
@@ -179,6 +181,7 @@ function normalizePool(raw: RawMeteoraPool): MeteoraPair {
     fees1hUsd: raw.fees['1h'],
     baseFeePct: raw.pool_config.base_fee_pct,
     feeTvlRatio24h: raw.fee_tvl_ratio['24h'],
+    feeTvlRatio4h: raw.fee_tvl_ratio['4h'],
     tokenX: normalizeTokenMeta(raw.token_x),
     tokenY: normalizeTokenMeta(raw.token_y),
   };
@@ -231,6 +234,8 @@ export interface ScannerConfig {
   rangeMinTvlUsd: number;
   /** Entry-only floor on pool_config.base_fee_pct for 'range' entryStrategyMode — see RANGE_MIN_BASE_FEE_PCT (env.ts). A backstop against stable-pair-style fee tiers, not the primary yield-quality signal (that's rankRangeCandidates sorting on feeTvlRatio24h). */
   rangeMinBaseFeePct: number;
+  /** Entry-only floor on the 4h fee/TVL ratio scaled to 24h (x6) for 'range' mode — see RANGE_MIN_RECENT_FEE_TVL_PCT (env.ts). Fails closed when the 4h ratio is missing. */
+  rangeMinRecentFeeTvlPct: number;
   /**
    * Entry-only ceiling on (capital about to enter this pool) / (pool TVL),
    * as a percent — e.g. 5 means our deposit can't exceed 5% of the pool's
@@ -723,6 +728,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // (env.ts). Entry-only backstop, not the primary yield signal (that's
     // rankRangeCandidates's feeTvlRatio24h sort below).
     if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && pair.baseFeePct < config.rangeMinBaseFeePct) return false;
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && recentFeeTvl24hEq(pair) < config.rangeMinRecentFeeTvlPct) return false;
 
     return true;
   });
@@ -771,9 +777,18 @@ export function rankTrendCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
  * practice — it comes from the same API call as everything else — but
  * stay defensive rather than crash or silently rank it as zero).
  */
+/** 4h fee/TVL scaled to a 24h equivalent. -Infinity when missing so entry floors fail closed. */
+export function recentFeeTvl24hEq(pair: MeteoraPair): number {
+  return pair.feeTvlRatio4h == null ? -Infinity : pair.feeTvlRatio4h * 6;
+}
+
 export function rankRangeCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
-  const yieldScore = (pair: MeteoraPair): number =>
-    pair.feeTvlRatio24h ?? Number(pair.trade_volume_24h) / Number(pair.liquidity);
+  // Lower of 24h and recent (4h x6): a decayed pool can't win on a front-loaded 24h number.
+  const yieldScore = (pair: MeteoraPair): number => {
+    const r24 = pair.feeTvlRatio24h ?? Number(pair.trade_volume_24h) / Number(pair.liquidity);
+    const recent = recentFeeTvl24hEq(pair);
+    return recent === -Infinity ? r24 : Math.min(r24, recent);
+  };
   return [...candidates].sort((a, b) => yieldScore(b) - yieldScore(a));
 }
 
@@ -986,6 +1001,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && pair.baseFeePct < config.rangeMinBaseFeePct) {
     reasons.push(`base fee ${pair.baseFeePct}% < range mode floor ${config.rangeMinBaseFeePct}%`);
   }
+  if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && recentFeeTvl24hEq(pair) < config.rangeMinRecentFeeTvlPct) {
+    reasons.push(`recent fee yield (4h x6) ${recentFeeTvl24hEq(pair).toFixed(3)}% < range mode floor ${config.rangeMinRecentFeeTvlPct}% - volume has decayed`);
+  }
 
   return reasons;
 }
@@ -1053,6 +1071,7 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>, chaseG
     rangeMaxVolatilityPct: env.RANGE_MAX_VOLATILITY_PCT,
     rangeMinTvlUsd: env.RANGE_MIN_TVL_USD,
     rangeMinBaseFeePct: env.RANGE_MIN_BASE_FEE_PCT,
+    rangeMinRecentFeeTvlPct: env.RANGE_MIN_RECENT_FEE_TVL_PCT,
     maxCapitalTvlRatioPct: env.MAX_CAPITAL_TVL_RATIO_PCT,
     blacklistPools,
     chaseGuardPools,

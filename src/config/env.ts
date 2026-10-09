@@ -184,6 +184,12 @@ export const env = {
   // Entry-only (see FilterOpts.skipSizingChecks), same reasoning as
   // RANGE_MIN_TVL_USD above.
   RANGE_MIN_BASE_FEE_PCT: num('RANGE_MIN_BASE_FEE_PCT', 0.2),
+  // Entry-only floor on recent fee yield (fee_tvl_ratio 4h x6, in % per 24h
+  // equivalent). 2026-10-09: EMBER-SOL ranked on a front-loaded 24h 2.6% but
+  // its 4h x6 was 0.37% (volume had decayed ~6x), so fees accrued ~0.11%/h.
+  // 0.5 is an untuned starting guess (rejects EMBER-like decay) - revisit
+  // with the entry logs (feeYield field).
+  RANGE_MIN_RECENT_FEE_TVL_PCT: num('RANGE_MIN_RECENT_FEE_TVL_PCT', 0.5),
 
   // Profit-aware override for 'range' mode's re-screen (see
   // RANGE_MAX_VOLATILITY_PCT doc comment above): a held range position that

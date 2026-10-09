@@ -43,6 +43,7 @@ function healthyPair(overrides: Partial<MeteoraPair>): MeteoraPair {
     fees1hUsd: 0,
     baseFeePct: 1,
     feeTvlRatio24h: 1,
+    feeTvlRatio4h: 1,
     tokenX: { address: 'FAKE_MINT', priceUsd: 1, marketCapUsd: 0, holders: momentumConfig.minTokenHolders + 1, freezeAuthorityDisabled: true },
     tokenY: { address: 'So11111111111111111111111111111111111111112', priceUsd: 1, marketCapUsd: 0, holders: 0, freezeAuthorityDisabled: true },
     priceChange1hPct: 2,

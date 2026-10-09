@@ -43,6 +43,7 @@ function healthyPair(overrides: Partial<MeteoraPair>): MeteoraPair {
     fees1hUsd: 0,
     baseFeePct: rangeConfig.rangeMinBaseFeePct + 1, // clears the floor by default; individual cases override to test it
     feeTvlRatio24h: 1,
+    feeTvlRatio4h: 1,
     tokenX: { address: 'FAKE_MINT', priceUsd: 1, marketCapUsd: 0, holders: momentumConfig.minTokenHolders + 1, freezeAuthorityDisabled: true },
     tokenY: { address: 'So11111111111111111111111111111111111111112', priceUsd: 1, marketCapUsd: 0, holders: 0, freezeAuthorityDisabled: true },
     priceChange6hPct: momentumConfig.minPriceChange6hPct + 1,
@@ -112,6 +113,21 @@ const rankedFallback = rankRangeCandidates([hasRatio, missingRatio]);
 assert(
   rankedFallback[0]!.address === 'MISSING_RATIO',
   'expected a candidate missing feeTvlRatio24h to fall back to vol/TVL turnover (20x) rather than being penalized to zero',
+);
+
+// Decayed pool: high 24h yield but low recent (4h) yield -> rejected by the floor and ranked below a steady pool.
+const decayed = healthyPair({ address: 'DECAYED', feeTvlRatio24h: 2.6, feeTvlRatio4h: 0.06 });
+assert(
+  poolRejectReasons(decayed, rangeConfig, { skipSizingChecks: false }).some((r) => r.includes('recent fee yield')),
+  'expected a pool with decayed 4h yield to be rejected by the recent-yield floor',
+);
+assert(
+  poolRejectReasons(healthyPair({ feeTvlRatio4h: undefined }), rangeConfig, { skipSizingChecks: false }).some((r) => r.includes('recent fee yield')),
+  'expected missing 4h ratio to fail closed',
+);
+assert(
+  rankRangeCandidates([decayed, healthyPair({ address: 'STEADY', feeTvlRatio24h: 1.2, feeTvlRatio4h: 0.2 })])[0]?.address === 'STEADY',
+  'expected steady pool to outrank decayed one (min of 24h and 4h x6)',
 );
 
 console.log('OK: range mode inverts trend/momentum (rejects volatility, enforces base-fee floor, ranks by feeTvlRatio24h) + volatility ceiling stays live on re-screen (unlike every other sizing check)');

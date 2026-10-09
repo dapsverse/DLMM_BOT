@@ -25,6 +25,10 @@ const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than p
 
 const blacklistPools = new Map<string, number>();
 const chaseGuardPools = new Map<string, number>(); // see ScannerConfig.chaseGuardPools (meteoraScanner.ts)
+// Optional comma-separated pool addresses to blacklist at boot (in-memory state is lost on restart; e.g. keep a just-closed pool out).
+for (const addr of (process.env.BOOT_BLACKLIST_POOLS ?? '').split(',').map((a) => a.trim()).filter(Boolean)) {
+  blacklistPools.set(addr, Date.now() + env.BLACKLIST_DURATION_MS);
+}
 let currentPool: PoolContext | null = null;
 let currentCapitalSol = env.INITIAL_LP_CAPITAL_SOL;
 let lastOpportunityScanAtMs = 0;
@@ -143,6 +147,7 @@ async function tryEnterPool(): Promise<void> {
         volumeSpikeRatio: +volumeSpikeRatio(candidate).toFixed(3),
         buyRatio1h: candidate.buyRatio1h ?? null,
         priceContext,
+        feeYield: { r24h: candidate.feeTvlRatio24h, r4hx6: candidate.feeTvlRatio4h == null ? null : +(candidate.feeTvlRatio4h * 6).toFixed(3) },
         dollarFlow: { buyRatioUsd: +dollarFlow.buyRatioUsd.toFixed(3), txSampled: dollarFlow.txSampled },
       });
       return;
