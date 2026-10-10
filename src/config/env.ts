@@ -445,6 +445,8 @@ export const env = {
   MAX_DRAWDOWN_FROM_HIGH_PCT: num('MAX_DRAWDOWN_FROM_HIGH_PCT', 60),
   DRAWDOWN_WINDOW_DAYS: num('DRAWDOWN_WINDOW_DAYS', 14),
   JUPITER_MAX_SLIPPAGE_BPS: num('JUPITER_MAX_SLIPPAGE_BPS', 300),
+  // Cap on Jupiter's priority fee (lamports); swaps requested at level 'high'. 4x 'block height exceeded' seen 2026-10-10 with default fee.
+  JUPITER_MAX_PRIORITY_FEE_LAMPORTS: num('JUPITER_MAX_PRIORITY_FEE_LAMPORTS', 1_000_000),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),
 
   // Logging

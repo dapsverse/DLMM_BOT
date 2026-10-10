@@ -39,8 +39,9 @@ async function executeSwap(inputMint: string, outputMint: string, amount: BN): P
           quoteResponse,
           userPublicKey: wallet.publicKey.toBase58(),
           dynamicComputeUnitLimit: true,
-          // ponytail: default (no explicit prioritizationFeeLamports) lets Jupiter pick;
-          // wire in a PriorityLevelWithMaxLamports object here if fee-spike misses show up.
+          prioritizationFeeLamports: {
+            priorityLevelWithMaxLamports: { priorityLevel: 'high', maxLamports: env.JUPITER_MAX_PRIORITY_FEE_LAMPORTS },
+          },
         },
       });
       const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
