@@ -53,7 +53,12 @@ async function executeSwap(quoteResponse: QuoteResponse): Promise<SwapResult> {
 
       const sig = await connection.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
       const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-      await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+      const confirmation = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+      // A tx can land and still fail on-chain (e.g. Jupiter 6001 slippage): confirmTransaction resolves
+      // without throwing, so check the result or a failed swap gets logged as executed.
+      if (confirmation.value.err) {
+        throw new Error(`swap tx ${sig} failed on-chain: ${JSON.stringify(confirmation.value.err)}`);
+      }
       return sig;
     },
     { maxRetries: 3, baseDelayMs: 1_500, label: 'jupiter:sendSwapTx' },
