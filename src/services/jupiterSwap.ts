@@ -14,9 +14,9 @@ export interface SwapResult {
   outAmount: string;
 }
 
-async function quote(inputMint: string, outputMint: string, amount: BN): Promise<QuoteResponse> {
+async function quote(inputMint: string, outputMint: string, amount: BN, slippageBps: number): Promise<QuoteResponse> {
   return withRetry(
-    () => jupiter.quoteGet({ inputMint, outputMint, amount: amount.toNumber(), slippageBps: env.JUPITER_MAX_SLIPPAGE_BPS }),
+    () => jupiter.quoteGet({ inputMint, outputMint, amount: amount.toNumber(), slippageBps }),
     { maxRetries: 4, baseDelayMs: 1_000, label: 'jupiter:quote' },
   );
 }
@@ -30,10 +30,10 @@ async function quote(inputMint: string, outputMint: string, amount: BN): Promise
  * stale quote fails again with Jupiter 6001 (slippage exceeded) — seen live
  * 2026-10-10, 2 of 4 swaps in one session.
  */
-async function executeSwap(inputMint: string, outputMint: string, amount: BN): Promise<SwapResult> {
+async function executeSwap(inputMint: string, outputMint: string, amount: BN, slippageBps: number): Promise<SwapResult> {
   const { signature, outAmount } = await withRetry(
     async () => {
-      const quoteResponse = await quote(inputMint, outputMint, amount);
+      const quoteResponse = await quote(inputMint, outputMint, amount, slippageBps);
       const { swapTransaction } = await jupiter.swapPost({
         swapRequest: {
           quoteResponse,
@@ -64,8 +64,13 @@ async function executeSwap(inputMint: string, outputMint: string, amount: BN): P
   return { signature, outAmount };
 }
 
-export async function swapExactIn(inputMint: string, outputMint: string, amount: BN): Promise<SwapResult> {
-  return executeSwap(inputMint, outputMint, amount);
+export async function swapExactIn(
+  inputMint: string,
+  outputMint: string,
+  amount: BN,
+  slippageBps: number = env.JUPITER_MAX_SLIPPAGE_BPS,
+): Promise<SwapResult> {
+  return executeSwap(inputMint, outputMint, amount, slippageBps);
 }
 
 /**
@@ -121,7 +126,8 @@ export async function balanceTokenRatio(params: {
 export async function emergencySwapAllToSol(mint: string, amount: BN): Promise<SwapResult | null> {
   if (mint === WSOL_MINT || amount.lten(0)) return null;
   logger.warn('[jupiter] emergency swap to SOL', { mint, amount: amount.toString() });
-  return swapExactIn(mint, WSOL_MINT, amount);
+  // Exit dumps get wider slippage: QI-SOL swap-back failed 2x with 0x1771 at 300 bps while the token was being sold off (2026-10-10).
+  return swapExactIn(mint, WSOL_MINT, amount, env.JUPITER_EXIT_SLIPPAGE_BPS);
 }
 
 export function jupiterClient() {
