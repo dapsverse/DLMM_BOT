@@ -16,29 +16,24 @@ export interface SwapResult {
 
 async function quote(inputMint: string, outputMint: string, amount: BN): Promise<QuoteResponse> {
   return withRetry(
-    () => jupiter.quoteGet({ inputMint, outputMint, amount: amount.toNumber(), slippageBps: env.SLIPPAGE_BPS }),
+    () => jupiter.quoteGet({ inputMint, outputMint, amount: amount.toNumber(), slippageBps: env.JUPITER_MAX_SLIPPAGE_BPS }),
     { maxRetries: 4, baseDelayMs: 1_000, label: 'jupiter:quote' },
   );
 }
 
 /**
- * Executes a single swap for the given quote and returns the confirmed
- * signature. Rebuilds and re-signs a FRESH swap transaction from Jupiter on
- * every retry attempt, inside the retry closure — not built once and resent.
- * Found live 2026-10-07/08: a VersionedTransaction's blockhash is baked into
- * its compiled message at build time (unlike a legacy Transaction, it can't
- * be patched in place — see sendTx's doc comment in meteoraDLMM.ts for the
- * same class of bug already fixed there). The old version here built +
- * signed the tx ONCE, then retried `sendTransaction` on that SAME object —
- * every retry resent an increasingly stale blockhash, so once the first
- * attempt didn't land in time, every subsequent retry was doomed before it
- * even started. Confirmed this was the dominant cause of nearly every
- * "block height exceeded" / "Blockhash not found" failure seen all session,
- * across both entry swaps and emergency swap-backs.
+ * Executes a swap and returns the confirmed signature. Each retry attempt
+ * fetches a FRESH quote AND rebuilds + re-signs a fresh swap transaction
+ * inside the retry closure. Fresh tx: a VersionedTransaction's blockhash is
+ * baked into its compiled message (found live 2026-10-07/08: resending one
+ * object made every retry doomed). Fresh quote: on a fast-moving memecoin a
+ * stale quote fails again with Jupiter 6001 (slippage exceeded) — seen live
+ * 2026-10-10, 2 of 4 swaps in one session.
  */
-async function executeSwap(quoteResponse: QuoteResponse): Promise<SwapResult> {
-  const signature = await withRetry(
+async function executeSwap(inputMint: string, outputMint: string, amount: BN): Promise<SwapResult> {
+  const { signature, outAmount } = await withRetry(
     async () => {
+      const quoteResponse = await quote(inputMint, outputMint, amount);
       const { swapTransaction } = await jupiter.swapPost({
         swapRequest: {
           quoteResponse,
@@ -59,18 +54,17 @@ async function executeSwap(quoteResponse: QuoteResponse): Promise<SwapResult> {
       if (confirmation.value.err) {
         throw new Error(`swap tx ${sig} failed on-chain: ${JSON.stringify(confirmation.value.err)}`);
       }
-      return sig;
+      return { signature: sig, outAmount: quoteResponse.outAmount };
     },
     { maxRetries: 3, baseDelayMs: 1_500, label: 'jupiter:sendSwapTx' },
   );
 
-  logger.info('[jupiter] swap executed', { signature, outAmount: quoteResponse.outAmount });
-  return { signature, outAmount: quoteResponse.outAmount };
+  logger.info('[jupiter] swap executed', { signature, outAmount });
+  return { signature, outAmount };
 }
 
 export async function swapExactIn(inputMint: string, outputMint: string, amount: BN): Promise<SwapResult> {
-  const q = await quote(inputMint, outputMint, amount);
-  return executeSwap(q);
+  return executeSwap(inputMint, outputMint, amount);
 }
 
 /**

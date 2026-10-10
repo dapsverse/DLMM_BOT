@@ -437,6 +437,10 @@ export const env = {
 
   // Swap / gas
   SLIPPAGE_BPS: num('SLIPPAGE_BPS', 100),
+  // Max slippage tolerance sent to Jupiter on real swaps. Separate from SLIPPAGE_BPS (which feeds the
+  // pre-trade cost estimate): memecoins moving >1% between quote and landing failed with 6001 (2 of 4 swaps
+  // on 2026-10-10), while measured real slippage averaged ~0.008%, so a looser cap costs little.
+  JUPITER_MAX_SLIPPAGE_BPS: num('JUPITER_MAX_SLIPPAGE_BPS', 300),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),
 
   // Logging
