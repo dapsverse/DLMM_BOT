@@ -47,7 +47,7 @@ export function computeEntryPriceContext(c5: Candle[], c1h: Candle[]): EntryPric
   };
 }
 
-async function fetchCandles(pool: string, timeframe: '5m' | '1h', hours: number): Promise<Candle[]> {
+async function fetchCandles(pool: string, timeframe: '5m' | '1h' | '4h', hours: number): Promise<Candle[]> {
   const end = Math.floor(Date.now() / 1000);
   const res = await axios.get(OHLCV_URL(pool), { params: { timeframe, start_time: end - hours * 3600, end_time: end }, timeout: 8000 });
   return (res.data?.data ?? []) as Candle[];
@@ -64,6 +64,28 @@ export async function getEntryPriceContext(pool: string): Promise<EntryPriceCont
     return computeEntryPriceContext(c5, c1h);
   } catch (err) {
     logger.warn('[candleContext] failed, skipping entry price context', { pool, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+}
+
+/** Pure: % the last close sits below the highest high in the window (<= 0). Null if no candles. */
+export function drawdownFromHighPct(candles: Candle[]): number | null {
+  if (candles.length === 0) return null;
+  const high = Math.max(...candles.map((c) => c.high));
+  const last = candles[candles.length - 1]!.close;
+  return high > 0 ? pct(last, high) : null;
+}
+
+/**
+ * Entry GATE input (2026-10-10): how far the price has fallen from its multi-day high (4h candles; Meteora
+ * returns ~85 for 14d). Added after e/acc-SOL (-92% from its 14d high) passed every other filter. Null on
+ * any failure — caller fails closed.
+ */
+export async function getDrawdownFromHighPct(pool: string, days: number): Promise<number | null> {
+  try {
+    return drawdownFromHighPct(await fetchCandles(pool, '4h', days * 24));
+  } catch (err) {
+    logger.warn('[candleContext] drawdown fetch failed', { pool, error: err instanceof Error ? err.message : String(err) });
     return null;
   }
 }

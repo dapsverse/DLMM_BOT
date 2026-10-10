@@ -14,3 +14,12 @@ assert.ok(ctx.higherLow, 'rising lows => higher low');
 assert.ok(ctx.chg15mPct > 0 && ctx.chg1hPct > 0);
 assert.equal(computeEntryPriceContext(c5.slice(0, 5), c1h), null, 'too little data => null');
 console.log('OK: entry price context metrics + null on thin data');
+
+// drawdownFromHighPct: -92% case (e/acc-SOL 2026-10-10), healthy case, empty input.
+{
+  const { drawdownFromHighPct } = await import('../services/candleContext.js');
+  const c = (high: number, close: number) => ({ timestamp: 0, open: close, high, low: close, close });
+  assert.strictEqual(drawdownFromHighPct([c(100, 90), c(23, 8)]), -92);
+  assert.strictEqual(drawdownFromHighPct([c(100, 90), c(100, 80)]), -20);
+  assert.strictEqual(drawdownFromHighPct([]), null);
+}

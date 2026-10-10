@@ -18,7 +18,7 @@ import {
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
-import { getEntryPriceContext } from './services/candleContext.js';
+import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { logger } from './utils/logger.js';
 
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
@@ -121,6 +121,17 @@ async function tryEnterPool(): Promise<void> {
     if (missing.length > 0) {
       logger.warn(`[index] skipping pool ${candidate.address} — entry data incomplete (fail-closed)`, { missing });
       continue;
+    }
+    if (env.MAX_DRAWDOWN_FROM_HIGH_PCT > 0) {
+      const drawdownPct = await getDrawdownFromHighPct(candidate.address, env.DRAWDOWN_WINDOW_DAYS);
+      if (drawdownPct === null) {
+        logger.warn(`[index] skipping pool ${candidate.address} — drawdown-from-high unavailable (fail-closed)`);
+        continue;
+      }
+      if (drawdownPct < -env.MAX_DRAWDOWN_FROM_HIGH_PCT) {
+        logger.info(`[index] skipping pool ${candidate.address} — ${drawdownPct}% below its ${env.DRAWDOWN_WINDOW_DAYS}d high (max ${env.MAX_DRAWDOWN_FROM_HIGH_PCT}%)`);
+        continue;
+      }
     }
     const dollarFlow = await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd);
     if (dollarFlow === null) {

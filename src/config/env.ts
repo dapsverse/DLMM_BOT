@@ -440,6 +440,10 @@ export const env = {
   // Max slippage tolerance sent to Jupiter on real swaps. Separate from SLIPPAGE_BPS (which feeds the
   // pre-trade cost estimate): memecoins moving >1% between quote and landing failed with 6001 (2 of 4 swaps
   // on 2026-10-10), while measured real slippage averaged ~0.008%, so a looser cap costs little.
+  // Entry gate: reject a pool whose price is more than this % below its high of the last DRAWDOWN_WINDOW_DAYS
+  // (e/acc-SOL entered 2026-10-10 at -92% from a 14d high). 0 disables. Untuned: observed BATON -25%, QI -37%, e/acc -92%.
+  MAX_DRAWDOWN_FROM_HIGH_PCT: num('MAX_DRAWDOWN_FROM_HIGH_PCT', 60),
+  DRAWDOWN_WINDOW_DAYS: num('DRAWDOWN_WINDOW_DAYS', 14),
   JUPITER_MAX_SLIPPAGE_BPS: num('JUPITER_MAX_SLIPPAGE_BPS', 300),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),
 
