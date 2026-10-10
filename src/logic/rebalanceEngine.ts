@@ -574,10 +574,11 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promis
   return nextCapital;
 }
 
-/** Records this exit's price against the chase guard (see ScannerConfig.chaseGuardPools) — best-effort, a failed price lookup just skips arming the guard rather than blocking the exit. */
+/** Records this exit's price against the chase guard (see ScannerConfig.chaseGuardPools) — also logs the exit price (null = pool outside the top-200 window); best-effort, a failed price lookup just skips arming the guard rather than blocking the exit. */
 async function recordExitForChaseGuard(ctx: PoolContext, chaseGuardPools: Map<string, number>): Promise<void> {
   const mint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
   const exitPriceUsd = await getCurrentPriceUsd(ctx.poolAddress);
+  logger.info('[rebalanceEngine] exit price', { pool: ctx.poolAddress, mint, exitPriceUsd });
   if (exitPriceUsd !== null) recordChaseGuardExit(chaseGuardPools, mint, exitPriceUsd);
 }
 
