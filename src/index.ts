@@ -1,5 +1,5 @@
 import { env } from './config/env.js';
-import { getWalletPubkey, getWalletSolBalance } from './services/solana.js';
+import { getWalletPubkey, getWalletSolBalance, getTokenBalance } from './services/solana.js';
 import { scanPools, defaultScannerConfig, getVolume1hUsd, scanForBetterOpportunity, volumeSpikeRatio, getSolPriceUsd, missingEntryData } from './services/meteoraScanner.js';
 import { openPool, getUserPositions } from './services/meteoraDLMM.js';
 import {
@@ -16,7 +16,7 @@ import {
   type PoolContext,
 } from './logic/rebalanceEngine.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
-import { WSOL_MINT } from './services/jupiterSwap.js';
+import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
 import { getEntryPriceContext } from './services/candleContext.js';
 import { logger } from './utils/logger.js';
@@ -30,6 +30,8 @@ for (const addr of (process.env.BOOT_BLACKLIST_POOLS ?? '').split(',').map((a) =
   blacklistPools.set(addr, Date.now() + env.BLACKLIST_DURATION_MS);
 }
 let currentPool: PoolContext | null = null;
+// Non-SOL mint of the last pool we entered; used by the flat kill-switch to liquidate leftovers.
+let lastOtherMint: string | null = null;
 let currentCapitalSol = env.INITIAL_LP_CAPITAL_SOL;
 let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
@@ -75,7 +77,21 @@ async function reconcilePoolStateAfterFailure(ctx: PoolContext): Promise<PoolCon
 
 async function tryEnterPool(): Promise<void> {
   if (env.MIN_EQUITY_STOP_SOL > 0) {
-    const equitySol = await getWalletSolBalance();
+    let equitySol = await getWalletSolBalance();
+    if (equitySol < env.MIN_EQUITY_STOP_SOL && lastOtherMint) {
+      // SOL-only equity undercounts a token left behind by a failed close/reopen (BATON, 2026-10-09:
+      // 0.635 read vs ~1.18 real). Liquidate it first, then re-read before deciding to stop.
+      try {
+        const stuck = await getTokenBalance(lastOtherMint);
+        if (stuck.gtn(0)) {
+          logger.warn('[index] equity below stop with a leftover token — swapping to SOL before deciding', { mint: lastOtherMint, equitySol });
+          await emergencySwapAllToSol(lastOtherMint, stuck);
+          equitySol = await getWalletSolBalance();
+        }
+      } catch (err) {
+        logger.error('[index] leftover-token liquidation failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     if (equitySol < env.MIN_EQUITY_STOP_SOL) {
       logger.error('[index] equity below MIN_EQUITY_STOP_SOL while flat — stopping, no new entries', { equitySol, stopAt: env.MIN_EQUITY_STOP_SOL });
       process.exit(0);
@@ -124,6 +140,7 @@ async function tryEnterPool(): Promise<void> {
     const priceContext = await getEntryPriceContext(candidate.address); // observability only, never gates entry
     try {
       const pool = await openPool(candidate.address);
+      lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
       currentPool = await openInitialPosition(
         pool,
         candidate.address,
@@ -380,6 +397,7 @@ async function tick(): Promise<void> {
       if (xIsSol || yIsSol) {
         try {
           const newPool = await openPool(candidate.address);
+          lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
           currentPool = await openInitialPosition(newPool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y);
           currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
           currentPool.volume1hBaselineSetAtMs = Date.now();

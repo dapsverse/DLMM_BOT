@@ -78,6 +78,7 @@ export interface LbPosition {
 }
 
 export interface DlmmPool {
+  refetchStates(): Promise<void>;
   getActiveBin(): Promise<BinLiquidity>;
   getPositionsByUserAndLbPair(
     userPubKey?: PublicKey,
@@ -228,6 +229,10 @@ export async function openPosition(params: OpenPositionParams): Promise<OpenPosi
   return withRetry(
     async () => {
       const positionKeypair = Keypair.generate();
+      // The SDK builds the deposit ix from its CACHED lbPair.activeId (3-bin slippage window);
+      // getActiveBin() reads fresh but never updates that cache. Without a refetch every retry
+      // sends the same stale activeId -> ExceededBinSlippageTolerance (0x1774) once price moved.
+      await pool.refetchStates();
       const activeBin = await getActiveBin(pool);
       const minBinId = activeBin.binId - binRadius;
       const maxBinId = activeBin.binId + binRadius;

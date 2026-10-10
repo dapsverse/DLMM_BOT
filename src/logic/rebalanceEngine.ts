@@ -350,7 +350,29 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   // its doc comment: reusing a bin range computed once outside the retry
   // loop is what caused repeated ExceededBinSlippageTolerance failures
   // during fast price moves (confirmed live 2026-10-07, DARK-SOL).
-  const result = await openPosition({ pool: ctx.pool, totalXAmount: depositX, totalYAmount: depositY, binRadius: radius });
+  let result;
+  try {
+    result = await openPosition({ pool: ctx.pool, totalXAmount: depositX, totalYAmount: depositY, binRadius: radius });
+  } catch (err) {
+    // The old position is already closed and balanceTokenRatio already swapped ~half into the
+    // token: without this rollback that token sits in the wallet untracked (live 2026-10-09,
+    // BATON-SOL, ~0.6 SOL stuck, kill-switch tripped). Same pattern as openInitialPosition.
+    const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+    logger.error('[rebalanceEngine] reopen failed after rebalance swap — swapping token balance back to SOL', {
+      pool: ctx.poolAddress,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    try {
+      const stuck = await getTokenBalance(otherMint);
+      if (stuck.gtn(0)) await emergencySwapAllToSol(otherMint, stuck);
+    } catch (swapBackErr) {
+      logger.error('[rebalanceEngine] reopen rollback swap-back ALSO failed — token stuck in wallet', {
+        otherMint,
+        error: swapBackErr instanceof Error ? swapBackErr.message : String(swapBackErr),
+      });
+    }
+    throw err;
+  }
 
   const now = Date.now();
   ctx.rebalanceTimestamps.push(now);
