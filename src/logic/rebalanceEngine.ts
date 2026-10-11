@@ -296,6 +296,30 @@ export function reserveGasFromSolSide(balX: BN, balY: BN, xIsSol: boolean): { de
   const depositY = xIsSol ? balY : BN.max(balY.sub(reserveLamports), new BN(0));
   return { depositX, depositY };
 }
+/**
+ * Caps the SOL-side deposit at `maxSolLamports`. openInitialPosition used to deposit the WHOLE wallet SOL
+ * (minus reserve) while ctx.initialDepositSol was only `capitalSol` — after a restart with a bigger wallet the
+ * basis (stop-loss %, take-profit tiers, profit %) was understated vs the real deposit (2QxYG3, 2026-10-11:
+ * basis 1.0 vs ~1.236 deposited). Pure, exported for a self-check.
+ */
+export function capSolDeposit(depositX: BN, depositY: BN, xIsSol: boolean, maxSolLamports: BN): { depositX: BN; depositY: BN } {
+  const cap = BN.max(maxSolLamports, new BN(0));
+  return { depositX: xIsSol ? BN.min(depositX, cap) : depositX, depositY: xIsSol ? depositY : BN.min(depositY, cap) };
+}
+
+/**
+ * SOL that entered the position from OUTSIDE it during a compound (idle wallet SOL, a top-up) — everything
+ * deployed beyond what the closed position was worth. Added to the deposit basis so profit/stop-loss keep
+ * measuring the position's own performance. Returns 0 within a noise band (friction, price move between
+ * the two reads). `spendableSol` is wallet SOL minus the gas reserve; the position rent that the reopen
+ * will pay on top is subtracted here. Pure, exported for a self-check.
+ */
+export function externalCapitalSol(spendableSol: number, otherValueSol: number, preCloseTotalSol: number): number {
+  const deployable = spendableSol - POSITION_RENT_BUFFER_SOL + otherValueSol;
+  const ext = deployable - preCloseTotalSol;
+  return ext > 0.03 + 0.02 * preCloseTotalSol ? ext : 0;
+}
+
 export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConfig, currentProfitPct = 0): Promise<PoolContext | null> {
   const [position] = await getUserPositions(ctx.pool);
   if (!position) throw new Error(`[rebalanceEngine] no open position found for pool ${ctx.poolAddress}`);
@@ -315,6 +339,7 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   const feeOtherRaw = new BN(ctx.xIsSol ? feeY : feeX);
   const expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(feeOtherRaw);
 
+  const preClose = await getPositionHealthSnapshot(ctx); // for the external-capital check after the close
   logger.info('[rebalanceEngine] closing position for compound cycle', { pool: ctx.poolAddress });
   await closePositionFull(ctx.pool, position);
 
@@ -379,6 +404,16 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
     otherAmount: otherAmount.toString(),
     otherValueSolEstimate: otherValueSol,
   });
+
+  const externalSol = externalCapitalSol(Number(spendableSolLamports.toString()) / LAMPORTS_PER_SOL, otherValueSol, preClose.currentValueSol + preClose.unclaimedFeesSol);
+  if (externalSol > 0) {
+    logger.warn('[rebalanceEngine] capital beyond the closed position is being deployed (idle wallet SOL / top-up) — raising deposit basis', {
+      pool: ctx.poolAddress,
+      externalSol,
+      basisBefore: ctx.initialDepositSol,
+    });
+    ctx.initialDepositSol += externalSol;
+  }
 
   await balanceTokenRatio({
     mintX: ctx.mintX,
@@ -491,7 +526,10 @@ export async function openInitialPosition(
   // confirmed live: it tried to deposit the ENTIRE wallet SOL balance,
   // leaving nothing for rent/fees, and failed simulation with "insufficient
   // lamports". See reserveGasFromSolSide's doc comment.
-  const { depositX, depositY } = reserveGasFromSolSide(balX, balY, xIsSol);
+  const reserved = reserveGasFromSolSide(balX, balY, xIsSol);
+  // Deposit only the SOL that belongs to this entry (capital minus what was swapped into the token), not the whole wallet.
+  const capped = capSolDeposit(reserved.depositX, reserved.depositY, xIsSol, new BN(Math.round(capitalSol * LAMPORTS_PER_SOL)).sub(tokenShareLamports));
+  const { depositX, depositY } = capped;
 
   const ctx: PoolContext = {
     poolAddress,
