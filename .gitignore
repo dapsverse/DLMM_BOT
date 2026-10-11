@@ -7,3 +7,4 @@ logs/
 .DS_Store
 moonbot/data/
 moonbot/data_new/
+moonbot/data_old/

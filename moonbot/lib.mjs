@@ -9,9 +9,11 @@ export function loadPools(minLen = 72) {
   for (const p of raw) {
     const byTs = new Map(p.candles.map((c) => [c[0], c]));
     const t0 = p.candles[0][0], lastTs = p.candles[p.candles.length - 1][0];
-    const dead = globalEnd - lastTs > 12 * 3600;
+    const perPool = !!process.env.PERPOOL; // data_old: each pool has its own fixed span, don't extend to a global end
+    const poolEnd = perPool ? lastTs : globalEnd;
+    const dead = !perPool && globalEnd - lastTs > 12 * 3600;
     const grid = []; let prev = p.candles[0][1];
-    for (let t = t0; t <= globalEnd; t += 3600) {
+    for (let t = t0; t <= poolEnd; t += 3600) {
       const c = byTs.get(t);
       if (c) { grid.push(c); prev = c[4]; } else grid.push([t, prev, prev, prev, prev, 0]);
     }
