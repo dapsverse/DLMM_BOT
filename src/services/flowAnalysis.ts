@@ -105,7 +105,7 @@ export async function getDollarVolumeBuyRatio(
   reserveSolAccount: string,
   solPriceUsd: number,
   windowMs = 60 * 60_000,
-  maxTx = 300,
+  maxTx = env.DOLLAR_FLOW_MAX_TX,
 ): Promise<DollarFlowResult | null> {
   try {
     const pubkey = new PublicKey(reserveSolAccount);

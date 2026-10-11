@@ -285,6 +285,8 @@ export const env = {
   // the price later recovered above the exit (+14% / +60%); the one correct
   // exit (BATON) had 55 samples. So: stricter ratio, a real sample/volume
   // floor, and N consecutive qualified breaches before acting.
+  // Max transactions sampled per dollar-flow reading. 300 triggered Helius 429 bursts (55 in 50 min, 2026-10-11); 150 still clears the exit gate (>=25 samples).
+  DOLLAR_FLOW_MAX_TX: num('DOLLAR_FLOW_MAX_TX', 150),
   DOLLAR_FLOW_EXIT_MIN_RATIO: num('DOLLAR_FLOW_EXIT_MIN_RATIO', 0.25),
   DOLLAR_FLOW_EXIT_MIN_SAMPLES: num('DOLLAR_FLOW_EXIT_MIN_SAMPLES', 25),
   DOLLAR_FLOW_EXIT_MIN_VOLUME_USD: num('DOLLAR_FLOW_EXIT_MIN_VOLUME_USD', 2000),
