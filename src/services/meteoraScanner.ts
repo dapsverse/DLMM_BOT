@@ -230,6 +230,8 @@ export interface ScannerConfig {
   trendMinSustainedPct: number;
   /** Ceiling on |1h| and |6h| price change for 'range' entryStrategyMode — unlike every other sizing check, NOT skipped on re-screen (see RANGE_MAX_VOLATILITY_PCT, env.ts): a held range-bound position that starts trending broke its own investment thesis. */
   rangeMaxVolatilityPct: number;
+  /** ENTRY-ONLY ceiling on |6h change| for 'range' mode (skipped on re-screen of a held position, unlike rangeMaxVolatilityPct). moonbot/skewsim.mjs: entries after a calm 6h did far better than after a big 6h move. Optional so existing test configs keep their behaviour. */
+  rangeEntryMax6hChangePct?: number;
   /** Entry-only absolute TVL floor for 'range' entryStrategyMode — see RANGE_MIN_TVL_USD (env.ts). Distinct from maxCapitalTvlRatioPct: that one protects against OUR trade moving a thin pool's price, this one protects against picking an inherently fragile pool regardless of our own capital size. */
   rangeMinTvlUsd: number;
   /** Entry-only floor on pool_config.base_fee_pct for 'range' entryStrategyMode — see RANGE_MIN_BASE_FEE_PCT (env.ts). A backstop against stable-pair-style fee tiers, not the primary yield-quality signal (that's rankRangeCandidates sorting on feeTvlRatio24h). */
@@ -722,6 +724,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     if (config.entryStrategyMode === 'range') {
       if (Math.abs(pair.priceChange1hPct ?? Infinity) > config.rangeMaxVolatilityPct) return false;
       if (Math.abs(pair.priceChange6hPct ?? Infinity) > config.rangeMaxVolatilityPct) return false;
+      if (!opts.skipSizingChecks && config.rangeEntryMax6hChangePct !== undefined && Math.abs(pair.priceChange6hPct ?? Infinity) > config.rangeEntryMax6hChangePct) return false;
     }
 
     // 'range' mode's base-fee-rate floor — see RANGE_MIN_BASE_FEE_PCT
@@ -997,6 +1000,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
     if (Math.abs(pair.priceChange6hPct ?? Infinity) > config.rangeMaxVolatilityPct) {
       reasons.push(`6h |change| ${pair.priceChange6hPct?.toFixed(2) ?? 'unknown'}% > range ceiling ${config.rangeMaxVolatilityPct}% - no longer range-bound`);
     }
+    if (!opts.skipSizingChecks && config.rangeEntryMax6hChangePct !== undefined && Math.abs(pair.priceChange6hPct ?? Infinity) > config.rangeEntryMax6hChangePct) {
+      reasons.push(`6h |change| ${pair.priceChange6hPct?.toFixed(2) ?? 'unknown'}% > range ENTRY ceiling ${config.rangeEntryMax6hChangePct}% (entry-only)`);
+    }
   }
   if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && pair.baseFeePct < config.rangeMinBaseFeePct) {
     reasons.push(`base fee ${pair.baseFeePct}% < range mode floor ${config.rangeMinBaseFeePct}%`);
@@ -1069,6 +1075,7 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>, chaseG
     entryStrategyMode: env.ENTRY_STRATEGY_MODE,
     trendMinSustainedPct: env.TREND_MIN_SUSTAINED_PCT,
     rangeMaxVolatilityPct: env.RANGE_MAX_VOLATILITY_PCT,
+    rangeEntryMax6hChangePct: env.RANGE_ENTRY_MAX_6H_CHANGE_PCT,
     rangeMinTvlUsd: env.RANGE_MIN_TVL_USD,
     rangeMinBaseFeePct: env.RANGE_MIN_BASE_FEE_PCT,
     rangeMinRecentFeeTvlPct: env.RANGE_MIN_RECENT_FEE_TVL_PCT,

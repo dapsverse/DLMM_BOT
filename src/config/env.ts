@@ -149,6 +149,9 @@ export const env = {
   // the range-mode paper-trade instance (DLMM-only, spot execution
   // deliberately not paired with this mode) exists to validate.
   RANGE_MAX_VOLATILITY_PCT: num('RANGE_MAX_VOLATILITY_PCT', 15),
+  // ENTRY-ONLY ceiling on |6h change| for 'range' mode (re-screen of a held position keeps RANGE_MAX_VOLATILITY_PCT). Default 15 = no extra restriction.
+  // moonbot/skewsim.mjs (5m candles, fee yield>=2%/d, 24h horizon): |6h|<=5% -12.1% vs -18.4% at 15% (46% of entry moments kept); untuned, small buckets.
+  RANGE_ENTRY_MAX_6H_CHANGE_PCT: num('RANGE_ENTRY_MAX_6H_CHANGE_PCT', 15),
 
   // Absolute (not capital-relative) TVL floor for 'range' mode entries only.
   // MAX_CAPITAL_TVL_RATIO_PCT already protects against OUR OWN trade moving
