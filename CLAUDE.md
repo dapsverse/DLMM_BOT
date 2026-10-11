@@ -1339,6 +1339,14 @@ Real-money run continued (wallet HvXAEv…, `range` mode, capital 1 SOL, kill-sw
   rebalance (`openInitialPosition` swaps that share of capital; `balanceTokenRatio` uses pure `planRatioSwap`, self-check `checkRatioPlan.ts`). From `moonbot/skewsim.mjs`:
   less token lost less (-17.5% at 35 vs -18.5% at 50 vs -21.8% at 100 per 24h, yield>=2% pools, 31 tokens, untuned). Unbalanced SDK deposits (skewed, SOL-only,
   token-only) were verified with `simulateTransaction` against a real pool (no tx sent). Also `DOLLAR_FLOW_MAX_TX` 150 (was 300) to cut Helius 429 bursts.
+- **Boot recovery / state persistence (adb4a74, 2026-10-11):** `src/services/stateStore.ts` (atomic `state/live-state.json`, gitignored, validated, wallet-bound),
+  `src/logic/bootRecovery.ts` (`recoverOnBoot`: on-chain positions via `getAllLbPairPositionsByUser` are the source of truth; 0 -> flat, 1 -> resume from state or rebuild
+  from chain via `rebuildContextFromChain`, >1 -> refuse to trade), `index.ts` persists every loop and brackets irreversible ops with an `inFlight` flag (`guarded`);
+  a boot after an interrupted op swaps the stranded token leg to SOL. The liquid-SOL sufficiency check now runs only in the flat case. `state/` and `.bad` quarantine files
+  are never committed. Read-only check: `npx tsx src/scripts/dryBootRecovery.ts`; self-check `checkStateStore.ts`. Rebuilt-from-chain contexts approximate the deposit basis (current
+  value + fees) and reset peak profit. **Found while building it:** `openInitialPosition` swaps `capitalSol/2` but then deposits the WHOLE wallet SOL minus reserve, while
+  `ctx.initialDepositSol = capitalSol` (INITIAL_LP_CAPITAL_SOL after a restart) — so after a restart with a bigger wallet the first position's basis, profit % and stop-loss are
+  understated vs the real deposit (2QxYG3: basis 1.0 vs ~1.236 real). Not fixed yet (decision pending); the 2QxYG3 state was seeded by hand with basis 1.2359.
 - Dollar-flow exits are still logged as TAKE_PROFIT (cosmetic). Unguarded `waitForTokenBalance` throw before the rollback block in `openInitialPosition` still open.
 
 **Observed behaviour worth remembering:**
