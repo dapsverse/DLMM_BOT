@@ -187,6 +187,10 @@ export const env = {
   // Entry-only (see FilterOpts.skipSizingChecks), same reasoning as
   // RANGE_MIN_TVL_USD above.
   RANGE_MIN_BASE_FEE_PCT: num('RANGE_MIN_BASE_FEE_PCT', 0.2),
+  // Entry-only CAP on base fee (0 = off). 2026-10-12: wallet-vs-Meteora accounting showed swap friction
+  // rising with base fee (1.2% / 2.0% / 3.7% of deposit for <=0.5 / 0.8-2 / >=3%); SWOLF (3%) lost 16% vs -8% on the UI.
+  // Weak evidence (3 tokens in the top band) - user chose 2 on purpose.
+  RANGE_MAX_BASE_FEE_PCT: num('RANGE_MAX_BASE_FEE_PCT', 0),
   // Entry-only floor on recent fee yield (fee_tvl_ratio 4h x6, in % per 24h
   // equivalent). 2026-10-09: EMBER-SOL ranked on a front-loaded 24h 2.6% but
   // its 4h x6 was 0.37% (volume had decayed ~6x), so fees accrued ~0.11%/h.

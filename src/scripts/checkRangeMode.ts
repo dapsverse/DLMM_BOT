@@ -91,6 +91,16 @@ assert(
   poolRejectReasons(lowFeeTier, rangeConfig, { skipSizingChecks: false }).some((r) => r.includes('base fee')),
   'expected a pool below RANGE_MIN_BASE_FEE_PCT to be rejected by range mode entry',
 );
+// RANGE_MAX_BASE_FEE_PCT cap: high-fee pools rejected on entry only, exactly-at-cap passes, 0 = off.
+{
+  const capped = { ...rangeConfig, rangeMaxBaseFeePct: 2 };
+  const high = healthyPair({ baseFeePct: 3 });
+  const atCap = healthyPair({ baseFeePct: 2 });
+  assert(poolRejectReasons(high, capped, { skipSizingChecks: false }).some((r) => r.includes('cap')), 'expected 3% base fee rejected by a 2% cap');
+  assert(!poolRejectReasons(atCap, capped, { skipSizingChecks: false }).some((r) => r.includes('cap')), 'expected 2% base fee to pass a 2% cap');
+  assert(!poolRejectReasons(high, capped, { skipSizingChecks: true }).some((r) => r.includes('cap')), 'cap is entry-only');
+  assert(!poolRejectReasons(high, { ...rangeConfig, rangeMaxBaseFeePct: 0 }, { skipSizingChecks: false }).some((r) => r.includes('cap')), '0 disables the cap');
+}
 // Entry-only, same as RANGE_MIN_TVL_USD — a held position isn't abandoned just because this check would newly reject it on re-screen.
 assert(
   !poolRejectReasons(lowFeeTier, rangeConfig, { skipSizingChecks: true }).some((r) => r.includes('base fee')),

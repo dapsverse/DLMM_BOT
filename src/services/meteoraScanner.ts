@@ -236,6 +236,8 @@ export interface ScannerConfig {
   rangeMinTvlUsd: number;
   /** Entry-only floor on pool_config.base_fee_pct for 'range' entryStrategyMode — see RANGE_MIN_BASE_FEE_PCT (env.ts). A backstop against stable-pair-style fee tiers, not the primary yield-quality signal (that's rankRangeCandidates sorting on feeTvlRatio24h). */
   rangeMinBaseFeePct: number;
+  /** Entry-only cap on base fee for 'range' mode, 0/undefined = off — see RANGE_MAX_BASE_FEE_PCT (env.ts). */
+  rangeMaxBaseFeePct?: number;
   /** Entry-only floor on the 4h fee/TVL ratio scaled to 24h (x6) for 'range' mode — see RANGE_MIN_RECENT_FEE_TVL_PCT (env.ts). Fails closed when the 4h ratio is missing. */
   rangeMinRecentFeeTvlPct: number;
   /**
@@ -731,6 +733,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // (env.ts). Entry-only backstop, not the primary yield signal (that's
     // rankRangeCandidates's feeTvlRatio24h sort below).
     if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && pair.baseFeePct < config.rangeMinBaseFeePct) return false;
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && config.rangeMaxBaseFeePct && pair.baseFeePct > config.rangeMaxBaseFeePct) return false;
     if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && recentFeeTvl24hEq(pair) < config.rangeMinRecentFeeTvlPct) return false;
 
     return true;
@@ -1007,6 +1010,9 @@ export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts
   if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && pair.baseFeePct < config.rangeMinBaseFeePct) {
     reasons.push(`base fee ${pair.baseFeePct}% < range mode floor ${config.rangeMinBaseFeePct}%`);
   }
+  if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && config.rangeMaxBaseFeePct && pair.baseFeePct > config.rangeMaxBaseFeePct) {
+    reasons.push(`base fee ${pair.baseFeePct}% > range mode cap ${config.rangeMaxBaseFeePct}%`);
+  }
   if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && recentFeeTvl24hEq(pair) < config.rangeMinRecentFeeTvlPct) {
     reasons.push(`recent fee yield (4h x6) ${recentFeeTvl24hEq(pair).toFixed(3)}% < range mode floor ${config.rangeMinRecentFeeTvlPct}% - volume has decayed`);
   }
@@ -1078,6 +1084,7 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>, chaseG
     rangeEntryMax6hChangePct: env.RANGE_ENTRY_MAX_6H_CHANGE_PCT,
     rangeMinTvlUsd: env.RANGE_MIN_TVL_USD,
     rangeMinBaseFeePct: env.RANGE_MIN_BASE_FEE_PCT,
+    rangeMaxBaseFeePct: env.RANGE_MAX_BASE_FEE_PCT,
     rangeMinRecentFeeTvlPct: env.RANGE_MIN_RECENT_FEE_TVL_PCT,
     maxCapitalTvlRatioPct: env.MAX_CAPITAL_TVL_RATIO_PCT,
     blacklistPools,
