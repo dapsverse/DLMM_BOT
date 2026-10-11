@@ -78,6 +78,8 @@ export interface LbPosition {
 }
 
 export interface DlmmPool {
+  /** Raw on-chain pair state (mints, reserve accounts, bin step) — used to rebuild a PoolContext on boot. */
+  lbPair: { tokenXMint: PublicKey; tokenYMint: PublicKey; reserveX: PublicKey; reserveY: PublicKey; binStep: number };
   refetchStates(): Promise<void>;
   getActiveBin(): Promise<BinLiquidity>;
   getPositionsByUserAndLbPair(
@@ -105,6 +107,7 @@ export interface DlmmPool {
 
 interface DlmmStatic {
   create(connection: import('@solana/web3.js').Connection, dlmmAddress: PublicKey): Promise<DlmmPool>;
+  getAllLbPairPositionsByUser(connection: import('@solana/web3.js').Connection, userPubKey: PublicKey): Promise<Map<string, unknown>>;
 }
 
 const DLMM = DLMMPkg as unknown as DlmmStatic;
@@ -183,6 +186,12 @@ async function sendTx(tx: Transaction, extraSigners: Keypair[] = [], label = 'tx
 
 export async function openPool(poolAddress: string): Promise<DlmmPool> {
   return DLMM.create(connection, new PublicKey(poolAddress));
+}
+
+/** Addresses of every pool where this wallet holds an open position (one program-account scan; boot-time only). */
+export async function getAllPositionPoolAddresses(): Promise<string[]> {
+  const map = await withRetry(() => DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey), { maxRetries: 3, baseDelayMs: 2_000, label: 'getAllLbPairPositionsByUser' });
+  return [...map.keys()];
 }
 
 export async function getActiveBin(pool: DlmmPool): Promise<BinLiquidity> {

@@ -48,3 +48,14 @@ for (const s of [0, 0.2, 0.35, 0.5, 0.65, 0.8, 1]) {
   const dn = rs.filter((r) => r.up < -0.05), upw = rs.filter((r) => r.up > 0.05), flat = rs.filter((r) => Math.abs(r.up) <= 0.05);
   console.log(`token share ${String(s * 100).padStart(3)}%  mean ${pct(mean(rs.map((r) => r.net)), 2).padStart(7)} med ${pct(q(rs.map((r) => r.net), .5), 2).padStart(7)} p10 ${pct(q(rs.map((r) => r.net), .1)).padStart(6)} fees ${pct(mean(rs.map((r) => r.fees)), 1).padStart(5)} | when price fell>5% (n=${dn.length}) ${pct(mean(dn.map((r) => r.net)), 1)} | rose>5% (n=${upw.length}) ${pct(mean(upw.map((r) => r.net)), 1)} | flat (n=${flat.length}) ${pct(mean(flat.map((r) => r.net)), 1)}`);
 }
+
+// ---- by trailing 1h momentum at entry (known at entry time, no look-ahead) ----
+console.log('\nBY TRAILING 1h MOMENTUM at entry (net mean per token share):');
+const grp = { 'up >+1%': (r) => r > 0.01, 'flat': (r) => Math.abs(r) <= 0.01, 'down <-1%': (r) => r < -0.01 };
+for (const [name, f] of Object.entries(grp)) {
+  const sub = W.filter((w) => f(w.p.c[w.i][4] / w.p.c[w.i - 12][4] - 1));
+  const line = [0, 0.2, 0.35, 0.5, 0.65, 0.8].map((sh) => `${sh * 100}%:${pct(mean(sub.map((w) => run(w.p.c, w.i, sh, Cof(w.p)).net)), 1)}`).join('  ');
+  console.log(name.padEnd(10), 'n=' + String(sub.length).padStart(3), line);
+}
+// pure geometry: gain from the extra token share when price rises through the +-R ask range
+console.log('\nGEOMETRY: price rises exactly R through the ask range: extra gain per +10pt token share ~', pct(0.1 * R / 2, 2), 'of capital; if price falls 20% below entry: extra loss per +10pt token share ~', pct(0.1 * (0.2 - R / 2), 2));

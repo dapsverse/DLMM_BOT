@@ -19,6 +19,9 @@ import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './l
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
+import { recoverOnBoot } from './logic/bootRecovery.js';
+import { positionToPersisted } from './logic/rebalanceEngine.js';
+import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
 
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
@@ -37,6 +40,36 @@ let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
 let lastDollarFlowCheckAtMs = 0;
 let dollarFlowBreach = { pool: '', count: 0 };
+// true while an irreversible multi-step operation (close/rebalance/entry) runs; persisted so a restart can tell an interrupted op from a clean state.
+let inFlight = false;
+
+/** Writes the bookkeeping the chain can't provide (see services/stateStore.ts). Best-effort, never throws. */
+function persist(): void {
+  saveState({
+    version: STATE_VERSION,
+    savedAtMs: Date.now(),
+    wallet: getWalletPubkey().toBase58(),
+    position: currentPool ? positionToPersisted(currentPool) : null,
+    inFlight,
+    currentCapitalSol,
+    lastOtherMint,
+    lastSwitchAtMs,
+    blacklist: [...blacklistPools.entries()],
+    chaseGuard: [...chaseGuardPools.entries()],
+    dollarFlowBreach,
+  });
+}
+
+/** Marks the state "in flight" (written BEFORE the op) around an irreversible step; cleared by the persist() that follows. */
+async function guarded<T>(fn: () => Promise<T>): Promise<T> {
+  inFlight = true;
+  persist();
+  try {
+    return await fn();
+  } finally {
+    inFlight = false;
+  }
+}
 
 /**
  * Found live 2026-10-07/08 (twice, via two different call sites): every
@@ -152,15 +185,17 @@ async function tryEnterPool(): Promise<void> {
     try {
       const pool = await openPool(candidate.address);
       lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
-      currentPool = await openInitialPosition(
-        pool,
-        candidate.address,
-        candidate.mint_x,
-        candidate.mint_y,
-        xIsSol,
-        currentCapitalSol,
-        candidate.bin_step,
-        xIsSol ? candidate.reserve_x : candidate.reserve_y,
+      currentPool = await guarded(() =>
+        openInitialPosition(
+          pool,
+          candidate.address,
+          candidate.mint_x,
+          candidate.mint_y,
+          xIsSol,
+          currentCapitalSol,
+          candidate.bin_step,
+          xIsSol ? candidate.reserve_x : candidate.reserve_y,
+        ),
       );
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
       currentPool.volume1hBaselineSetAtMs = Date.now();
@@ -240,7 +275,7 @@ async function tick(): Promise<void> {
 
   if (decision === 'HARD_EXIT') {
     try {
-      currentCapitalSol = await executeHardExit(ctx, blacklistPools, chaseGuardPools);
+      currentCapitalSol = await guarded(() => executeHardExit(ctx, blacklistPools, chaseGuardPools));
       currentPool = null;
     } catch (err) {
       logger.error('[index] executeHardExit threw, reconciling state', {
@@ -254,7 +289,7 @@ async function tick(): Promise<void> {
 
   if (decision === 'TAKE_PROFIT') {
     try {
-      currentCapitalSol = await executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools);
+      currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools));
       currentPool = null;
     } catch (err) {
       logger.error('[index] executeCleanExit (TAKE_PROFIT) threw, reconciling state', {
@@ -281,7 +316,7 @@ async function tick(): Promise<void> {
     // doesn't (capital converted to SOL, no reopen) — next tick's
     // tryEnterPool() picks up from there.
     try {
-      currentPool = await compoundCycle(ctx, defaultScannerConfig(blacklistPools, chaseGuardPools), currentProfitPct);
+      currentPool = await guarded(() => compoundCycle(ctx, defaultScannerConfig(blacklistPools, chaseGuardPools), currentProfitPct));
       if (!currentPool) {
         const solBalance = await getWalletSolBalance();
         currentCapitalSol = Math.max(solBalance - computeGasReserveSol(solBalance), 0);
@@ -339,7 +374,7 @@ async function tick(): Promise<void> {
           txSampled: dollarFlow.txSampled,
         });
         try {
-          currentCapitalSol = await executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools);
+          currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools));
           // Short cooldown, not the long HARD_EXIT blacklist — same
           // reasoning as compoundCycle's "no longer eligible" abandon path:
           // this isn't a stop-loss/risk violation on the position itself,
@@ -394,7 +429,7 @@ async function tick(): Promise<void> {
     if (switchEval.shouldSwitch && scanResult.candidate) {
       const candidate = scanResult.candidate;
       try {
-        currentCapitalSol = await executeCleanExit(ctx, 'SWITCH', chaseGuardPools);
+        currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'SWITCH', chaseGuardPools));
       } catch (err) {
         logger.error('[index] executeCleanExit (SWITCH) threw, reconciling state', {
           pool: ctx.poolAddress,
@@ -409,7 +444,7 @@ async function tick(): Promise<void> {
         try {
           const newPool = await openPool(candidate.address);
           lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
-          currentPool = await openInitialPosition(newPool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y);
+          currentPool = await guarded(() => openInitialPosition(newPool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y));
           currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
           currentPool.volume1hBaselineSetAtMs = Date.now();
           lastSwitchAtMs = now;
@@ -435,15 +470,62 @@ async function tick(): Promise<void> {
 async function main(): Promise<void> {
   logger.info('[index] booting meteora-dlmm-bot', { wallet: getWalletPubkey().toBase58() });
 
-  const solBalance = await getWalletSolBalance();
-  const gasReserveSol = computeGasReserveSol(solBalance);
-  if (solBalance < env.INITIAL_LP_CAPITAL_SOL + gasReserveSol) {
-    throw new Error(
-      `[index] wallet balance ${solBalance} SOL is below required INITIAL_LP_CAPITAL_SOL(${env.INITIAL_LP_CAPITAL_SOL}) + gas reserve(${gasReserveSol})`,
-    );
+  // Reattach to an open position (or detect a clean/flat wallet) BEFORE the capital sufficiency check:
+  // with a position open the liquid SOL balance is small by design, and the old check would refuse to boot.
+  const recovery = await recoverOnBoot();
+  const saved = recovery.state;
+  if (recovery.plan.kind === 'ambiguous') {
+    logger.error('[index] ambiguous boot: wallet holds open positions in several pools — refusing to trade, resolve manually', { pools: recovery.plan.pools });
+    process.exit(1);
   }
+  if (saved) {
+    const now = Date.now();
+    for (const [addr, until] of pruneExpired(saved.blacklist, now)) if (!blacklistPools.has(addr)) blacklistPools.set(addr, until);
+    for (const [mint, px] of saved.chaseGuard) chaseGuardPools.set(mint, px);
+    lastOtherMint = saved.lastOtherMint;
+    lastSwitchAtMs = saved.lastSwitchAtMs;
+    dollarFlowBreach = saved.dollarFlowBreach;
+  }
+  if (recovery.ctx) {
+    currentPool = recovery.ctx;
+    lastOtherMint = recovery.ctx.xIsSol ? recovery.ctx.mintY : recovery.ctx.mintX;
+    const snap = await getPositionHealthSnapshot(recovery.ctx);
+    logger.warn(`[index] RESUMED open position ${recovery.ctx.poolAddress} from ${recovery.source}${recovery.source === 'chain' ? ' (deposit basis approximated from current value, peak profit reset)' : ''}`, {
+      initialDepositSol: recovery.ctx.initialDepositSol,
+      peakProfitPct: recovery.ctx.peakProfitPct,
+      currentValueSol: snap.currentValueSol,
+      unclaimedFeesSol: snap.unclaimedFeesSol,
+      outOfRangeSinceMs: recovery.ctx.outOfRangeSinceMs,
+      inFlightWhenSaved: saved?.inFlight ?? null,
+    });
+  } else {
+    if (saved?.position) {
+      logger.warn('[index] state file listed a position but none exists on-chain — treating as closed', { pool: saved.position.poolAddress });
+    }
+    if (saved?.inFlight && saved.lastOtherMint) {
+      // The previous process died inside a close/rebalance/entry: a token leg may be stranded in the wallet.
+      try {
+        const stuck = await getTokenBalance(saved.lastOtherMint);
+        if (stuck.gtn(0)) {
+          logger.warn('[index] previous run was interrupted mid-operation — swapping leftover token to SOL', { mint: saved.lastOtherMint, amount: stuck.toString() });
+          await emergencySwapAllToSol(saved.lastOtherMint, stuck);
+        }
+      } catch (err) {
+        logger.error('[index] boot leftover-token liquidation failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    const solBalance = await getWalletSolBalance();
+    const gasReserveSol = computeGasReserveSol(solBalance);
+    if (solBalance < env.INITIAL_LP_CAPITAL_SOL + gasReserveSol) {
+      throw new Error(
+        `[index] wallet balance ${solBalance} SOL is below required INITIAL_LP_CAPITAL_SOL(${env.INITIAL_LP_CAPITAL_SOL}) + gas reserve(${gasReserveSol})`,
+      );
+    }
+  }
+  inFlight = false;
+  persist();
 
-  logger.info(`[index] wallet balance: ${solBalance} SOL, starting loop every ${LOOP_INTERVAL_MS}ms`);
+  logger.info(`[index] wallet balance: ${await getWalletSolBalance()} SOL, starting loop every ${LOOP_INTERVAL_MS}ms (${currentPool ? 'position resumed' : 'flat'})`);
 
   // ponytail: plain setInterval loop, no job scheduler — single always-on
   // process is the whole deployment target here. Reach for a scheduler
@@ -454,6 +536,7 @@ async function main(): Promise<void> {
     } catch (err) {
       logger.error('[index] tick failed', { error: err instanceof Error ? err.message : String(err) });
     } finally {
+      persist();
       setTimeout(runLoop, LOOP_INTERVAL_MS);
     }
   };
@@ -466,10 +549,12 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('SIGINT', () => {
   logger.info('[index] SIGINT received, shutting down');
+  persist();
   process.exit(0);
 });
 process.on('SIGTERM', () => {
   logger.info('[index] SIGTERM received, shutting down');
+  persist();
   process.exit(0);
 });
 

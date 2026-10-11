@@ -16,6 +16,7 @@ import { addToBlacklist, rangeCeilingProfitOverride } from './riskManager.js';
 import { computeBinRadius } from './binRange.js';
 import { computeOutOfRangeTracking } from './outOfRangeTracking.js';
 import { logger } from '../utils/logger.js';
+import type { PersistedPosition } from '../services/stateStore.js';
 
 /**
  * ponytail: prices everything in SOL terms (not USD) so the engine needs no
@@ -175,6 +176,54 @@ export async function getPositionHealthSnapshot(ctx: PoolContext): Promise<Posit
   const unclaimedFeesSol = Number(feeSolSide.toString()) / LAMPORTS_PER_SOL + feeOtherSol;
 
   return { currentValueSol, unclaimedFeesSol };
+}
+
+
+/** PoolContext -> persistable form (drops the SDK pool handle). */
+export function positionToPersisted(ctx: PoolContext): PersistedPosition {
+  const { pool: _pool, ...rest } = ctx;
+  return { ...rest, rebalanceTimestamps: [...ctx.rebalanceTimestamps] };
+}
+
+/** Persisted bookkeeping + a freshly opened SDK pool handle -> live PoolContext. */
+export function contextFromPersisted(pos: PersistedPosition, pool: DlmmPool): PoolContext {
+  return { ...pos, rebalanceTimestamps: [...pos.rebalanceTimestamps], pool };
+}
+
+/**
+ * Boot fallback when no usable state describes an open position (first run of the persistence feature,
+ * deleted/corrupt state file): rebuild a PoolContext from on-chain pair state alone. The deposit basis
+ * (stop-loss / take-profit) cannot be known, so it is set to the position's CURRENT value + unclaimed fees
+ * and peak profit restarts at 0 — callers must log this loudly. Never opens or closes anything.
+ */
+export async function rebuildContextFromChain(pool: DlmmPool, poolAddress: string): Promise<PoolContext> {
+  const mintX = pool.lbPair.tokenXMint.toBase58();
+  const mintY = pool.lbPair.tokenYMint.toBase58();
+  const xIsSol = mintX === WSOL_MINT;
+  if (!xIsSol && mintY !== WSOL_MINT) throw new Error(`[rebalanceEngine] pool ${poolAddress} has no SOL side — cannot rebuild context`);
+  const otherMint = xIsSol ? mintY : mintX;
+  const ctx: PoolContext = {
+    poolAddress,
+    pool,
+    mintX,
+    mintY,
+    xIsSol,
+    initialDepositSol: 0,
+    rebalanceTimestamps: [],
+    lastRebalanceAt: 0,
+    volume1hBaselineUsd: 0,
+    volume1hBaselineSetAtMs: 0,
+    binStep: pool.lbPair.binStep,
+    centerBinId: null,
+    outOfRangeSinceMs: null,
+    inRangeSinceMs: null,
+    peakProfitPct: 0,
+    otherMintDecimals: await getMintDecimals(otherMint),
+    reserveSolAccount: (xIsSol ? pool.lbPair.reserveX : pool.lbPair.reserveY).toBase58(),
+  };
+  const { currentValueSol, unclaimedFeesSol } = await getPositionHealthSnapshot(ctx);
+  ctx.initialDepositSol = currentValueSol + unclaimedFeesSol;
+  return ctx;
 }
 
 export { estimateCycleGasCostSol } from './costEstimate.js';
