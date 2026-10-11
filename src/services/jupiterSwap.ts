@@ -82,6 +82,31 @@ export async function swapExactIn(
  * since this module has no pricing logic of its own — keeps this function a
  * pure "given imbalance, fix it" step instead of duplicating pricing.
  */
+/**
+ * Pure planner: which side to swap and what fraction of it, to move the non-SOL token share of
+ * (valueX + valueY) to `targetTokenShare` (0.5 = old 50:50 behaviour; math is identical at 0.5).
+ * Returns null when already within 2% of target. `tokenIsX` = the non-SOL mint is mintX.
+ */
+export function planRatioSwap(
+  valueX: number,
+  valueY: number,
+  tokenIsX: boolean,
+  targetTokenShare: number,
+): { fromX: boolean; fraction: number } | null {
+  const total = valueX + valueY;
+  if (total <= 0) return null;
+  const tokenValue = tokenIsX ? valueX : valueY;
+  const solValue = total - tokenValue;
+  const diff = tokenValue / total - targetTokenShare;
+  if (Math.abs(diff) < 0.02) return null; // not worth a swap (fees would exceed the benefit)
+  if (diff > 0) {
+    // too much token: sell part of the token side for SOL
+    return { fromX: tokenIsX, fraction: (tokenValue - targetTokenShare * total) / tokenValue };
+  }
+  // too little token: buy token with part of the SOL side
+  return { fromX: !tokenIsX, fraction: (targetTokenShare * total - tokenValue) / solValue };
+}
+
 export async function balanceTokenRatio(params: {
   mintX: string;
   mintY: string;
@@ -91,25 +116,19 @@ export async function balanceTokenRatio(params: {
   valueYUsd: number;
 }): Promise<{ swapped: boolean; result?: SwapResult }> {
   const { mintX, mintY, amountX, amountY, valueXUsd, valueYUsd } = params;
-  const totalUsd = valueXUsd + valueYUsd;
-  if (totalUsd <= 0) return { swapped: false };
-
-  const imbalanceUsd = Math.abs(valueXUsd - valueYUsd);
-  // Not worth a swap (fees would exceed the rebalancing benefit) if within 2% of even.
-  if (imbalanceUsd / totalUsd < 0.02) {
-    logger.debug('[jupiter] token ratio already ~50:50, skipping swap');
+  const tokenIsX = mintY === WSOL_MINT ? true : mintX === WSOL_MINT ? false : null;
+  // Non-SOL/non-SOL pair (not expected in range mode): fall back to plain 50:50 on X.
+  const plan = planRatioSwap(valueXUsd, valueYUsd, tokenIsX ?? true, tokenIsX === null ? 0.5 : env.TOKEN_SHARE_PCT / 100);
+  if (!plan || plan.fraction <= 0) {
+    logger.debug('[jupiter] token ratio already near target, skipping swap');
     return { swapped: false };
   }
 
-  const heavierIsX = valueXUsd > valueYUsd;
-  const excessUsd = imbalanceUsd / 2; // amount to move from heavy side to light side
-  const fraction = excessUsd / (heavierIsX ? valueXUsd : valueYUsd);
+  const fromMint = plan.fromX ? mintX : mintY;
+  const toMint = plan.fromX ? mintY : mintX;
+  const fromAmount = plan.fromX ? amountX : amountY;
 
-  const fromMint = heavierIsX ? mintX : mintY;
-  const toMint = heavierIsX ? mintY : mintX;
-  const fromAmount = heavierIsX ? amountX : amountY;
-
-  const swapAmount = fromAmount.muln(Math.round(fraction * 1_000_000)).divn(1_000_000);
+  const swapAmount = fromAmount.muln(Math.round(plan.fraction * 1_000_000)).divn(1_000_000);
   if (swapAmount.lten(0)) return { swapped: false };
 
   const result = await swapExactIn(fromMint, toMint, swapAmount);

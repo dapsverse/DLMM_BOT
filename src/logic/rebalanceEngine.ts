@@ -416,11 +416,11 @@ export async function openInitialPosition(
     logger.warn('[rebalanceEngine] capital capped by wallet funds', { requested: capitalSol, effectiveCapitalSol });
   }
   capitalSol = effectiveCapitalSol;
-  const halfLamports = new BN(Math.round((capitalSol * LAMPORTS_PER_SOL) / 2));
+  const tokenShareLamports = new BN(Math.round((capitalSol * LAMPORTS_PER_SOL * env.TOKEN_SHARE_PCT) / 100)); // SOL swapped into the token (50 = half)
   const otherMintDecimals = await getMintDecimals(otherMint);
 
   logger.info('[rebalanceEngine] opening initial position', { poolAddress, capitalSol, otherMintDecimals });
-  const swapResult = await swapExactIn(WSOL_MINT, otherMint, halfLamports);
+  const swapResult = await swapExactIn(WSOL_MINT, otherMint, tokenShareLamports);
 
   // Don't trust a single immediate balance read after the swap — see
   // waitForTokenBalance's doc comment for the live incident (a stale read

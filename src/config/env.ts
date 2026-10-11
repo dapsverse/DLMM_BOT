@@ -446,6 +446,9 @@ export const env = {
   // (e/acc-SOL entered 2026-10-10 at -92% from a 14d high). 0 disables. Untuned: observed BATON -25%, QI -37%, e/acc -92%.
   MAX_DRAWDOWN_FROM_HIGH_PCT: num('MAX_DRAWDOWN_FROM_HIGH_PCT', 60),
   DRAWDOWN_WINDOW_DAYS: num('DRAWDOWN_WINDOW_DAYS', 14),
+  // Share of position VALUE held in the non-SOL token (ask side) when opening/reopening; the rest stays SOL (bid side). 50 = old 50:50.
+  // moonbot/skewsim.mjs: less token (35) lost less than 50 (-17.5% vs -18.5% per 24h sim, yield>=2%); small, 31 tokens, untuned.
+  TOKEN_SHARE_PCT: num('TOKEN_SHARE_PCT', 50),
   JUPITER_MAX_SLIPPAGE_BPS: num('JUPITER_MAX_SLIPPAGE_BPS', 300),
   // Cap on Jupiter's priority fee (lamports); swaps requested at level 'high'. 4x 'block height exceeded' seen 2026-10-10 with default fee.
   JUPITER_EXIT_SLIPPAGE_BPS: num('JUPITER_EXIT_SLIPPAGE_BPS', 800),
