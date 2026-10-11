@@ -25,7 +25,7 @@
  */
 import assert from 'node:assert';
 import BN from 'bn.js';
-import { reserveGasFromSolSide, computeGasReserveSol } from '../logic/rebalanceEngine.js';
+import { reserveGasFromSolSide, computeGasReserveSol, isCapitalUnderfunded } from '../logic/rebalanceEngine.js';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const FLOOR = Number(process.env.MIN_GAS_RESERVE_SOL ?? 0.05);
@@ -78,6 +78,12 @@ const PCT = Number(process.env.MIN_GAS_RESERVE_PCT ?? 5);
   const other = new BN(1000);
   const { depositX } = reserveGasFromSolSide(tiny, other, true);
   assert(depositX.gten(0), 'expected deposit amount to clamp at zero, not go negative, when balance is below the reserve');
+}
+
+{
+  assert(isCapitalUnderfunded(0.143, 0.95), 'incident shape (0.143 of 0.95 fundable) must be underfunded');
+  assert(!isCapitalUnderfunded(1, 1.2), 'capital 1 of 1.2 fundable is fine');
+  assert(!isCapitalUnderfunded(0.5, 0), 'no fundable SOL: not flagged here');
 }
 
 console.log('OK: computeGasReserveSol scales with equity (floor at small balances, pct at large ones); reserveGasFromSolSide subtracts it from the correct side only, clamps at zero');

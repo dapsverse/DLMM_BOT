@@ -13,6 +13,8 @@ import {
   isCooldownActive,
   estimateCycleGasCostSol,
   computeGasReserveSol,
+  isCapitalUnderfunded,
+  POSITION_RENT_BUFFER_SOL,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
@@ -129,6 +131,13 @@ async function tryEnterPool(): Promise<void> {
       logger.error('[index] equity below MIN_EQUITY_STOP_SOL while flat — stopping, no new entries', { equitySol, stopAt: env.MIN_EQUITY_STOP_SOL });
       process.exit(0);
     }
+  }
+  // Heal a stale capital figure (swap still pending when it was computed, 2026-10-11: 0.143 vs ~0.95 fundable).
+  const walletNow = await getWalletSolBalance();
+  const fundableSol = Math.max(walletNow - computeGasReserveSol(walletNow) - POSITION_RENT_BUFFER_SOL, 0);
+  if (isCapitalUnderfunded(currentCapitalSol, fundableSol)) {
+    logger.warn('[index] capital figure stale vs wallet — refreshing', { was: currentCapitalSol, fundableSol });
+    currentCapitalSol = Math.max(walletNow - computeGasReserveSol(walletNow), 0);
   }
   const candidates = await scanPools(defaultScannerConfig(blacklistPools, chaseGuardPools), currentCapitalSol);
   for (const candidate of candidates) {

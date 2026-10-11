@@ -273,6 +273,17 @@ import { estimateBinRentSol } from './costEstimate.js';
  */
 export const POSITION_RENT_BUFFER_SOL = 0.07;
 
+/**
+ * Entry capital must be a real share of what the wallet can fund. 2026-10-11: a stale currentCapitalSol
+ * (0.143, read while a token swap was still pending) opened a 0.143 SOL position with ~0.95 SOL idle.
+ * Below this fraction of the fundable SOL we heal the capital from the wallet (index.ts) or refuse the entry.
+ */
+export const MIN_CAPITAL_FUND_RATIO = 0.5;
+
+export function isCapitalUnderfunded(capitalSol: number, fundableSol: number): boolean {
+  return fundableSol > 0 && capitalSol < fundableSol * MIN_CAPITAL_FUND_RATIO;
+}
+
 export function computeGasReserveSol(equitySol: number): number {
   return Math.max(env.MIN_GAS_RESERVE_SOL, equitySol * (env.MIN_GAS_RESERVE_PCT / 100));
 }
@@ -492,6 +503,9 @@ export async function openInitialPosition(
   // wallet can really fund instead of adding the reserve on top again.
   const walletSol = await getWalletSolBalance();
   const maxFundableSol = walletSol - computeGasReserveSol(walletSol) - POSITION_RENT_BUFFER_SOL;
+  if (isCapitalUnderfunded(capitalSol, maxFundableSol)) {
+    throw new Error(`[rebalanceEngine] requested capital ${capitalSol} SOL is under ${MIN_CAPITAL_FUND_RATIO * 100}% of the ${maxFundableSol.toFixed(4)} SOL the wallet can fund — refusing to enter with most of the SOL idle`);
+  }
   const effectiveCapitalSol = Math.min(capitalSol, maxFundableSol);
   if (effectiveCapitalSol < capitalSol * 0.9) {
     throw new Error(`[rebalanceEngine] wallet ${walletSol} SOL can fund only ${Math.max(0, effectiveCapitalSol).toFixed(4)} SOL < 90% of requested ${capitalSol} (after gas reserve + position rent) — skipping entry before swap`);
