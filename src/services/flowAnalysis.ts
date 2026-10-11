@@ -1,6 +1,7 @@
 import { PublicKey } from '@solana/web3.js';
 import { connection } from './rpc.js';
 import { logger } from '../utils/logger.js';
+import { env } from '../config/env.js';
 import { withRetry } from '../utils/retry.js';
 
 const FLOW_TX_CHUNK_SIZE = 25;
