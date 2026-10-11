@@ -1369,6 +1369,8 @@ on two live positions, no stops): longer idle before rebalance and wider range b
 but gain is small. Meteora docs: limit orders max 50 bins per account, maker earns 50% of the swap fee on fills; SDK 1.9.14 `placeLimitOrder` exists.
 Not done: a tiny live limit-order test (needs user approval), bin-step preference (`MIN_BIN_STEP` 75 would favour wider ranges, undecided).
 
+**2026-10-11 10:33 UTC experiment (live):** `MIN_BIN_STEP=80` + `MAX_IDLE_OUT_OF_RANGE_MINUTES=120` in `.env.live` (wider effective range, fewer rebalances) on top of the entry-only 6h ceiling (`RANGE_ENTRY_MAX_6H_CHANGE_PCT=5`). Basis: `moonbot/rangesim.mjs` (wider/longer-idle loses less, none positive). Evaluate jointly after 1-2 weeks or >=10 entries; if <1 entry/day loosen ceiling to 8%, then step to 50. Positions wider than 25 bins/tx are NOT supported (SDK per-tx cap; extended position + chunkable add is non-atomic, not built).
+
 ## Next steps
 
 1. **Let the 4 running instances keep going** on the combined dexId-fallback
