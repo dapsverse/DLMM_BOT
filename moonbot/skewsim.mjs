@@ -59,3 +59,19 @@ for (const [name, f] of Object.entries(grp)) {
 }
 // pure geometry: gain from the extra token share when price rises through the +-R ask range
 console.log('\nGEOMETRY: price rises exactly R through the ask range: extra gain per +10pt token share ~', pct(0.1 * R / 2, 2), 'of capital; if price falls 20% below entry: extra loss per +10pt token share ~', pct(0.1 * (0.2 - R / 2), 2));
+
+// ---- by trailing 6h return at entry (falling-knife check), centered s=0.5 ----
+console.log('\nBY TRAILING 6h RETURN at entry (centered 50:50, net per 24h window):');
+const B6 = [['< -10%', (r) => r < -0.10], ['-10..-4%', (r) => r >= -0.10 && r < -0.04], ['-4..+4%', (r) => r >= -0.04 && r <= 0.04], ['+4..+10%', (r) => r > 0.04 && r <= 0.10], ['> +10%', (r) => r > 0.10]];
+for (const [name, f] of B6) {
+  const sub = W.filter((w) => f(w.p.c[w.i][4] / w.p.c[w.i - 72][4] - 1));
+  const rs = sub.map((w) => run(w.p.c, w.i, 0.5, Cof(w.p)));
+  console.log(name.padEnd(10), 'n=' + String(sub.length).padStart(3), 'tok=' + new Set(sub.map((w) => w.p.address)).size, 'mean', pct(mean(rs.map((r) => r.net)), 1).padStart(7), 'med', pct(q(rs.map((r) => r.net), .5), 1).padStart(7), 'fees', pct(mean(rs.map((r) => r.fees)), 1), 'win', pct(rs.filter((r) => r.net > 0).length / (rs.length || 1), 0));
+}
+
+console.log('\nCEILING on |trailing 6h return| (entries allowed only if within ceiling), centered 50:50:');
+for (const cap of [0.03, 0.05, 0.08, 0.10, 0.15]) {
+  const sub = W.filter((w) => Math.abs(w.p.c[w.i][4] / w.p.c[w.i - 72][4] - 1) <= cap);
+  const rs = sub.map((w) => run(w.p.c, w.i, 0.5, Cof(w.p)));
+  console.log(`|6h|<=${(cap * 100).toFixed(0)}%`.padEnd(10), 'n=' + String(sub.length).padStart(3), 'share kept', pct(sub.length / W.length, 0).padStart(4), 'tok=' + new Set(sub.map((w) => w.p.address)).size, 'mean', pct(mean(rs.map((r) => r.net)), 1).padStart(7), 'med', pct(q(rs.map((r) => r.net), .5), 1).padStart(7), 'win', pct(rs.filter((r) => r.net > 0).length / (rs.length || 1), 0));
+}
