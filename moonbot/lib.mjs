@@ -1,15 +1,16 @@
 // Loads moonbot/data pools onto a regular hourly grid (gaps = zero-volume hours carry last close).
 // Pools whose trades stop >12h before the end of the data get a x0.5 "dead" haircut on their final price (rug/abandon proxy).
 import { readdirSync, readFileSync } from 'node:fs';
-const DIR = new URL(`./${process.env.DATA ?? 'data'}/`, import.meta.url).pathname;
-export function loadPools(minLen = 72) {
+const dirOf = (d) => new URL(`./${d}/`, import.meta.url).pathname;
+export function loadPools(minLen = 72, dataDir = process.env.DATA ?? 'data', perPoolOpt = !!process.env.PERPOOL) {
+  const DIR = dirOf(dataDir);
   const raw = readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(readFileSync(DIR + f))).filter((p) => p.candles?.length);
   const globalEnd = Math.max(...raw.map((p) => p.candles[p.candles.length - 1][0]));
   const out = [];
   for (const p of raw) {
     const byTs = new Map(p.candles.map((c) => [c[0], c]));
     const t0 = p.candles[0][0], lastTs = p.candles[p.candles.length - 1][0];
-    const perPool = !!process.env.PERPOOL; // data_old: each pool has its own fixed span, don't extend to a global end
+    const perPool = perPoolOpt; // data_old: each pool has its own fixed span, don't extend to a global end
     const poolEnd = perPool ? lastTs : globalEnd;
     const dead = !perPool && globalEnd - lastTs > 12 * 3600;
     const grid = []; let prev = p.candles[0][1];
