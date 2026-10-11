@@ -1335,7 +1335,7 @@ Real-money run continued (wallet HvXAEv…, `range` mode, capital 1 SOL, kill-sw
   and a -86% drawdown looked bad); changed to **90** on 2026-10-11 after `moonbot/ddstudy.mjs` showed risk jumps at -30% (not 60) and only the <-90% bucket
   shows volume dying (17.9% "dead" vs 4-9%). Set in `.env.live` (`MAX_DRAWDOWN_FROM_HIGH_PCT=90`).
 - `.env.live` also now has `MAX_IDLE_OUT_OF_RANGE_MINUTES=30` (was 5) from `moonbot/rangesim.mjs`; takes effect at the NEXT restart.
-- `TOKEN_SHARE_PCT` (default 50 = old 50:50; `.env.live` sets **35**, effective at next restart): share of position value held in the non-SOL token on entry and
+- `TOKEN_SHARE_PCT` (default 50 = old 50:50; `.env.live` was set to 35 then put back to **50** on 2026-10-11 by user decision: stay 50:50 until there is live data; evidence for skew is thin (rebound after a down-break not supported for high-yield pools)): share of position value held in the non-SOL token on entry and
   rebalance (`openInitialPosition` swaps that share of capital; `balanceTokenRatio` uses pure `planRatioSwap`, self-check `checkRatioPlan.ts`). From `moonbot/skewsim.mjs`:
   less token lost less (-17.5% at 35 vs -18.5% at 50 vs -21.8% at 100 per 24h, yield>=2% pools, 31 tokens, untuned). Unbalanced SDK deposits (skewed, SOL-only,
   token-only) were verified with `simulateTransaction` against a real pool (no tx sent). Also `DOLLAR_FLOW_MAX_TX` 150 (was 300) to cut Helius 429 bursts.
