@@ -6,6 +6,9 @@ export interface PendingSwapBack {
   amount: string;
 }
 
+/** Raw units below this are dust no router will quote (6 raw units blocked all entries on 2026-10-12): drop instead of retrying forever. */
+export const DUST_RAW = 100;
+
 export interface SwapBackDeps {
   getBalance: (mint: string) => Promise<BN>;
   swap: (mint: string, amount: BN) => Promise<unknown>;
@@ -21,7 +24,7 @@ export async function settlePendingSwapBack(pending: PendingSwapBack | null, dep
   if (!pending) return null;
   const held = await deps.getBalance(pending.mint);
   const toSwap = BN.min(held, new BN(pending.amount));
-  if (toSwap.lten(0)) return null;
+  if (toSwap.ltn(DUST_RAW)) return null;
   await deps.swap(pending.mint, toSwap);
   return null;
 }

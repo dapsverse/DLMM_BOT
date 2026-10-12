@@ -23,6 +23,8 @@ assert.deepEqual(swaps.pop(), ['T', '300']);
 // nothing held -> pending cleared without a swap
 assert.equal(await settlePendingSwapBack({ mint: 'T', amount: '800' }, deps(0)), null);
 assert.equal(swaps.length, 0);
+// dust (unquotable) -> cleared without a swap, never blocks entries
+assert.equal(await settlePendingSwapBack({ mint: 'T', amount: '6' }, deps(6, true)), null);
 // swap failure throws so the caller keeps the pending
 await assert.rejects(settlePendingSwapBack({ mint: 'T', amount: '800' }, deps(1000, true)), /block height/);
 
