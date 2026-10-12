@@ -13,7 +13,6 @@ import {
   isCooldownActive,
   estimateCycleGasCostSol,
   computeGasReserveSol,
-  isCapitalUnderfunded,
   POSITION_RENT_BUFFER_SOL,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
@@ -135,7 +134,8 @@ async function tryEnterPool(): Promise<void> {
   // Heal a stale capital figure (swap still pending when it was computed, 2026-10-11: 0.143 vs ~0.95 fundable).
   const walletNow = await getWalletSolBalance();
   const fundableSol = Math.max(walletNow - computeGasReserveSol(walletNow) - POSITION_RENT_BUFFER_SOL, 0);
-  if (isCapitalUnderfunded(currentCapitalSol, fundableSol)) {
+  // Flat here, so capital should equal what the wallet can fund: refresh at <90% (CRAWL exit left 0.556 vs ~0.98 on 2026-10-12, above the 50% hard guard).
+  if (fundableSol > 0 && currentCapitalSol < fundableSol * 0.9) {
     logger.warn('[index] capital figure stale vs wallet — refreshing', { was: currentCapitalSol, fundableSol });
     currentCapitalSol = Math.max(walletNow - computeGasReserveSol(walletNow), 0);
   }
