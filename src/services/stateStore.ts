@@ -48,6 +48,8 @@ export interface PersistedState {
   /** [mint, exit price USD] — see ScannerConfig.chaseGuardPools */
   chaseGuard: [string, number][];
   dollarFlowBreach: { pool: string; count: number };
+  /** exit swap-back that failed after the close; absent in files written before 2026-10-12 */
+  pendingSwapBack?: { mint: string; amount: string } | null;
 }
 
 export type BootPlan =
@@ -98,6 +100,8 @@ export function parseState(raw: string, wallet: string): PersistedState | null {
   if (o.version !== STATE_VERSION || o.wallet !== wallet || !isFiniteNum(o.savedAtMs)) return null;
   if (!isFiniteNum(o.currentCapitalSol) || typeof o.inFlight !== 'boolean') return null;
   if (!Array.isArray(o.blacklist) || !Array.isArray(o.chaseGuard)) return null;
+  const psb = o.pendingSwapBack as Record<string, unknown> | null | undefined;
+  if (psb != null && (typeof psb !== 'object' || typeof psb.mint !== 'string' || typeof psb.amount !== 'string')) return null;
   const p = o.position as Record<string, unknown> | null;
   if (p !== null) {
     if (!p || typeof p !== 'object') return null;

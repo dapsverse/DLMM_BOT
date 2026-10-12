@@ -14,6 +14,8 @@ import {
   estimateCycleGasCostSol,
   computeGasReserveSol,
   retryPendingSwapBack,
+  getPendingSwapBack,
+  restorePendingSwapBack,
   POSITION_RENT_BUFFER_SOL,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
@@ -59,6 +61,7 @@ function persist(): void {
     blacklist: [...blacklistPools.entries()],
     chaseGuard: [...chaseGuardPools.entries()],
     dollarFlowBreach,
+    pendingSwapBack: getPendingSwapBack(),
   });
 }
 
@@ -502,6 +505,7 @@ async function main(): Promise<void> {
     lastOtherMint = saved.lastOtherMint;
     lastSwitchAtMs = saved.lastSwitchAtMs;
     dollarFlowBreach = saved.dollarFlowBreach;
+    restorePendingSwapBack(saved.pendingSwapBack ?? null);
   }
   if (recovery.ctx) {
     currentPool = recovery.ctx;
