@@ -603,6 +603,29 @@ export async function openInitialPosition(
 }
 
 /**
+ * Swap-back that failed AFTER an irreversible close. Retried by index.ts on every flat tick until it
+ * lands (CRAWL 2026-10-12: one failed swap-back left ~0.5 SOL of token stranded, wallet read 0.59 vs 1.09).
+ * ponytail: in-memory only; a restart falls back to boot recovery, persist it if restarts mid-failure matter.
+ */
+let pendingSwapBack: { mint: string; amount: BN } | null = null;
+
+/** Throws if the swap still fails (pending stays set); no-op when nothing is pending. */
+export async function retryPendingSwapBack(): Promise<void> {
+  if (!pendingSwapBack) return;
+  const { mint, amount } = pendingSwapBack;
+  const held = await getTokenBalance(mint);
+  const toSwap = BN.min(held, amount); // never sell more than the failed principal (fee portion is kept on purpose)
+  if (toSwap.lten(0)) {
+    pendingSwapBack = null;
+    return;
+  }
+  logger.warn('[rebalanceEngine] retrying pending swap-back', { mint, amount: toSwap.toString() });
+  await emergencySwapAllToSol(mint, toSwap);
+  pendingSwapBack = null;
+  logger.info('[rebalanceEngine] pending swap-back landed', { mint });
+}
+
+/**
  * Closes the current position (claim fees + reclaim rent) and converts
  * everything to SOL. Shared by executeHardExit (adds a blacklist after)
  * and executeCleanExit (no blacklist - used by SWITCH and TAKE_PROFIT,
@@ -660,6 +683,7 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promis
       // that matters for state tracking; a leftover unconverted token
       // balance is a smaller, recoverable problem, not worth corrupting
       // currentPool/currentCapitalSol over.
+      pendingSwapBack = { mint: otherMint, amount: toSwap };
       logger.error(`[rebalanceEngine] ${logPrefix}: leftover-token swap-back failed, continuing with SOL-only balance`, {
         pool: ctx.poolAddress,
         otherMint,

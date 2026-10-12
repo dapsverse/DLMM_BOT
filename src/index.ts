@@ -13,6 +13,7 @@ import {
   isCooldownActive,
   estimateCycleGasCostSol,
   computeGasReserveSol,
+  retryPendingSwapBack,
   POSITION_RENT_BUFFER_SOL,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
@@ -110,6 +111,13 @@ async function reconcilePoolStateAfterFailure(ctx: PoolContext): Promise<PoolCon
 }
 
 async function tryEnterPool(): Promise<void> {
+  // A failed exit swap-back must land before any new entry, or the entry funds only part of the capital.
+  try {
+    await retryPendingSwapBack();
+  } catch (err) {
+    logger.error('[index] pending swap-back still failing — holding off new entries', { error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
   if (env.MIN_EQUITY_STOP_SOL > 0) {
     let equitySol = await getWalletSolBalance();
     if (equitySol < env.MIN_EQUITY_STOP_SOL && lastOtherMint) {
