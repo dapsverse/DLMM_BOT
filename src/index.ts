@@ -23,6 +23,7 @@ import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './l
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
+import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
@@ -251,7 +252,7 @@ async function tick(): Promise<void> {
 
   const ctx = currentPool;
   const now = Date.now();
-  const [{ currentValueSol, unclaimedFeesSol }, volume1hNowUsd, binStatus] = await Promise.all([
+  const [{ currentValueSol, unclaimedFeesSol, otherPrincipalSol }, volume1hNowUsd, binStatus] = await Promise.all([
     getPositionHealthSnapshot(ctx),
     getVolume1hUsd(ctx.xIsSol ? ctx.mintY : ctx.mintX),
     getBinRangeStatus(ctx),
@@ -292,6 +293,28 @@ async function tick(): Promise<void> {
     isOutOfRange: binStatus.isOutOfRange,
     currentBinId: binStatus.currentBinId,
   });
+
+  if (decision !== 'HARD_EXIT' && shouldExitOnUpsideBreak({
+    exitAfterMin: env.UPSIDE_BREAK_EXIT_MIN,
+    isOutOfRange: binStatus.isOutOfRange,
+    outOfRangeSinceMs: ctx.outOfRangeSinceMs,
+    nowMs: now,
+    tokenValueSol: otherPrincipalSol,
+    totalValueSol: currentValueSol,
+  })) {
+    logger.warn('[index] upside break: position is all SOL and out of range — exiting instead of re-buying higher', { pool: ctx.poolAddress, currentValueSol, unclaimedFeesSol });
+    try {
+      currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools));
+      currentPool = null;
+    } catch (err) {
+      logger.error('[index] executeCleanExit (upside break) threw, reconciling state', {
+        pool: ctx.poolAddress,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      currentPool = await reconcilePoolStateAfterFailure(ctx);
+    }
+    return;
+  }
 
   if (decision === 'HARD_EXIT') {
     try {

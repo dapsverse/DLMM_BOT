@@ -402,6 +402,8 @@ export const env = {
   // leave_pool (5min), and gas cost ($13.82) actually exceeded fee income
   // ($12.57) for the run. Reverted to 10min.
   MAX_IDLE_OUT_OF_RANGE_MINUTES: num('MAX_IDLE_OUT_OF_RANGE_MINUTES', 10),
+  // Minutes out-of-range with the token side ~0 (upside break) before exiting to SOL instead of waiting for the idle rebalance; 0 = off.
+  UPSIDE_BREAK_EXIT_MIN: num('UPSIDE_BREAK_EXIT_MIN', 0),
 
   // Trailing take-profit: tiered/sticky schedule, not a flat giveback — see
   // TAKE_PROFIT_TIERS (constants.ts) for the table and riskManager.ts's
