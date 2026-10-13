@@ -31,8 +31,10 @@ async function quote(inputMint: string, outputMint: string, amount: BN, slippage
  * 2026-10-10, 2 of 4 swaps in one session.
  */
 async function executeSwap(inputMint: string, outputMint: string, amount: BN, slippageBps: number): Promise<SwapResult> {
+  let attempt = 0;
   const { signature, outAmount } = await withRetry(
     async () => {
+      const n = attempt++;
       const quoteResponse = await quote(inputMint, outputMint, amount, slippageBps);
       const { swapTransaction } = await jupiter.swapPost({
         swapRequest: {
@@ -40,7 +42,8 @@ async function executeSwap(inputMint: string, outputMint: string, amount: BN, sl
           userPublicKey: wallet.publicKey.toBase58(),
           dynamicComputeUnitLimit: true,
           prioritizationFeeLamports: {
-            priorityLevelWithMaxLamports: { priorityLevel: 'high', maxLamports: env.JUPITER_MAX_PRIORITY_FEE_LAMPORTS },
+            // Escalate on retries: 4 swaps in a row never landed on 2026-10-13 at a fixed 'high' level.
+            priorityLevelWithMaxLamports: { priorityLevel: n === 0 ? 'high' : 'veryHigh', maxLamports: env.JUPITER_MAX_PRIORITY_FEE_LAMPORTS * (n + 1) },
           },
         },
       });
@@ -49,7 +52,18 @@ async function executeSwap(inputMint: string, outputMint: string, amount: BN, sl
 
       const sig = await connection.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
       const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-      const confirmation = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+      // Rebroadcast the same signed tx every 2s while waiting: all 4 attempts of the 2026-10-13 exit were sent once
+      // and never landed (signatures not found on chain, network fees 0). Resending a landed tx is a no-op.
+      const raw = tx.serialize();
+      const rebroadcast = setInterval(() => {
+        connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => {});
+      }, 2_000);
+      let confirmation;
+      try {
+        confirmation = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+      } finally {
+        clearInterval(rebroadcast);
+      }
       // A tx can land and still fail on-chain (e.g. Jupiter 6001 slippage): confirmTransaction resolves
       // without throwing, so check the result or a failed swap gets logged as executed.
       if (confirmation.value.err) {

@@ -402,7 +402,7 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
         keptRaw: toKeepAsToken.toString(),
       });
     }
-    if (toSwap.gtn(0)) await emergencySwapAllToSol(otherMint, toSwap);
+    if (toSwap.gtn(0)) await swapBackOrPend(otherMint, toSwap, 'compoundCycle abandon');
     return null;
   }
 
@@ -462,11 +462,11 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
     });
     try {
       const stuck = await getTokenBalance(otherMint);
-      if (stuck.gtn(0)) await emergencySwapAllToSol(otherMint, stuck);
-    } catch (swapBackErr) {
-      logger.error('[rebalanceEngine] reopen rollback swap-back ALSO failed — token stuck in wallet', {
+      if (stuck.gtn(0)) await swapBackOrPend(otherMint, stuck, 'reopen rollback');
+    } catch (balErr) {
+      logger.error('[rebalanceEngine] reopen rollback could not read the token balance — token may be stuck in wallet', {
         otherMint,
-        error: swapBackErr instanceof Error ? swapBackErr.message : String(swapBackErr),
+        error: balErr instanceof Error ? balErr.message : String(balErr),
       });
     }
     throw err;
@@ -589,15 +589,7 @@ export async function openInitialPosition(
     });
     const stuckBalance = await getTokenBalance(otherMint);
     if (stuckBalance.gtn(0)) {
-      try {
-        await emergencySwapAllToSol(otherMint, stuckBalance);
-      } catch (swapBackErr) {
-        logger.error('[rebalanceEngine] rollback swap-back ALSO failed — funds remain stuck, manual intervention needed', {
-          otherMint,
-          stuckBalance: stuckBalance.toString(),
-          error: swapBackErr instanceof Error ? swapBackErr.message : String(swapBackErr),
-        });
-      }
+      await swapBackOrPend(otherMint, stuckBalance, 'entry rollback');
     }
     throw err;
   }
@@ -611,6 +603,26 @@ export async function openInitialPosition(
  * Persisted by index.ts in the state file so a restart keeps retrying.
  */
 let pendingSwapBack: PendingSwapBack | null = null;
+
+/**
+ * Swap a leftover token to SOL after an irreversible close. On failure the amount is recorded as pending
+ * (retried every flat tick, persisted, blocks entries) instead of being lost: live 2026-10-13 a compoundCycle
+ * abandon swap failed 4x ("block height exceeded") and, unlike closeAndConvertToSol, left nothing to retry.
+ */
+async function swapBackOrPend(mint: string, amount: BN, label: string): Promise<boolean> {
+  try {
+    await emergencySwapAllToSol(mint, amount);
+    return true;
+  } catch (err) {
+    pendingSwapBack = { mint, amount: amount.toString() };
+    logger.error(`[rebalanceEngine] ${label}: swap-back failed, recorded as pending`, {
+      mint,
+      amount: amount.toString(),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
 
 export function getPendingSwapBack(): PendingSwapBack | null {
   return pendingSwapBack;
