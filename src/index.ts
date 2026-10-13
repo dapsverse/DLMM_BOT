@@ -22,6 +22,7 @@ import {
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
+import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
@@ -44,7 +45,7 @@ let currentCapitalSol = env.INITIAL_LP_CAPITAL_SOL;
 let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
 let lastDollarFlowCheckAtMs = 0;
-let dollarFlowBreach = { pool: '', count: 0 };
+let dollarFlowBreach: { pool: string; count: number; sinceMs?: number } = { pool: '', count: 0 };
 // true while an irreversible multi-step operation (close/rebalance/entry) runs; persisted so a restart can tell an interrupted op from a clean state.
 let inFlight = false;
 
@@ -396,8 +397,10 @@ async function tick(): Promise<void> {
         dollarFlow.buyVolumeUsd + dollarFlow.sellVolumeUsd >= env.DOLLAR_FLOW_EXIT_MIN_VOLUME_USD
       ) {
         if (dollarFlow.buyRatioUsd < env.DOLLAR_FLOW_EXIT_MIN_RATIO) {
+          if (dollarFlowBreach.count === 0 || dollarFlowBreach.sinceMs === undefined) dollarFlowBreach.sinceMs = now;
           dollarFlowBreach.count += 1;
-          confirmedBreach = dollarFlowBreach.count >= env.DOLLAR_FLOW_EXIT_CONFIRMATIONS;
+          // Overlapping 1h windows make back-to-back reads one signal counted twice: also require the breach to span DOLLAR_FLOW_EXIT_CONFIRM_MIN minutes (2026-10-13, QI exit at -1% cost 1.2% swap friction).
+          confirmedBreach = isDollarFlowBreachConfirmed(dollarFlowBreach.count, dollarFlowBreach.sinceMs, now, env.DOLLAR_FLOW_EXIT_CONFIRMATIONS, env.DOLLAR_FLOW_EXIT_CONFIRM_MIN);
           if (!confirmedBreach) {
             logger.warn(`[index] pool ${ctx.poolAddress} $ sell-dominant, awaiting confirmation`, {
               buyRatioUsd: +dollarFlow.buyRatioUsd.toFixed(3),
@@ -407,6 +410,7 @@ async function tick(): Promise<void> {
           }
         } else {
           dollarFlowBreach.count = 0;
+          delete dollarFlowBreach.sinceMs;
         }
       }
       if (dollarFlow !== null && confirmedBreach) {

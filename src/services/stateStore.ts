@@ -47,7 +47,7 @@ export interface PersistedState {
   blacklist: [string, number][];
   /** [mint, exit price USD] — see ScannerConfig.chaseGuardPools */
   chaseGuard: [string, number][];
-  dollarFlowBreach: { pool: string; count: number };
+  dollarFlowBreach: { pool: string; count: number; sinceMs?: number };
   /** exit swap-back that failed after the close; absent in files written before 2026-10-12 */
   pendingSwapBack?: { mint: string; amount: string } | null;
 }

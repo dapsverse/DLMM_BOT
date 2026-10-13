@@ -298,6 +298,8 @@ export const env = {
   DOLLAR_FLOW_EXIT_MIN_SAMPLES: num('DOLLAR_FLOW_EXIT_MIN_SAMPLES', 25),
   DOLLAR_FLOW_EXIT_MIN_VOLUME_USD: num('DOLLAR_FLOW_EXIT_MIN_VOLUME_USD', 2000),
   DOLLAR_FLOW_EXIT_CONFIRMATIONS: num('DOLLAR_FLOW_EXIT_CONFIRMATIONS', 2),
+  // minutes the breach must span from its first qualified read before exiting (0 = old behaviour: N consecutive reads only)
+  DOLLAR_FLOW_EXIT_CONFIRM_MIN: num('DOLLAR_FLOW_EXIT_CONFIRM_MIN', 0),
 
   // Entry-only floor on volumeSpikeRatio (see meteoraScanner.ts) — below
   // this, a pool isn't accelerating at all (1.0x = running exactly at its
