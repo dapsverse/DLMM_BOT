@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 const API = 'https://dlmm.datapi.meteora.ag', H = { 'User-Agent': 'Mozilla/5.0' };
 const days = +(process.argv[2] ?? 4), topN = +(process.argv[3] ?? 70), WSOL = 'So11111111111111111111111111111111111111112';
-const DIR = new URL('./data5m/', import.meta.url).pathname, sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const DIR = new URL((process.env.OUTDIR ?? 'data5m') + '/', import.meta.url).pathname, sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function get(u, t = 6) { for (let i = 0; i < t; i++) { try { const r = await fetch(u, { headers: H }); if (r.status === 429) { await sleep(2000 * (i + 1)); continue; } if (!r.ok) throw 0; return await r.json(); } catch { if (i === t - 1) return null; await sleep(600 * (i + 1)); } } }
 const pools = new Map();
 const logs = readdirSync(new URL('../logs/', import.meta.url).pathname).filter((f) => f.startsWith('live-'));
