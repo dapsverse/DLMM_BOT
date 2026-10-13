@@ -457,6 +457,8 @@ export const env = {
   // (e/acc-SOL entered 2026-10-10 at -92% from a 14d high). 0 disables. Untuned: observed BATON -25%, QI -37%, e/acc -92%.
   MAX_DRAWDOWN_FROM_HIGH_PCT: num('MAX_DRAWDOWN_FROM_HIGH_PCT', 60),
   DRAWDOWN_WINDOW_DAYS: num('DRAWDOWN_WINDOW_DAYS', 14),
+  // Entry gate (default 0 = off): reject a pool more than this % below its 48h high. moonbot/featsim.mjs: pools within 20% of the 48h high were +4.7% (75% win) vs -3..-4% elsewhere, but only ~1 in 9 live entries qualified, so it is off until live data backs it.
+  MAX_BELOW_HIGH_48H_PCT: num('MAX_BELOW_HIGH_48H_PCT', 0),
   // Share of position VALUE held in the non-SOL token (ask side) when opening/reopening; the rest stays SOL (bid side). 50 = old 50:50.
   // moonbot/skewsim.mjs: less token (35) lost less than 50 (-17.5% vs -18.5% per 24h sim, yield>=2%); small, 31 tokens, untuned.
   TOKEN_SHARE_PCT: num('TOKEN_SHARE_PCT', 50),

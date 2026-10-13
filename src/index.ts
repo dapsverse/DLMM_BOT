@@ -188,6 +188,17 @@ async function tryEnterPool(): Promise<void> {
         continue;
       }
     }
+    if (env.MAX_BELOW_HIGH_48H_PCT > 0) {
+      const below48hPct = await getDrawdownFromHighPct(candidate.address, 2);
+      if (below48hPct === null) {
+        logger.warn(`[index] skipping pool ${candidate.address} — 48h-high distance unavailable (fail-closed)`);
+        continue;
+      }
+      if (below48hPct < -env.MAX_BELOW_HIGH_48H_PCT) {
+        logger.info(`[index] skipping pool ${candidate.address} — ${below48hPct}% below its 48h high (max ${env.MAX_BELOW_HIGH_48H_PCT}%)`);
+        continue;
+      }
+    }
     const dollarFlow = await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd);
     if (dollarFlow === null) {
       logger.warn(`[index] skipping pool ${candidate.address} — dollar-flow check failed/insufficient sample (fail-closed)`);
