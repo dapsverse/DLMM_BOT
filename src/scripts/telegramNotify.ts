@@ -235,9 +235,33 @@ let busy = false;
 let bgBusy = false; // a detached long operation (openpool) is running
 const isBusy = () => busy || bgBusy;
 
+const WSOL = 'So11111111111111111111111111111111111111112';
+const TREND_MAX_MCAP = 200_000_000; // keeps majors (HYPE, TRUMP-size caps) and stables out of "trending"
+
+/** Top-N TOKEN/SOL pools by 1h volume straight from Meteora, NO bot filters. */
+async function trendingPools(n = 10): Promise<{ addr: string; line: string; symbol: string; mint: string }[]> {
+  const d = (await (await fetch('https://dlmm.datapi.meteora.ag/pools?page_size=100&sort_by=volume_1h:desc')).json()) as {
+    data: { address: string; name: string; tvl: number; volume: Record<string, number>; token_x: { address: string; symbol: string; market_cap?: number }; token_y: { address: string; symbol: string; market_cap?: number } }[];
+  };
+  const out: { addr: string; line: string; symbol: string; mint: string }[] = [];
+  const seen = new Set<string>();
+  for (const p of d.data) {
+    const tok = p.token_x.address === WSOL ? p.token_y : p.token_x;
+    const other = p.token_x.address === WSOL ? p.token_x : p.token_y;
+    if (other.address !== WSOL || seen.has(tok.address) || (tok.market_cap ?? 0) > TREND_MAX_MCAP) continue;
+    seen.add(tok.address);
+    out.push({
+      addr: p.address, symbol: tok.symbol, mint: tok.address,
+      line: `${out.length + 1}. ${p.name} pool=${p.address}\n   vol1h=$${Math.round(p.volume['1h'] ?? 0).toLocaleString('en')} vol24h=$${Math.round(p.volume['24h'] ?? 0).toLocaleString('en')} TVL=$${Math.round(p.tvl).toLocaleString('en')} mcap=$${Math.round(tok.market_cap ?? 0).toLocaleString('en')}`,
+    });
+    if (out.length >= n) break;
+  }
+  return out;
+}
+
 async function scanText(): Promise<string> {
-  const { stdout } = await run('npx', ['tsx', 'src/scripts/scanOnce.ts'], { env: childEnv(), timeout: 120_000, maxBuffer: 4_000_000 });
-  return scrub(stdout).trim() || 'scan returned nothing';
+  const t = await trendingPools();
+  return t.length ? `Top ${t.length} trending (volume 1h, tanpa filter bot):\n\n` + t.map((x) => x.line).join('\n') : 'tidak ada data trending';
 }
 
 /** Compact fact sheet for one pool: Meteora pool API + DexScreener pair stats + token transfer fee. Best-effort, missing parts are skipped. */
@@ -294,8 +318,9 @@ async function getTransferFee(mint: string): Promise<number | null> {
   }
 }
 
-async function askClaude(prompt: string): Promise<string> {
-  const child = execFile('claude', ['-p', '--tools', '', '--no-session-persistence'], { cwd: tmpdir(), timeout: 180_000, maxBuffer: 1_000_000 });
+async function askClaude(prompt: string, web = false): Promise<string> {
+  const tools = web ? ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch'] : ['--tools', ''];
+  const child = execFile('claude', ['-p', ...tools, '--no-session-persistence'], { cwd: tmpdir(), timeout: web ? 480_000 : 180_000, maxBuffer: 1_000_000 });
   child.stdin?.end(prompt);
   const out = await new Promise<string>((resolve, reject) => {
     let buf = '';
@@ -309,15 +334,17 @@ async function askClaude(prompt: string): Promise<string> {
 async function suggestText(arg: string): Promise<string> {
   let addrs: string[];
   let header: string;
+  let symbols: string[] = [];
   if (arg) {
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(arg)) return 'pakai: /suggest (kandidat scan) atau /suggest <alamat pool>';
     addrs = [arg];
     header = 'Analisis satu pool pilihan user (bukan hasil scan, jadi belum tentu lolos filter bot):';
   } else {
-    const scan = await scanText();
-    if (/No pool passes/.test(scan)) return 'Tidak ada pool yang lolos filter bot sekarang, jadi tidak ada saran masuk. Untuk pool tertentu: /suggest <alamat pool>.';
-    addrs = [...new Set([...scan.matchAll(/pool=([1-9A-HJ-NP-Za-km-z]{32,44})/g)].map((m) => m[1]!))].slice(0, 5);
-    header = 'Kandidat yang lolos scan bot saat ini:';
+    const t = await trendingPools();
+    if (!t.length) return 'tidak ada data trending';
+    addrs = t.map((x) => x.addr);
+    symbols = t.map((x) => x.symbol);
+    header = 'Top 10 pool TOKEN/SOL trending (volume 1h tertinggi, TANPA filter bot, jadi banyak yang tidak akan lolos aturan bot):';
   }
   const facts = await Promise.all(addrs.map(poolFacts));
   let knowledge = '';
@@ -327,7 +354,14 @@ async function suggestText(arg: string): Promise<string> {
     knowledge = 'Kamu analis volume DLMM Meteora profesional. Jawab Bahasa Indonesia, ringkas, jangan mengarang data.';
   }
   const ctx = await statusText();
-  return askClaude([knowledge, '', 'KONDISI BOT SEKARANG:', ctx, '', header, ...facts.map((f) => '\n' + f)].join('\n'));
+  const web = symbols.length
+    ? [
+        '',
+        'SENTIMEN X: pakai WebSearch untuk tiap token (' + symbols.join(', ') + ') cari sentimen/narasi di X (Twitter) dan berita 24 jam terakhir. Kalau tidak ketemu data X yang jelas, tulis "sentimen X: tidak ada data", JANGAN mengarang. Sebut tanggal sumber kalau ada.',
+        'FORMAT JAWABAN: maksimal 3000 karakter total. Per pool 2-3 baris: verdict (MASUK / PANTAU / HINDARI), alasan volume DLMM, sentimen X. Tutup dengan 1-3 pilihan terbaik dan alasannya. Bahasa Indonesia, tanpa tabel markdown.',
+      ].join('\n')
+    : '';
+  return askClaude([knowledge, '', 'KONDISI BOT SEKARANG:', ctx, '', header, ...facts.map((f) => '\n' + f), web].join('\n'), symbols.length > 0);
 }
 
 // ---- Manual controls (bot must be STOPPED for open/close/clean; every mutation needs /ya <code>) ----
@@ -503,8 +537,8 @@ const HELP = [
   '/pnl – equity and PnL vs baselines',
   '/posisi – open position detail',
   '/log [n] – last n events (default 8, max 20)',
-  '/scan – pools passing the bot filters right now (~20s)',
-  '/suggest [pool] – Claude volume analyst on the scan result, or on one pool (~40s)',
+  '/scan – top 10 trending TOKEN/SOL pools by 1h volume, no bot filters (~5s)',
+  '/suggest [pool] – Claude analyst on the top 10 trending pools incl. X sentiment via web search (~3-6 min), or on one pool',
   '/startbot – build and start the live bot (needs /ya)',
   '/stopbot – stop the live bot, positions stay open (needs /ya)',
   '/open <pool> [sol] – place a limit BUY order only (no waiting, no monitoring), bot stopped only (needs /ya)',
@@ -530,7 +564,7 @@ async function reply(text: string): Promise<string> {
     case '/suggest': {
       if (isBusy()) return 'another operation is still running, wait';
       busy = true;
-      await send(cmd.startsWith('/scan') ? 'scanning…' : 'scanning and asking Claude…');
+      await send(cmd.startsWith('/scan') ? 'scanning…' : 'ambil top 10 trending, minta Claude analisis + sentimen X (bisa 3-6 menit)…');
       try {
         return cmd.startsWith('/scan') ? await scanText() : await suggestText(arg);
       } catch (e) {
