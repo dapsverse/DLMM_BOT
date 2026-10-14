@@ -461,7 +461,9 @@ export const env = {
   MAX_BELOW_HIGH_48H_PCT: num('MAX_BELOW_HIGH_48H_PCT', 0),
   // Limit-order legs (0 = off, Jupiter market as before). Evidence: 33/46 live entries dipped >=1% and 24/46 >=3% within 60m of entry, and a bid 2-3% below filled with +2..+4pt better price per fill (scratchpad dip.mjs, 2026-10-14).
   // Entry: put the token share as a SOL bid this % below the price, wait ENTRY_LIMIT_WAIT_MIN, cancel, buy only the unfilled remainder at market (after re-checking dollar flow).
-  ENTRY_LIMIT_BID_PCT: num('ENTRY_LIMIT_BID_PCT', 0),
+  ENTRY_LIMIT_BID_PCT: num('ENTRY_LIMIT_BID_PCT', 0), // depth of the bid ladder: bins from 1 below the price down to this % below it
+  // After the wait: abort the entry (rescan) when < 50% filled and the token is more than this % above its price at bid time. 0 = always continue at market.
+  ENTRY_LIMIT_MAX_CHASE_PCT: num('ENTRY_LIMIT_MAX_CHASE_PCT', 3),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.

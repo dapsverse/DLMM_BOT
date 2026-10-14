@@ -7,6 +7,7 @@ import {
   openPosition,
   closePositionFull,
   getActiveBin,
+  getFreshActiveBinId,
   openPool,
   placeLimitOrder,
   getLimitOrderProgress,
@@ -14,7 +15,7 @@ import {
   supportsLimitOrder,
   type DlmmPool,
 } from '../services/meteoraDLMM.js';
-import { binsForMove } from './limitOrderMath.js';
+import { binsForMove, tokenPriceChangePct, shouldAbortEntry } from './limitOrderMath.js';
 import { settlePendingSwapBack, DUST_RAW, type PendingSwapBack } from './pendingSwapBack.js';
 import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from '../services/jupiterSwap.js';
 import { connection, getWalletSolBalance, getTokenBalance, waitForTokenBalance } from '../services/solana.js';
@@ -676,8 +677,9 @@ async function placeOrderTracked(
   offsetBins: number,
   waitMin: number,
   keep: BN,
-): Promise<PendingLimitOrder> {
-  const placed = await placeLimitOrder(pool, goalOf(kind), xIsSol, amount, offsetBins, 2);
+  binCount = 2,
+): Promise<{ pending: PendingLimitOrder; activeBinId: number }> {
+  const placed = await placeLimitOrder(pool, goalOf(kind), xIsSol, amount, offsetBins, binCount);
   pendingLimitOrder = {
     kind,
     pool: poolAddress,
@@ -688,7 +690,7 @@ async function placeOrderTracked(
     keepRaw: keep.toString(),
     deadlineMs: Date.now() + waitMin * 60_000,
   };
-  return pendingLimitOrder;
+  return { pending: pendingLimitOrder, activeBinId: placed.activeBinId };
 }
 
 /** Withdraws everything from the order. fraction = filled share; tokenRaw = token the wallet holds beyond `keepRaw` afterwards (entry: the bought token, exit: the unsold token). */
@@ -713,9 +715,12 @@ async function acquireViaBid(
   recheck?: () => Promise<boolean>,
 ): Promise<{ tokenRaw: BN; filledLamports: BN } | null> {
   let p: PendingLimitOrder;
+  let activeBinAtPlace: number;
   try {
     const before = await getTokenBalance(otherMint);
-    p = await placeOrderTracked('entryBid', pool, poolAddress, xIsSol, otherMint, tokenShareLamports, binsForMove(env.ENTRY_LIMIT_BID_PCT, binStep, 'down'), env.ENTRY_LIMIT_WAIT_MIN, before);
+    // Spread over the bins from 1 bin below the price down to ENTRY_LIMIT_BID_PCT below it (3..12 bins): a wide order fills partially far more often than a 2-bin sliver (UI test 2026-10-14: ~50% in 32 min).
+    const binCount = Math.min(12, Math.max(3, binsForMove(env.ENTRY_LIMIT_BID_PCT, binStep, 'down')));
+    ({ pending: p, activeBinId: activeBinAtPlace } = await placeOrderTracked('entryBid', pool, poolAddress, xIsSol, otherMint, tokenShareLamports, 1, env.ENTRY_LIMIT_WAIT_MIN, before, binCount));
   } catch (err) {
     logger.warn('[rebalanceEngine] entry bid could not be placed — buying at market instead', { poolAddress, error: err instanceof Error ? err.message : String(err) });
     return null;
@@ -731,6 +736,12 @@ async function acquireViaBid(
   const { fraction, tokenRaw } = await cancelPendingOrder(p, pool);
   pendingLimitOrder = null;
   logger.info('[rebalanceEngine] entry bid settled', { poolAddress, filledFraction: fraction, tokenRaw: tokenRaw.toString() });
+  // Mostly unfilled and the token ran away: do not chase it at market, let the caller rescan.
+  const priceChangePct = tokenPriceChangePct(activeBinAtPlace, await getFreshActiveBinId(pool), binStep, xIsSol);
+  if (shouldAbortEntry(fraction, priceChangePct, env.ENTRY_LIMIT_MAX_CHASE_PCT)) {
+    if (tokenRaw.gten(DUST_RAW)) await swapBackOrPend(otherMint, tokenRaw, 'entry bid ran-away abort');
+    throw new Error(`[rebalanceEngine] entry aborted: bid ${(fraction * 100).toFixed(0)}% filled and the price is ${priceChangePct.toFixed(1)}% above the bid time (max ${env.ENTRY_LIMIT_MAX_CHASE_PCT}%) — rescanning`);
+  }
   if (recheck) {
     let ok = false;
     try {

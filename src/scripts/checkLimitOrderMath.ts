@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import BN from 'bn.js';
-import { orderSpec, binsForMove, spreadBins, filledFraction } from '../logic/limitOrderMath.js';
+import { orderSpec, binsForMove, spreadBins, filledFraction, tokenPriceChangePct, shouldAbortEntry } from '../logic/limitOrderMath.js';
 
 // Token is X (SOL is Y): buy cheaper = bid below active (deposit Y=SOL); sell higher = ask above (deposit X=token).
 assert.deepEqual(orderSpec(false, 'buyToken'), { isAskSide: false, dir: -1, depositIsX: false });
@@ -27,4 +27,13 @@ assert.equal(filledFraction('0', '0'), 0);
 assert.equal(filledFraction('0.005', '0.0025'), 0.5); // UI-decimal strings as the SDK returns them
 assert.equal(filledFraction('0.005', '0.005'), 0);
 assert.equal(filledFraction('abc', '1'), 0);
+// price change from active bins: token X -> up bins = price up; SOL X -> down bins = price up
+assert.ok(Math.abs(tokenPriceChangePct(-404, -400, 100, false) - 4.06) < 0.01); // DOPE case: +4 bins at 1%/bin
+assert.ok(Math.abs(tokenPriceChangePct(-404, -408, 100, true) - 4.06) < 0.01);
+assert.ok(tokenPriceChangePct(-404, -410, 100, false) < 0);
+assert.equal(shouldAbortEntry(0, 4.06, 3), true); // ran away, nothing filled
+assert.equal(shouldAbortEntry(0.6, 4.06, 3), false); // mostly filled: keep going
+assert.equal(shouldAbortEntry(0, 2, 3), false); // within tolerance
+assert.equal(shouldAbortEntry(0, -5, 3), false); // price fell, no chase
+assert.equal(shouldAbortEntry(0, 50, 0), false); // disabled
 console.log('checkLimitOrderMath ok');

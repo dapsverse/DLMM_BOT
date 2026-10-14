@@ -45,6 +45,20 @@ export function spreadBins(activeId: number, dir: 1 | -1, offset: number, count:
   return bins.sort((a, b) => a.id - b.id);
 }
 
+/** Token price change in percent between two active bins (the token is X: bin id rises with its price; SOL is X: bin id falls with it). */
+export function tokenPriceChangePct(binAtPlace: number, binNow: number, binStep: number, xIsSol: boolean): number {
+  const diff = xIsSol ? binAtPlace - binNow : binNow - binAtPlace;
+  return (Math.pow(1 + binStep / 10_000, diff) - 1) * 100;
+}
+
+/**
+ * After an entry-bid wait: abort the entry when the token ran away (price up more than maxChasePct since the bid was placed)
+ * and the bid mostly did not fill (< 0.5) — buying the rest at market would chase. maxChasePct <= 0 never aborts.
+ */
+export function shouldAbortEntry(fraction: number, priceChangePct: number, maxChasePct: number): boolean {
+  return maxChasePct > 0 && fraction < 0.5 && priceChangePct > maxChasePct;
+}
+
 /**
  * Fraction (0..1) of the deposit that has been filled, from the order's deposit-side totals.
  * The SDK's parsed order reports UI (decimal) amounts such as "0.005", not raw units (found on a mainnet test 2026-10-14).

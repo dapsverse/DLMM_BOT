@@ -231,6 +231,12 @@ export async function getActiveBin(pool: DlmmPool): Promise<BinLiquidity> {
   return pool.getActiveBin();
 }
 
+/** Fresh active bin id (refetches the cached pair state first). */
+export async function getFreshActiveBinId(pool: DlmmPool): Promise<number> {
+  await pool.refetchStates();
+  return (await pool.getActiveBin()).binId;
+}
+
 /** All open positions this wallet holds on the given pool. */
 export async function getUserPositions(pool: DlmmPool): Promise<LbPosition[]> {
   const { userPositions } = await pool.getPositionsByUserAndLbPair(wallet.publicKey);
@@ -357,6 +363,8 @@ export function supportsLimitOrder(pool: DlmmPool): boolean {
 }
 
 export interface PlacedLimitOrder {
+  /** active bin id at placement */
+  activeBinId: number;
   order: PublicKey;
   binIds: number[];
   signature: string;
@@ -382,7 +390,7 @@ export async function placeLimitOrder(pool: DlmmPool, goal: OrderGoal, xIsSol: b
   await withPriorityFee(tx, [wallet.publicKey, orderKeypair.publicKey]);
   const signature = await sendTx(tx, [orderKeypair], 'placeLimitOrder');
   logger.info('[dlmm] limit order placed', { goal, order: orderKeypair.publicKey.toBase58(), activeBin: active.binId, bins: bins.map((b) => b.id), amount: amount.toString(), signature });
-  return { order: orderKeypair.publicKey, binIds: bins.map((b) => b.id), signature };
+  return { activeBinId: active.binId, order: orderKeypair.publicKey, binIds: bins.map((b) => b.id), signature };
 }
 
 export interface LimitOrderProgress {
