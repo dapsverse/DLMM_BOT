@@ -108,9 +108,13 @@ async function tokenHoldings(wallet: string): Promise<{ mint: string; symbol: st
         let sol: number | null = null;
         let symbol = mint.slice(0, 6);
         try {
-          const d = (await (await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)).json()) as { pairs?: { priceNative?: string; baseToken?: { symbol?: string } }[] };
-          const pr = Number(d.pairs?.[0]?.priceNative);
-          symbol = d.pairs?.[0]?.baseToken?.symbol ?? symbol;
+          const d = (await (await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)).json()) as { pairs?: { priceNative?: string; baseToken?: { address?: string; symbol?: string }; quoteToken?: { address?: string }; liquidity?: { usd?: number } }[] };
+          // Only a pair where THIS token is the base and SOL the quote prices it in SOL (EMBER/MET came first and was off by ~280x).
+          const solPairs = (d.pairs ?? []).filter((p) => p.baseToken?.address === mint && p.quoteToken?.address === 'So11111111111111111111111111111111111111112');
+          solPairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+          const best = solPairs[0];
+          symbol = best?.baseToken?.symbol ?? d.pairs?.find((p) => p.baseToken?.address === mint)?.baseToken?.symbol ?? symbol;
+          const pr = Number(best?.priceNative);
           if (Number.isFinite(pr) && pr > 0) sol = ui * pr;
         } catch {
           /* unpriced */
