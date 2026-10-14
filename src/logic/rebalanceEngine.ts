@@ -937,9 +937,9 @@ export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAK
   return closeAndConvertToSol(ctx, reason);
 }
 
-/** Manual close (Telegram /close, bot stopped): close, swap the token side to SOL (fee-sized token portion kept), return the next capital. */
-export async function executeManualClose(ctx: PoolContext): Promise<number> {
-  return closeAndConvertToSol(ctx, 'MANUAL_CLOSE');
+/** Manual close (Telegram /close, bot stopped): close, then sell the token side on an ask askPct above the price (0 = Jupiter now); fee-sized token portion kept. Returns the next capital. */
+export async function executeManualClose(ctx: PoolContext, askPct = 0): Promise<number> {
+  return closeAndConvertToSol(ctx, 'MANUAL_CLOSE', askPct > 0 ? { pct: askPct, waitMin: env.DOWNBREAK_ASK_WAIT_MIN } : undefined);
 }
 
 /**

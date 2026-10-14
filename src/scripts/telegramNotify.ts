@@ -174,6 +174,7 @@ async function statusText(): Promise<string> {
   if (st.pendingSwap) lines.push('pending swap-back: yes');
   if (sol !== null) lines.push(`wallet SOL: ${sol.toFixed(4)}`);
   for (const h of holds) lines.push(`holding: ${fmtHold(h)}`);
+  if (existsSync('state/manual-orders.json') && readFileSync('state/manual-orders.json', 'utf8').trim() !== '[]') lines.push('manual orders:\n' + (await ops(['orders'], 90_000)));
   const h = count ? lastHealth() : null;
   if (h) lines.push(`pos ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (${hhmm(h.ts)}, ${ageMin(h.ts)}m ago)`);
   return lines.join('\n');
@@ -231,6 +232,8 @@ function childEnv(): NodeJS.ProcessEnv {
 }
 
 let busy = false;
+let bgBusy = false; // a detached long operation (openpool) is running
+const isBusy = () => busy || bgBusy;
 
 async function scanText(): Promise<string> {
   const { stdout } = await run('npx', ['tsx', 'src/scripts/scanOnce.ts'], { env: childEnv(), timeout: 120_000, maxBuffer: 4_000_000 });
@@ -340,11 +343,12 @@ const botPid = (): string | null => {
   }
 };
 
-async function ops(args: string[], timeoutMs: number): Promise<string> {
+async function ops(args: string[], timeoutMs: number, keepRe?: RegExp): Promise<string> {
   try {
     const { stdout } = await run(LIVECTL, ['npx', 'tsx', 'src/scripts/manualOps.ts', ...args], { timeout: timeoutMs, maxBuffer: 4_000_000 });
     const lines = scrub(stdout).split('\n').filter((l) => l.trim() && !/\b429\b/.test(l));
-    return lines.slice(-12).join('\n') || '(no output)';
+    const picked = keepRe ? lines.filter((l) => keepRe.test(l)).slice(-8).map((l) => l.slice(0, 300)) : [];
+    return (picked.length ? picked : lines.slice(-12)).join('\n') || '(no output)';
   } catch (e) {
     const out = (e as { stdout?: string }).stdout ?? '';
     return 'FAILED: ' + (scrub(out).split('\n').filter((l) => l.trim()).slice(-4).join('\n') || (e instanceof Error ? e.message.slice(0, 200) : 'unknown'));
@@ -367,7 +371,7 @@ async function confirmText(arg: string): Promise<string> {
   if (arg !== pending.code) return 'kode salah';
   const { exec } = pending;
   pending = null;
-  if (busy) return 'operasi lain masih berjalan';
+  if (isBusy()) return 'operasi lain masih berjalan';
   busy = true;
   try {
     return await exec();
@@ -378,6 +382,7 @@ async function confirmText(arg: string): Promise<string> {
 
 async function startBot(): Promise<string> {
   if (botPid()) return 'bot sudah jalan';
+  if (isBusy()) return 'ada operasi manual yang masih berjalan, tunggu selesai';
   try {
     await run('npm', ['run', 'build'], { timeout: 180_000, maxBuffer: 4_000_000 });
   } catch (e) {
@@ -409,32 +414,62 @@ async function stopBot(force: boolean): Promise<string> {
   return `${botPid() ? 'bot MASIH jalan (SIGTERM belum berhasil)' : 'bot STOPPED'}. Posisi on-chain: ${count ?? '?'} (stop bot TIDAK menutup posisi, tidak ada yang mengelolanya sampai /startbot).`;
 }
 
-async function openCmd(arg: string): Promise<string> {
+async function openCmd(arg: string, mode: 'bid' | 'market' | 'bot' = 'bid'): Promise<string> {
+  const botStyle = mode === 'bot';
   const stopped = needStopped();
   if (stopped) return stopped;
   const [pool = '', sol = ''] = arg.split(/\s+/);
   if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(pool)) return 'pakai: /open <alamat pool> [jumlah SOL]';
   if (sol && !(Number(sol) > 0)) return 'jumlah SOL tidak valid';
-  const summary = await ops(['open-dry', pool, sol], 120_000);
+  const summary = await ops([mode === 'bot' ? 'openpool-dry' : mode === 'bid' ? 'bid-dry' : 'open-dry', pool, sol], 180_000);
   if (/^(FAILED|ERROR)/m.test(summary)) return summary;
-  return arm('BUKA POSISI (uang asli)\n' + summary, async () => {
+  return arm((mode === 'bot' ? 'BUKA POSISI GAYA BOT (uang asli, bid ladder dulu)\n' : mode === 'bid' ? 'PASANG LIMIT BUY (uang asli)\n' : 'BUKA POSISI (uang asli, beli market langsung)\n') + summary, async () => {
     const stopped2 = needStopped();
     if (stopped2) return stopped2;
-    await send('membuka posisi… (bisa 1-3 menit)');
-    return ops(['open', pool, sol], 600_000);
+    if (mode === 'bid') return ops(['bid', pool, sol], 300_000);
+    if (mode === 'market') {
+      await send('membuka posisi… (bisa 1-3 menit)');
+      return ops(['open', pool, sol], 600_000);
+    }
+    // long run (bid wait up to ~30 min): detach from the command loop and report when finished
+    bgBusy = true;
+    void ops(['openpool', pool, sol], 45 * 60_000, /entry bid|limit order|abort|opened|ERROR|FAILED|re-check/i)
+      .then((r) => send('openpool selesai:\n' + r))
+      .finally(() => {
+        bgBusy = false;
+      });
+    return 'openpool dimulai. Bid ladder bisa sampai ~33 menit, saya kabari saat selesai. /status tetap bisa dipakai; perintah lain ditolak sampai selesai.';
   });
 }
 
-async function closeCmd(): Promise<string> {
+async function closeCmd(arg: string): Promise<string> {
   const stopped = needStopped();
   if (stopped) return stopped;
-  const summary = await ops(['close-dry'], 120_000);
+  if (arg && arg !== 'now' && !(Number(arg) > 0)) return 'pakai: /close (ask default), /close <persen> atau /close now (jual market)';
+  const summary = await ops(['close-dry', arg], 120_000);
   if (/^(FAILED|ERROR)/m.test(summary) || /no open position/.test(summary)) return summary;
   return arm('TUTUP POSISI (uang asli)\n' + summary, async () => {
     const stopped2 = needStopped();
     if (stopped2) return stopped2;
     await send('menutup posisi… (bisa 1-3 menit)');
-    return ops(['close'], 600_000);
+    return ops(['close', arg], 600_000);
+  });
+}
+
+async function ordersCmd(): Promise<string> {
+  return ops(['orders'], 120_000);
+}
+
+async function cancelOrderCmd(arg: string): Promise<string> {
+  const stopped = needStopped();
+  if (stopped) return stopped;
+  if (!arg) return 'pakai: /cancelorder <nomor> atau /cancelorder all (nomor dari /orders)';
+  const list = await ops(['orders'], 120_000);
+  if (/no manual limit orders/.test(list)) return list;
+  return arm('BATALKAN LIMIT ORDER (deposit yang belum terisi dan hasil yang sudah terisi kembali ke wallet)\n' + list + `\n\nPilihan: ${arg}`, async () => {
+    const stopped2 = needStopped();
+    if (stopped2) return stopped2;
+    return ops(['cancel', arg], 300_000);
   });
 }
 
@@ -472,8 +507,12 @@ const HELP = [
   '/suggest [pool] – Claude volume analyst on the scan result, or on one pool (~40s)',
   '/startbot – build and start the live bot (needs /ya)',
   '/stopbot – stop the live bot, positions stay open (needs /ya)',
-  '/open <pool> [sol] – manual open, only while the bot is stopped (needs /ya)',
-  '/close – manual close, only while the bot is stopped (needs /ya)',
+  '/open <pool> [sol] – place a limit BUY order only (no waiting, no monitoring), bot stopped only (needs /ya)',
+  '/openmarket <pool> [sol] – instant market open of a position, bot stopped only (needs /ya)',
+  '/orders – status of your manual limit orders (fill %)',
+  '/cancelorder <n|all> – cancel manual limit orders (needs /ya)',
+  '/openpool <pool> [sol] – open exactly like the bot: bid ladder, don\'t-chase abort, flow re-check (needs /ya, up to ~33 min)',
+  '/close [pct|now] – close position and place a limit SELL ask (default bot pct, or now = market), bot stopped only (needs /ya)',
   '/clean [n|all] – list or sell stuck tokens, only while the bot is stopped (needs /ya)',
   '/ya <code> – confirm the pending action',
   '/batal – cancel the pending action',
@@ -489,7 +528,7 @@ async function reply(text: string): Promise<string> {
     case '/log': return logText(arg);
     case '/scan':
     case '/suggest': {
-      if (busy) return 'another scan/suggest is still running, wait';
+      if (isBusy()) return 'another operation is still running, wait';
       busy = true;
       await send(cmd.startsWith('/scan') ? 'scanning…' : 'scanning and asking Claude…');
       try {
@@ -502,8 +541,12 @@ async function reply(text: string): Promise<string> {
     }
     case '/startbot': return botPid() ? 'bot sudah jalan' : arm('NYALAKAN BOT (build ulang lalu start, uang asli; bot akan melanjutkan posisi yang terbuka dan boleh masuk pool sendiri)', startBot);
     case '/stopbot': return botPid() ? arm('MATIKAN BOT (posisi yang terbuka TIDAK ditutup dan tidak dikelola)', () => stopBot(arg === 'force')) : 'bot sudah mati';
-    case '/open': return openCmd(text.trim().slice(cmd.length).trim());
-    case '/close': return closeCmd();
+    case '/open': return openCmd(text.trim().slice(cmd.length).trim(), 'bid');
+    case '/openmarket': return openCmd(text.trim().slice(cmd.length).trim(), 'market');
+    case '/openpool': return openCmd(text.trim().slice(cmd.length).trim(), 'bot');
+    case '/orders': return ordersCmd();
+    case '/cancelorder': return cancelOrderCmd(arg);
+    case '/close': return closeCmd(arg);
     case '/clean': return cleanCmd(arg);
     case '/ya': return confirmText(arg);
     case '/batal': pending = null; return 'dibatalkan';
