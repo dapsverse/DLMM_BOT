@@ -316,7 +316,7 @@ async function tick(): Promise<void> {
   })) {
     logger.warn('[index] upside break: position is all SOL and out of range — exiting instead of re-buying higher', { pool: ctx.poolAddress, currentValueSol, unclaimedFeesSol });
     try {
-      currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools));
+      currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false));
       currentPool = null;
     } catch (err) {
       logger.error('[index] executeCleanExit (upside break) threw, reconciling state', {
