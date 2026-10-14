@@ -1,10 +1,11 @@
 import { createRequire } from 'node:module';
-import { Keypair, PublicKey, Transaction, ComputeBudgetProgram, sendAndConfirmTransaction } from '@solana/web3.js';
+import { Keypair, PublicKey, Transaction, ComputeBudgetProgram } from '@solana/web3.js';
 import BN from 'bn.js';
 import { connection, wallet, getDynamicPriorityFeeMicroLamports } from './solana.js';
 import { COMPUTE_UNIT_LIMIT } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
+import { orderSpec, spreadBins, filledFraction, type OrderGoal } from '../logic/limitOrderMath.js';
 
 /**
  * ponytail: @meteora-ag/dlmm has TWO separate packaging bugs, both worked
@@ -82,6 +83,24 @@ export interface DlmmPool {
   lbPair: { tokenXMint: PublicKey; tokenYMint: PublicKey; reserveX: PublicKey; reserveY: PublicKey; binStep: number };
   refetchStates(): Promise<void>;
   getActiveBin(): Promise<BinLiquidity>;
+  placeLimitOrder(params: {
+    owner: PublicKey;
+    payer: PublicKey;
+    sender: PublicKey;
+    limitOrder: PublicKey;
+    params: { isAskSide: boolean; relativeBin: null; bins: { id: number; amount: BN }[] };
+  }): Promise<Transaction>;
+  cancelLimitOrder(params: { limitOrderPubkey: PublicKey; owner: PublicKey; rentReceiver: PublicKey; binIds: number[] }): Promise<Transaction>;
+  getLimitOrder(limitOrder: PublicKey): Promise<{
+    publicKey: PublicKey;
+    limitOrderData: {
+      totalDepositAmountX: string;
+      totalDepositAmountY: string;
+      totalUnfilledAmountX: string;
+      totalUnfilledAmountY: string;
+      limitOrderBinData: { binId: number; empty: boolean }[];
+    };
+  }>;
   getPositionsByUserAndLbPair(
     userPubKey?: PublicKey,
   ): Promise<{ activeBin: BinLiquidity; userPositions: LbPosition[] }>;
@@ -178,7 +197,21 @@ async function sendTx(tx: Transaction, extraSigners: Keypair[] = [], label = 'tx
       tx.recentBlockhash = blockhash;
       tx.lastValidBlockHeight = lastValidBlockHeight;
       tx.signatures = [];
-      return sendAndConfirmTransaction(connection, tx, [wallet, ...extraSigners], { commitment: 'confirmed' });
+      tx.sign(wallet, ...extraSigners);
+      const raw = tx.serialize();
+      const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+      // Rebroadcast the same signed tx every 2s while waiting: sent-once txs were silently dropped on 2026-10-13/14
+      // ("block height exceeded", signature never on chain) for swaps and a cancelLimitOrder alike. A landed tx makes resends a no-op.
+      const rebroadcast = setInterval(() => {
+        connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => {});
+      }, 2_000);
+      try {
+        const confirmation = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+        if (confirmation.value.err) throw new Error(`tx ${signature} failed on-chain: ${JSON.stringify(confirmation.value.err)}`);
+      } finally {
+        clearInterval(rebroadcast);
+      }
+      return signature;
     },
     { maxRetries: 3, baseDelayMs: 1_000, label },
   );
@@ -308,4 +341,84 @@ export async function closePositionFull(pool: DlmmPool, position: LbPosition): P
     signatures,
   });
   return signatures;
+}
+
+// ── Limit orders (SDK 1.9.14 placeLimitOrder / cancelLimitOrder) ─────────────────────────────────────────────
+// Added 2026-10-14: entry bid below price (no Jupiter spread) and exit ask above price after a down-break.
+// A maker fill earns only ~50% of the pool fee (live baton-SOL order: bonus ~0.3% of the filled amount).
+
+/** Pools created before the limit-order program version don't support them. */
+export function supportsLimitOrder(pool: DlmmPool): boolean {
+  try {
+    return Boolean((DLMMPkg as { isSupportLimitOrder: (s: unknown) => boolean }).isSupportLimitOrder(pool.lbPair));
+  } catch {
+    return false;
+  }
+}
+
+export interface PlacedLimitOrder {
+  order: PublicKey;
+  binIds: number[];
+  signature: string;
+}
+
+/**
+ * Places `amount` (raw units of the deposited mint) as an order `offsetBins` away from the active bin, spread over `count` bins.
+ * buyToken deposits SOL, sellToken deposits the token; the side/direction depend on which leg is SOL (see limitOrderMath.orderSpec).
+ */
+export async function placeLimitOrder(pool: DlmmPool, goal: OrderGoal, xIsSol: boolean, amount: BN, offsetBins: number, count = 2): Promise<PlacedLimitOrder> {
+  await pool.refetchStates();
+  const active = await getActiveBin(pool);
+  const spec = orderSpec(xIsSol, goal);
+  const bins = spreadBins(active.binId, spec.dir, offsetBins, count, amount);
+  const orderKeypair = Keypair.generate();
+  const tx = await pool.placeLimitOrder({
+    owner: wallet.publicKey,
+    payer: wallet.publicKey,
+    sender: wallet.publicKey,
+    limitOrder: orderKeypair.publicKey,
+    params: { isAskSide: spec.isAskSide, relativeBin: null, bins },
+  });
+  await withPriorityFee(tx, [wallet.publicKey, orderKeypair.publicKey]);
+  const signature = await sendTx(tx, [orderKeypair], 'placeLimitOrder');
+  logger.info('[dlmm] limit order placed', { goal, order: orderKeypair.publicKey.toBase58(), activeBin: active.binId, bins: bins.map((b) => b.id), amount: amount.toString(), signature });
+  return { order: orderKeypair.publicKey, binIds: bins.map((b) => b.id), signature };
+}
+
+export interface LimitOrderProgress {
+  /** 0..1 of the deposited side that has been filled */
+  fraction: number;
+  /** bin ids still on the account */
+  binIds: number[];
+}
+
+/**
+ * null = the order account is confirmed gone (checked twice, 2s apart, to ride out a lagging RPC). An RPC/parse failure THROWS:
+ * reading it as "gone" would make callers drop a live order that still holds capital.
+ */
+export async function getLimitOrderProgress(pool: DlmmPool, order: PublicKey, goal: OrderGoal, xIsSol: boolean): Promise<LimitOrderProgress | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const info = await connection.getAccountInfo(order, 'confirmed');
+    if (info) {
+      const { limitOrderData: d } = await pool.getLimitOrder(order);
+      const depositIsX = orderSpec(xIsSol, goal).depositIsX;
+      return {
+        fraction: depositIsX ? filledFraction(d.totalDepositAmountX, d.totalUnfilledAmountX) : filledFraction(d.totalDepositAmountY, d.totalUnfilledAmountY),
+        binIds: d.limitOrderBinData.map((b) => b.binId),
+      };
+    }
+    if (attempt === 0) await new Promise((r) => setTimeout(r, 2_000));
+  }
+  return null;
+}
+
+/** Withdraws everything (unfilled deposit + filled proceeds) to the wallet and closes the account. Returns false if the account is already gone. */
+export async function cancelLimitOrderFull(pool: DlmmPool, order: PublicKey, goal: OrderGoal, xIsSol: boolean): Promise<boolean> {
+  const progress = await getLimitOrderProgress(pool, order, goal, xIsSol);
+  if (!progress) return false;
+  const tx = await pool.cancelLimitOrder({ limitOrderPubkey: order, owner: wallet.publicKey, rentReceiver: wallet.publicKey, binIds: progress.binIds });
+  await withPriorityFee(tx, [wallet.publicKey]);
+  const signature = await sendTx(tx, [], 'cancelLimitOrder');
+  logger.info('[dlmm] limit order cancelled/withdrawn', { order: order.toBase58(), filledFraction: progress.fraction, signature });
+  return true;
 }

@@ -16,6 +16,10 @@ import {
   retryPendingSwapBack,
   getPendingSwapBack,
   restorePendingSwapBack,
+  processPendingLimitOrder,
+  getPendingLimitOrder,
+  restorePendingLimitOrder,
+  executeDownBreakExit,
   POSITION_RENT_BUFFER_SOL,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
@@ -64,6 +68,7 @@ function persist(): void {
     chaseGuard: [...chaseGuardPools.entries()],
     dollarFlowBreach,
     pendingSwapBack: getPendingSwapBack(),
+    pendingLimitOrder: getPendingLimitOrder(),
   });
 }
 
@@ -121,6 +126,13 @@ async function tryEnterPool(): Promise<void> {
     await retryPendingSwapBack();
   } catch (err) {
     logger.error('[index] pending swap-back still failing — holding off new entries', { error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  // An open limit order (exit ask / leftover entry bid) holds the capital: settle it first, entries wait while an ask is inside its window.
+  try {
+    if ((await processPendingLimitOrder()) === 'waiting') return;
+  } catch (err) {
+    logger.error('[index] pending limit order could not be settled — holding off new entries', { error: err instanceof Error ? err.message : String(err) });
     return;
   }
   if (env.MIN_EQUITY_STOP_SOL > 0) {
@@ -228,6 +240,11 @@ async function tryEnterPool(): Promise<void> {
           currentCapitalSol,
           candidate.bin_step,
           xIsSol ? candidate.reserve_x : candidate.reserve_y,
+          // after an entry-bid wait the flow may have turned: same $-flow gate as above, fail-closed
+          async () => {
+            const again = await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd);
+            return again !== null && again.buyRatioUsd >= env.MIN_DOLLAR_BUY_RATIO;
+          },
         ),
       );
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
@@ -363,6 +380,18 @@ async function tick(): Promise<void> {
     }
     if (isCooldownActive(ctx)) {
       logger.info('[index] rebalance triggered but still in cooldown, holding');
+      return;
+    }
+    // Token price stayed BELOW the range for the whole idle window: close and sell on an ask above the price instead of recentering (DOWNBREAK_ASK_PCT > 0).
+    if (env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange) {
+      logger.warn('[index] down-break held out of range — closing and selling the token on an ask limit order', { pool: ctx.poolAddress, askPct: env.DOWNBREAK_ASK_PCT });
+      try {
+        currentCapitalSol = await guarded(() => executeDownBreakExit(ctx));
+        currentPool = null;
+      } catch (err) {
+        logger.error('[index] executeDownBreakExit threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+        currentPool = await reconcilePoolStateAfterFailure(ctx);
+      }
       return;
     }
     // REBALANCE only ever fires idle-forced (out-of-range) now — see
@@ -544,6 +573,7 @@ async function main(): Promise<void> {
     lastSwitchAtMs = saved.lastSwitchAtMs;
     dollarFlowBreach = saved.dollarFlowBreach;
     restorePendingSwapBack(saved.pendingSwapBack ?? null);
+    restorePendingLimitOrder(saved.pendingLimitOrder ?? null);
   }
   if (recovery.ctx) {
     currentPool = recovery.ctx;
@@ -575,7 +605,8 @@ async function main(): Promise<void> {
     }
     const solBalance = await getWalletSolBalance();
     const gasReserveSol = computeGasReserveSol(solBalance);
-    if (solBalance < env.INITIAL_LP_CAPITAL_SOL + gasReserveSol) {
+    // with an open limit order the capital is inside the order, not liquid in the wallet
+    if (!saved?.pendingLimitOrder && solBalance < env.INITIAL_LP_CAPITAL_SOL + gasReserveSol) {
       throw new Error(
         `[index] wallet balance ${solBalance} SOL is below required INITIAL_LP_CAPITAL_SOL(${env.INITIAL_LP_CAPITAL_SOL}) + gas reserve(${gasReserveSol})`,
       );

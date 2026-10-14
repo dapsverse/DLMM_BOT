@@ -59,4 +59,8 @@ assert.equal(existsSync(`${f}.tmp`), false); // tmp renamed away
 writeFileSync(f, '{"version":1,"trunc');
 assert.equal(loadState(W, f), null);
 assert.equal(readFileSync(`${f}.bad`, 'utf8'), '{"version":1,"trunc');
+// pendingLimitOrder: valid one round-trips, malformed one rejects the file
+const withOrder = { ...state, pendingLimitOrder: { kind: 'exitAsk' as const, pool: 'P', order: 'O', xIsSol: false, mint: 'M', amountRaw: '100', keepRaw: '5', deadlineMs: 123 } };
+assert.deepEqual(parseState(JSON.stringify(withOrder), W)?.pendingLimitOrder, withOrder.pendingLimitOrder);
+assert.equal(parseState(JSON.stringify({ ...state, pendingLimitOrder: { kind: 'exitAsk', pool: 'P' } }), W), null);
 console.log('OK: state store round-trips, rejects corrupt/foreign files, boot reconciliation trusts the chain and refuses ambiguity');

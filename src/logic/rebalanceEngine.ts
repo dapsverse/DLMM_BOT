@@ -7,9 +7,15 @@ import {
   openPosition,
   closePositionFull,
   getActiveBin,
+  openPool,
+  placeLimitOrder,
+  getLimitOrderProgress,
+  cancelLimitOrderFull,
+  supportsLimitOrder,
   type DlmmPool,
 } from '../services/meteoraDLMM.js';
-import { settlePendingSwapBack, type PendingSwapBack } from './pendingSwapBack.js';
+import { binsForMove } from './limitOrderMath.js';
+import { settlePendingSwapBack, DUST_RAW, type PendingSwapBack } from './pendingSwapBack.js';
 import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from '../services/jupiterSwap.js';
 import { connection, getWalletSolBalance, getTokenBalance, waitForTokenBalance } from '../services/solana.js';
 import { isPoolStillEligible, getCurrentPriceUsd, recordChaseGuardExit, type ScannerConfig } from '../services/meteoraScanner.js';
@@ -130,6 +136,8 @@ export function isCooldownActive(ctx: PoolContext, now = Date.now()): boolean {
 export interface BinRangeStatus {
   currentBinId: number;
   isOutOfRange: boolean;
+  /** out of range with the TOKEN price below the range (bin ids fall with the token price when the token is X, rise when SOL is X) */
+  tokenBelowRange: boolean;
 }
 
 /**
@@ -142,7 +150,9 @@ export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatu
   const activeBin = await getActiveBin(ctx.pool);
   const radius = computeBinRadius(ctx.binStep);
   const isOutOfRange = ctx.centerBinId === null || Math.abs(activeBin.binId - ctx.centerBinId) > radius;
-  return { currentBinId: activeBin.binId, isOutOfRange };
+  const tokenBelowRange =
+    isOutOfRange && ctx.centerBinId !== null && (ctx.xIsSol ? activeBin.binId > ctx.centerBinId + radius : activeBin.binId < ctx.centerBinId - radius);
+  return { currentBinId: activeBin.binId, isOutOfRange, tokenBelowRange };
 }
 
 /** Call once per health-check tick to keep ctx.outOfRangeSinceMs/inRangeSinceMs accurate (debounced — see logic/outOfRangeTracking.ts, shared with paper-trade). */
@@ -499,6 +509,8 @@ export async function openInitialPosition(
   capitalSol: number,
   binStep: number,
   reserveSolAccount: string,
+  /** called after an entry-bid wait, before the position opens: false aborts the entry (fail-closed) */
+  recheck?: () => Promise<boolean>,
 ): Promise<PoolContext> {
   const otherMint = xIsSol ? mintY : mintX;
   // Pre-flight BEFORE any swap: a failure after the swap costs a full round-trip of spread.
@@ -521,7 +533,20 @@ export async function openInitialPosition(
   const otherMintDecimals = await getMintDecimals(otherMint);
 
   logger.info('[rebalanceEngine] opening initial position', { poolAddress, capitalSol, otherMintDecimals });
-  const swapResult = await swapExactIn(WSOL_MINT, otherMint, tokenShareLamports);
+  // Token share: first as a limit bid below the price (no Jupiter spread; live entries dip right after entry), the unfilled remainder at market.
+  let limitGot = new BN(0);
+  let remainingLamports = tokenShareLamports;
+  if (env.ENTRY_LIMIT_BID_PCT > 0 && supportsLimitOrder(pool)) {
+    const bid = await acquireViaBid(pool, poolAddress, xIsSol, otherMint, tokenShareLamports, binStep, recheck);
+    if (bid) {
+      limitGot = bid.tokenRaw;
+      remainingLamports = tokenShareLamports.sub(bid.filledLamports);
+    }
+  }
+  let swapOut = new BN(0);
+  if (remainingLamports.gt(tokenShareLamports.divn(20))) {
+    swapOut = new BN((await swapExactIn(WSOL_MINT, otherMint, remainingLamports)).outAmount);
+  }
 
   // Don't trust a single immediate balance read after the swap — see
   // waitForTokenBalance's doc comment for the live incident (a stale read
@@ -529,8 +554,8 @@ export async function openInitialPosition(
   // position that then correctly-but-confusingly read as "50% down").
   // 95% of the swap's own expected outAmount as the threshold — leaves
   // room for quote-vs-actual slippage without masking a genuinely stale 0.
-  const expectedOtherAmount = new BN(swapResult.outAmount).muln(95).divn(100);
-  await waitForTokenBalance(otherMint, expectedOtherAmount);
+  const expectedOtherAmount = limitGot.add(swapOut).muln(95).divn(100);
+  if (expectedOtherAmount.gtn(0)) await waitForTokenBalance(otherMint, expectedOtherAmount);
 
   const [balX, balY] = await Promise.all([getTokenBalance(mintX), getTokenBalance(mintY)]);
   const radius = computeBinRadius(binStep);
@@ -597,6 +622,153 @@ export async function openInitialPosition(
   return ctx;
 }
 
+// ── Limit-order legs (2026-10-14) ────────────────────────────────────────────────────────────────────────────
+// A bid below the price replaces the entry swap; an ask above the price replaces the exit swap after a down-break.
+// The single order slot is persisted by index.ts and settled at the start of every flat tick, so a restart or a failed
+// cancel never strands the capital (a maker fill earns ~50% of the pool fee, see meteoraDLMM.ts).
+export interface PendingLimitOrder {
+  kind: 'entryBid' | 'exitAsk';
+  pool: string;
+  order: string;
+  xIsSol: boolean;
+  /** the pool's non-SOL mint */
+  mint: string;
+  amountRaw: string;
+  /** token balance that is not part of this order (kept fee portion / pre-existing balance) */
+  keepRaw: string;
+  deadlineMs: number;
+}
+
+let pendingLimitOrder: PendingLimitOrder | null = null;
+
+export function getPendingLimitOrder(): PendingLimitOrder | null {
+  return pendingLimitOrder;
+}
+
+export function restorePendingLimitOrder(p: PendingLimitOrder | null): void {
+  pendingLimitOrder = p;
+}
+
+const LIMIT_POLL_MS = 20_000;
+const FILLED_FRACTION = 0.999;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const goalOf = (kind: PendingLimitOrder['kind']): 'buyToken' | 'sellToken' => (kind === 'entryBid' ? 'buyToken' : 'sellToken');
+
+/** Token balance once it stops changing (a withdraw's own balance can lag the confirmed tx on a load-balanced RPC). */
+async function readSettledBalance(mint: string): Promise<BN> {
+  let last = await getTokenBalance(mint);
+  for (let i = 0; i < 4; i++) {
+    await sleep(1_500);
+    const next = await getTokenBalance(mint);
+    if (next.eq(last)) return next;
+    last = next;
+  }
+  return last;
+}
+
+async function placeOrderTracked(
+  kind: PendingLimitOrder['kind'],
+  pool: DlmmPool,
+  poolAddress: string,
+  xIsSol: boolean,
+  mint: string,
+  amount: BN,
+  offsetBins: number,
+  waitMin: number,
+  keep: BN,
+): Promise<PendingLimitOrder> {
+  const placed = await placeLimitOrder(pool, goalOf(kind), xIsSol, amount, offsetBins, 2);
+  pendingLimitOrder = {
+    kind,
+    pool: poolAddress,
+    order: placed.order.toBase58(),
+    xIsSol,
+    mint,
+    amountRaw: amount.toString(),
+    keepRaw: keep.toString(),
+    deadlineMs: Date.now() + waitMin * 60_000,
+  };
+  return pendingLimitOrder;
+}
+
+/** Withdraws everything from the order. fraction = filled share; tokenRaw = token the wallet holds beyond `keepRaw` afterwards (entry: the bought token, exit: the unsold token). */
+async function cancelPendingOrder(p: PendingLimitOrder, pool: DlmmPool): Promise<{ fraction: number; tokenRaw: BN }> {
+  const order = new PublicKey(p.order);
+  const goal = goalOf(p.kind);
+  const prog = await getLimitOrderProgress(pool, order, goal, p.xIsSol);
+  const fraction = prog?.fraction ?? 0;
+  if (prog) await cancelLimitOrderFull(pool, order, goal, p.xIsSol);
+  const balance = await readSettledBalance(p.mint);
+  const tokenRaw = BN.max(balance.sub(new BN(p.keepRaw)), new BN(0));
+  return { fraction, tokenRaw };
+}
+
+async function acquireViaBid(
+  pool: DlmmPool,
+  poolAddress: string,
+  xIsSol: boolean,
+  otherMint: string,
+  tokenShareLamports: BN,
+  binStep: number,
+  recheck?: () => Promise<boolean>,
+): Promise<{ tokenRaw: BN; filledLamports: BN } | null> {
+  let p: PendingLimitOrder;
+  try {
+    const before = await getTokenBalance(otherMint);
+    p = await placeOrderTracked('entryBid', pool, poolAddress, xIsSol, otherMint, tokenShareLamports, binsForMove(env.ENTRY_LIMIT_BID_PCT, binStep, 'down'), env.ENTRY_LIMIT_WAIT_MIN, before);
+  } catch (err) {
+    logger.warn('[rebalanceEngine] entry bid could not be placed — buying at market instead', { poolAddress, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+  logger.info('[rebalanceEngine] entry bid placed, waiting for a fill', { poolAddress, bidPct: env.ENTRY_LIMIT_BID_PCT, waitMin: env.ENTRY_LIMIT_WAIT_MIN });
+  const order = new PublicKey(p.order);
+  while (Date.now() < p.deadlineMs) {
+    await sleep(LIMIT_POLL_MS);
+    const prog = await getLimitOrderProgress(pool, order, 'buyToken', xIsSol);
+    if (!prog || prog.fraction >= FILLED_FRACTION) break;
+  }
+  // Errors from here on leave pendingLimitOrder set: the next flat tick cancels it (processPendingLimitOrder).
+  const { fraction, tokenRaw } = await cancelPendingOrder(p, pool);
+  pendingLimitOrder = null;
+  logger.info('[rebalanceEngine] entry bid settled', { poolAddress, filledFraction: fraction, tokenRaw: tokenRaw.toString() });
+  if (recheck) {
+    let ok = false;
+    try {
+      ok = await recheck();
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      if (tokenRaw.gten(DUST_RAW)) await swapBackOrPend(otherMint, tokenRaw, 'entry bid recheck failed');
+      throw new Error('[rebalanceEngine] entry re-check failed after the limit wait — entry aborted, capital back in SOL');
+    }
+  }
+  return { tokenRaw, filledLamports: tokenShareLamports.muln(Math.round(fraction * 10_000)).divn(10_000) };
+}
+
+/**
+ * Called at the start of every flat tick. 'waiting' = an exit ask is still inside its window (entries stay blocked: the capital is in the order).
+ * An order past its deadline, fully filled, vanished, or any leftover entry bid (never resumed after a restart) is cancelled, and whatever token comes back is sold via Jupiter (pending swap-back on failure).
+ */
+let lastLimitCheckAtMs = 0;
+
+export async function processPendingLimitOrder(): Promise<'none' | 'waiting' | 'done'> {
+  const p = pendingLimitOrder;
+  if (!p) return 'none';
+  // an ask inside its window is only polled once a minute (each poll is several RPC calls)
+  if (p.kind === 'exitAsk' && Date.now() < p.deadlineMs && Date.now() - lastLimitCheckAtMs < 60_000) return 'waiting';
+  lastLimitCheckAtMs = Date.now();
+  const pool = await openPool(p.pool);
+  const prog = await getLimitOrderProgress(pool, new PublicKey(p.order), goalOf(p.kind), p.xIsSol);
+  const settle = p.kind === 'entryBid' || prog === null || prog.fraction >= FILLED_FRACTION || Date.now() >= p.deadlineMs;
+  if (!settle) return 'waiting';
+  const { fraction, tokenRaw } = await cancelPendingOrder(p, pool);
+  pendingLimitOrder = null;
+  logger.warn('[rebalanceEngine] limit order settled', { kind: p.kind, pool: p.pool, filledFraction: fraction, tokenLeftRaw: tokenRaw.toString() });
+  if (tokenRaw.gten(DUST_RAW)) await swapBackOrPend(p.mint, tokenRaw, `${p.kind} settle`);
+  return 'done';
+}
+
 /**
  * Swap-back that failed AFTER an irreversible close. Retried by index.ts on every flat tick until it
  * lands (CRAWL 2026-10-12: one failed swap-back left ~0.5 SOL of token stranded, wallet read 0.59 vs 1.09).
@@ -646,7 +818,7 @@ export async function retryPendingSwapBack(): Promise<void> {
  * and executeCleanExit (no blacklist - used by SWITCH and TAKE_PROFIT,
  * neither of which are risk violations).
  */
-async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promise<number> {
+async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: { pct: number; waitMin: number }): Promise<number> {
   const [position] = await getUserPositions(ctx.pool);
   let feeOtherRaw = new BN(0);
   let expectedOtherAmount = new BN(0);
@@ -679,7 +851,17 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string): Promis
       keptRaw: toKeepAsToken.toString(),
     });
   }
-  if (toSwap.gtn(0)) {
+  let askPlaced = false;
+  if (toSwap.gtn(0) && ask && ask.pct > 0 && supportsLimitOrder(ctx.pool)) {
+    try {
+      await placeOrderTracked('exitAsk', ctx.pool, ctx.poolAddress, ctx.xIsSol, otherMint, toSwap, binsForMove(ask.pct, ctx.binStep, 'up'), ask.waitMin, toKeepAsToken);
+      askPlaced = true;
+      logger.warn(`[rebalanceEngine] ${logPrefix}: token put on an ask limit order instead of a market swap`, { pool: ctx.poolAddress, askPct: ask.pct, waitMin: ask.waitMin, amountRaw: toSwap.toString() });
+    } catch (err) {
+      logger.warn(`[rebalanceEngine] ${logPrefix}: ask limit order failed, selling at market`, { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (toSwap.gtn(0) && !askPlaced) {
     try {
       await emergencySwapAllToSol(otherMint, toSwap);
     } catch (err) {
@@ -742,4 +924,12 @@ export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<stri
 export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
   if (armChaseGuard) await recordExitForChaseGuard(ctx, chaseGuardPools);
   return closeAndConvertToSol(ctx, reason);
+}
+
+/**
+ * Exit after the token price stayed below the range for MAX_IDLE_OUT_OF_RANGE_MINUTES: close, put the token on an ask
+ * DOWNBREAK_ASK_PCT above the price (Jupiter after DOWNBREAK_ASK_WAIT_MIN). No chase guard: re-entering the same pool is allowed.
+ */
+export async function executeDownBreakExit(ctx: PoolContext): Promise<number> {
+  return closeAndConvertToSol(ctx, 'DOWN_BREAK', { pct: env.DOWNBREAK_ASK_PCT, waitMin: env.DOWNBREAK_ASK_WAIT_MIN });
 }

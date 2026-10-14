@@ -459,6 +459,14 @@ export const env = {
   DRAWDOWN_WINDOW_DAYS: num('DRAWDOWN_WINDOW_DAYS', 14),
   // Entry gate (default 0 = off): reject a pool more than this % below its 48h high. moonbot/featsim.mjs: pools within 20% of the 48h high were +4.7% (75% win) vs -3..-4% elsewhere, but only ~1 in 9 live entries qualified, so it is off until live data backs it.
   MAX_BELOW_HIGH_48H_PCT: num('MAX_BELOW_HIGH_48H_PCT', 0),
+  // Limit-order legs (0 = off, Jupiter market as before). Evidence: 33/46 live entries dipped >=1% and 24/46 >=3% within 60m of entry, and a bid 2-3% below filled with +2..+4pt better price per fill (scratchpad dip.mjs, 2026-10-14).
+  // Entry: put the token share as a SOL bid this % below the price, wait ENTRY_LIMIT_WAIT_MIN, cancel, buy only the unfilled remainder at market (after re-checking dollar flow).
+  ENTRY_LIMIT_BID_PCT: num('ENTRY_LIMIT_BID_PCT', 0),
+  ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
+  // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
+  // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.
+  DOWNBREAK_ASK_PCT: num('DOWNBREAK_ASK_PCT', 0),
+  DOWNBREAK_ASK_WAIT_MIN: num('DOWNBREAK_ASK_WAIT_MIN', 360),
   // Share of position VALUE held in the non-SOL token (ask side) when opening/reopening; the rest stays SOL (bid side). 50 = old 50:50.
   // moonbot/skewsim.mjs: less token (35) lost less than 50 (-17.5% vs -18.5% per 24h sim, yield>=2%); small, 31 tokens, untuned.
   TOKEN_SHARE_PCT: num('TOKEN_SHARE_PCT', 50),

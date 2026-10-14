@@ -50,6 +50,8 @@ export interface PersistedState {
   dollarFlowBreach: { pool: string; count: number; sinceMs?: number };
   /** exit swap-back that failed after the close; absent in files written before 2026-10-12 */
   pendingSwapBack?: { mint: string; amount: string } | null;
+  /** open limit order the bot placed (entry bid or exit ask) that must be settled before anything else; absent in older files */
+  pendingLimitOrder?: { kind: 'entryBid' | 'exitAsk'; pool: string; order: string; xIsSol: boolean; mint: string; amountRaw: string; keepRaw: string; deadlineMs: number } | null;
 }
 
 export type BootPlan =
@@ -102,6 +104,11 @@ export function parseState(raw: string, wallet: string): PersistedState | null {
   if (!Array.isArray(o.blacklist) || !Array.isArray(o.chaseGuard)) return null;
   const psb = o.pendingSwapBack as Record<string, unknown> | null | undefined;
   if (psb != null && (typeof psb !== 'object' || typeof psb.mint !== 'string' || typeof psb.amount !== 'string')) return null;
+  const plo = o.pendingLimitOrder as Record<string, unknown> | null | undefined;
+  if (plo != null) {
+    const strs = ['kind', 'pool', 'order', 'mint', 'amountRaw', 'keepRaw'];
+    if (typeof plo !== 'object' || strs.some((k) => typeof plo[k] !== 'string') || typeof plo.xIsSol !== 'boolean' || !isFiniteNum(plo.deadlineMs)) return null;
+  }
   const p = o.position as Record<string, unknown> | null;
   if (p !== null) {
     if (!p || typeof p !== 'object') return null;
