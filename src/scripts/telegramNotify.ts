@@ -57,7 +57,7 @@ const newestLog = () => {
 };
 const botAlive = () => {
   try {
-    return execSync('pgrep -f "node dist/index.js"', { encoding: 'utf8' }).trim().length > 0;
+    return execSync('pgrep -f "^node dist/index.js$"', { encoding: 'utf8' }).trim().length > 0;
   } catch {
     return false;
   }
@@ -261,7 +261,7 @@ let lastHoldings: Awaited<ReturnType<typeof tokenHoldings>> = [];
 
 const botPid = (): string | null => {
   try {
-    return execSync('pgrep -f "node dist/index.js"', { encoding: 'utf8' }).trim().split('\n')[0] || null;
+    return execSync('pgrep -f "^node dist/index.js$"', { encoding: 'utf8' }).trim().split('\n')[0] || null;
   } catch {
     return null;
   }

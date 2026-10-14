@@ -23,7 +23,7 @@ const [cmd = '', arg1 = '', arg2 = ''] = process.argv.slice(2);
 
 function botAlive(): boolean {
   try {
-    return execSync('pgrep -f "node dist/index.js"', { encoding: 'utf8' }).trim().length > 0;
+    return execSync('pgrep -f "^node dist/index.js$"', { encoding: 'utf8' }).trim().length > 0;
   } catch {
     return false;
   }
