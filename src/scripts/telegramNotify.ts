@@ -80,37 +80,105 @@ async function walletSol(wallet: string): Promise<number | null> {
   }
 }
 
-async function statusText(): Promise<string> {
-  const lines: string[] = [`bot: ${botAlive() ? 'RUNNING' : 'STOPPED'}`];
-  let wallet: string | null = null;
-  let posPool: string | null = null;
-  try {
-    const s = JSON.parse(readFileSync('state/live-state.json', 'utf8')) as { wallet?: string; position?: { poolAddress: string } | null; pendingLimitOrder?: unknown; pendingSwapBack?: unknown };
-    wallet = s.wallet ?? null;
-    posPool = s.position?.poolAddress ?? null;
-    lines.push(posPool ? `position: ${posPool.slice(0, 6)}…` : 'position: none (flat)');
-    if (s.pendingLimitOrder) lines.push('pending limit order: yes');
-    if (s.pendingSwapBack) lines.push('pending swap-back: yes');
-  } catch {
-    lines.push('state file unreadable');
-  }
-  const sol = wallet ? await walletSol(wallet) : null;
-  if (sol !== null) lines.push(`wallet SOL: ${sol.toFixed(4)}`);
+// Reference points for /pnl (SOL): reconstructed from on-chain wallet deltas, see session notes 2026-10-14.
+const BASELINES: [string, number][] = [
+  ['since 03:19 UTC restart 14 Oct', 1.1528],
+  ['experiment baseline 12 Oct', 1.1239],
+  ['funding', 1.6522],
+];
+
+interface Health { ts: string; currentValueSol: number; unclaimedFeesSol: number; isOutOfRange: boolean; currentBinId: number }
+
+function lastHealth(): Health | null {
   const log = newestLog();
-  if (log && posPool) {
-    const tail = readFileSync(log, 'utf8').split('\n').reverse().find((l) => l.includes('health check'));
-    const m = tail && /^(\S+).*health check (\{.*\})/.exec(tail);
-    if (m) {
-      try {
-        const h = JSON.parse(m[2]!) as { currentValueSol: number; unclaimedFeesSol: number; isOutOfRange: boolean; currentBinId: number };
-        lines.push(`pos value ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (as of ${m[1]!.slice(11, 19)} UTC)`);
-        if (sol !== null) lines.push(`equity ≈ ${(sol + h.currentValueSol + h.unclaimedFeesSol).toFixed(4)} SOL (excl. refundable rent)`);
-      } catch {
-        /* ignore */
-      }
-    }
+  if (!log) return null;
+  const line = readFileSync(log, 'utf8').split('\n').reverse().find((l) => l.includes('health check'));
+  const m = line && /^(\S+).*health check (\{.*\})/.exec(scrub(line));
+  if (!m) return null;
+  try {
+    return { ...(JSON.parse(m[2]!) as Omit<Health, 'ts'>), ts: m[1]! };
+  } catch {
+    return null;
   }
+}
+
+function readState(): { wallet: string | null; pool: string | null; outSince: number | null; pendingOrder: boolean; pendingSwap: boolean } | null {
+  try {
+    const s = JSON.parse(readFileSync('state/live-state.json', 'utf8')) as { wallet?: string; position?: { poolAddress: string; outOfRangeSinceMs: number | null } | null; pendingLimitOrder?: unknown; pendingSwapBack?: unknown };
+    return { wallet: s.wallet ?? null, pool: s.position?.poolAddress ?? null, outSince: s.position?.outOfRangeSinceMs ?? null, pendingOrder: !!s.pendingLimitOrder, pendingSwap: !!s.pendingSwapBack };
+  } catch {
+    return null;
+  }
+}
+
+const hhmm = (iso: string) => iso.slice(11, 16) + ' UTC';
+const ageMin = (iso: string) => Math.round((Date.now() - Date.parse(iso)) / 60_000);
+
+async function statusText(): Promise<string> {
+  const st = readState();
+  const lines: string[] = [`bot: ${botAlive() ? 'RUNNING' : 'STOPPED'}`];
+  if (!st) return lines.concat('state file unreadable').join('\n');
+  lines.push(st.pool ? `position: ${st.pool.slice(0, 6)}…` : 'position: none (flat)');
+  if (st.pendingOrder) lines.push('pending limit order: yes');
+  if (st.pendingSwap) lines.push('pending swap-back: yes');
+  const sol = st.wallet ? await walletSol(st.wallet) : null;
+  if (sol !== null) lines.push(`wallet SOL: ${sol.toFixed(4)}`);
+  const h = st.pool ? lastHealth() : null;
+  if (h) lines.push(`pos ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (${hhmm(h.ts)}, ${ageMin(h.ts)}m ago)`);
   return lines.join('\n');
+}
+
+async function pnlText(): Promise<string> {
+  const st = readState();
+  const sol = st?.wallet ? await walletSol(st.wallet) : null;
+  if (sol === null) return 'wallet balance unavailable';
+  const h = st?.pool ? lastHealth() : null;
+  const posVal = h ? h.currentValueSol + h.unclaimedFeesSol : 0;
+  const eq = sol + posVal;
+  const lines = [`equity ≈ ${eq.toFixed(4)} SOL (wallet ${sol.toFixed(4)} + position ${posVal.toFixed(4)}, rent refund not counted)`];
+  for (const [label, base] of BASELINES) lines.push(`${label}: ${(eq - base >= 0 ? '+' : '') + (eq - base).toFixed(4)} SOL (${((eq / base - 1) * 100).toFixed(1)}%)`);
+  if (h) lines.push(`position value as of ${hhmm(h.ts)} (${ageMin(h.ts)}m ago${botAlive() ? '' : ', bot stopped: stale'})`);
+  return lines.join('\n');
+}
+
+function posText(): string {
+  const st = readState();
+  if (!st?.pool) return 'no open position';
+  const h = lastHealth();
+  const lines = [`pool ${st.pool}`];
+  if (h) {
+    lines.push(`value ${h.currentValueSol.toFixed(4)} SOL, unclaimed fees ${h.unclaimedFeesSol.toFixed(4)} SOL`, `active bin ${h.currentBinId}, ${h.isOutOfRange ? 'OUT OF RANGE' : 'in range'}`, `as of ${hhmm(h.ts)} (${ageMin(h.ts)}m ago)`);
+  }
+  if (st.outSince) lines.push(`out of range since ${hhmm(new Date(st.outSince).toISOString())}${botAlive() ? '' : ' (bot stopped: idle timer not running)'}`);
+  return lines.join('\n');
+}
+
+function logText(arg: string): string {
+  const n = Math.min(Math.max(parseInt(arg, 10) || 8, 1), 20);
+  const log = newestLog();
+  if (!log) return 'no log';
+  const hits = readFileSync(log, 'utf8').split('\n').filter((l) => EVENT_RE.test(l)).slice(-n).map((l) => scrub(l).slice(0, 220));
+  return hits.length ? hits.join('\n') : 'no events in the current log';
+}
+
+const HELP = [
+  '/status – bot up/down, position, wallet SOL',
+  '/pnl – equity and PnL vs baselines',
+  '/posisi – open position detail',
+  '/log [n] – last n events (default 8, max 20)',
+  '/help – this list',
+].join('\n');
+
+async function reply(text: string): Promise<string> {
+  const [cmd = '', arg = ''] = text.trim().split(/\s+/);
+  switch (cmd.replace(/@\w+$/, '').toLowerCase()) {
+    case '/status': return statusText();
+    case '/pnl': return pnlText();
+    case '/posisi': case '/position': return posText();
+    case '/log': return logText(arg);
+    case '/help': case '/start': return HELP;
+    default: return 'unknown command. /help';
+  }
 }
 
 async function main(): Promise<void> {
@@ -120,7 +188,12 @@ async function main(): Promise<void> {
   let updateOffset = 0;
   const first = (await (await fetch(`${API}/getUpdates?offset=-1`)).json()) as { result?: { update_id: number }[] };
   if (first.result?.length) updateOffset = first.result[first.result.length - 1]!.update_id + 1;
-  await send(`telegram notifier online (bot ${wasAlive ? 'running' : 'stopped'}). /status for a snapshot.`);
+  await fetch(`${API}/setMyCommands`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ commands: HELP.split('\n').map((l) => ({ command: l.slice(1, l.indexOf(' ')).replace('[n]', ''), description: l.slice(l.indexOf('–') + 2) })) }),
+  }).catch(() => undefined);
+  await send(`telegram notifier online (bot ${wasAlive ? 'running' : 'stopped'}). /help for commands.`);
 
   setInterval(async () => {
     try {
@@ -149,7 +222,7 @@ async function main(): Promise<void> {
       for (const u of r.result ?? []) {
         updateOffset = u.update_id + 1;
         if (String(u.message?.chat?.id) !== CHAT) continue; // only the owner is ever answered
-        if (/^\/status\b/.test(u.message?.text ?? '')) await send(await statusText());
+        if ((u.message?.text ?? '').startsWith('/')) await send(await reply(u.message!.text!));
       }
     } catch {
       await new Promise((res) => setTimeout(res, 5000));
