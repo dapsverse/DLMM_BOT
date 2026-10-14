@@ -464,6 +464,8 @@ export const env = {
   ENTRY_LIMIT_BID_PCT: num('ENTRY_LIMIT_BID_PCT', 0), // depth of the bid ladder: bins from 1 below the price down to this % below it
   // After the wait: abort the entry (rescan) when < 50% filled and the token is more than this % above its price at bid time. 0 = always continue at market.
   ENTRY_LIMIT_MAX_CHASE_PCT: num('ENTRY_LIMIT_MAX_CHASE_PCT', 3),
+  // Reject tokens whose Token-2022 transfer fee exceeds this (bps). Every swap/deposit/withdraw loses the fee; 0 = any fee rejects.
+  MAX_TRANSFER_FEE_BPS: num('MAX_TRANSFER_FEE_BPS', 0),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.

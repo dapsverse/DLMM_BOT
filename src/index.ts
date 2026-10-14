@@ -26,6 +26,7 @@ import {
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
+import { getTransferFeeBps } from './services/tokenFee.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
@@ -210,6 +211,16 @@ async function tryEnterPool(): Promise<void> {
         logger.info(`[index] skipping pool ${candidate.address} — ${below48hPct}% below its 48h high (max ${env.MAX_BELOW_HIGH_48H_PCT}%)`);
         continue;
       }
+    }
+    const tokenMint = xIsSol ? candidate.mint_y : candidate.mint_x;
+    const feeBps = await getTransferFeeBps(tokenMint);
+    if (feeBps === null) {
+      logger.warn(`[index] skipping pool ${candidate.address} — transfer-fee lookup failed (fail-closed)`);
+      continue;
+    }
+    if (feeBps > env.MAX_TRANSFER_FEE_BPS) {
+      logger.info(`[index] skipping pool ${candidate.address} — token has a ${feeBps / 100}% transfer fee (max ${env.MAX_TRANSFER_FEE_BPS / 100}%)`);
+      continue;
     }
     const dollarFlow = await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd);
     if (dollarFlow === null) {
