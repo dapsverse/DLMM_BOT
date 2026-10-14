@@ -12,3 +12,4 @@ moonbot/data5m/
 moonbot/data5m2/
 state/
 moonbot/databc/
+.env.telegram
