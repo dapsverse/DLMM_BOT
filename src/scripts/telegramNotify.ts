@@ -4,7 +4,9 @@
  * - answers /status from YOUR chat id only (everything else is ignored)
  * Run: npx tsx src/scripts/telegramNotify.ts   (reads .env.telegram + RPC_URL from .env.live; prints no secrets)
  */
-import { execSync } from 'node:child_process';
+import { execFile, execSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 
 function loadEnv(path: string): Record<string, string> {
@@ -17,6 +19,7 @@ function loadEnv(path: string): Record<string, string> {
   return out;
 }
 
+const run = promisify(execFile);
 const tg = loadEnv('.env.telegram');
 const TOKEN = tg.TELEGRAM_BOT_TOKEN;
 const CHAT = tg.TELEGRAM_CHAT_ID;
@@ -215,11 +218,49 @@ function logText(arg: string): string {
   return hits.length ? hits.join('\n') : 'no events in the current log';
 }
 
+
+/** Env for child processes: .env.live WITHOUT the private key (scan and advice never need the wallet). */
+function childEnv(): NodeJS.ProcessEnv {
+  const live = loadEnv('.env.live');
+  delete live.PRIVATE_KEY;
+  return { ...process.env, ...live };
+}
+
+let busy = false;
+
+async function scanText(): Promise<string> {
+  const { stdout } = await run('npx', ['tsx', 'src/scripts/scanOnce.ts'], { env: childEnv(), timeout: 120_000, maxBuffer: 4_000_000 });
+  return scrub(stdout).trim() || 'scan returned nothing';
+}
+
+async function suggestText(): Promise<string> {
+  const scan = await scanText();
+  if (/No pool passes/.test(scan)) return 'Tidak ada pool yang lolos filter bot sekarang, jadi tidak ada saran masuk. Tunggu scan berikutnya.\n\n' + scan.split('\n').slice(-2).join('\n');
+  const ctx = await statusText();
+  const prompt = [
+    'Kamu penasihat untuk bot Meteora DLMM (mode range, modal ~1 SOL, uang asli). Jawab Bahasa Indonesia, maksimal 150 kata, tanpa tabel.',
+    'Dari kandidat hasil scan di bawah, beri: (1) pool mana yang paling layak dimasuki atau "tidak ada" beserta alasan singkat berbasis data, (2) satu risiko utama per pool yang kamu sebut.',
+    'Aturan bot: range ±6% pada bin step 50, bid limit 5% di bawah harga, stop-loss 25%, jangan token dengan transfer fee, hindari token yang sudah naik tajam (pump) atau dominan jual. Jangan mengarang data yang tidak ada di bawah; sebut jika datanya kurang. Ini saran, bukan kepastian.',
+    '', 'KONDISI BOT:', ctx, '', 'HASIL SCAN:', scan.slice(0, 6000),
+  ].join('\n');
+  const child = execFile('claude', ['-p', '--tools', '', '--no-session-persistence'], { cwd: tmpdir(), timeout: 120_000, maxBuffer: 1_000_000 });
+  child.stdin?.end(prompt);
+  const out = await new Promise<string>((resolve, reject) => {
+    let buf = '';
+    child.stdout?.on('data', (d: Buffer) => (buf += d.toString()));
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve(buf) : reject(new Error(`claude exited ${code}`))));
+  });
+  return out.trim() || 'no answer';
+}
+
 const HELP = [
   '/status – bot up/down, position, wallet SOL',
   '/pnl – equity and PnL vs baselines',
   '/posisi – open position detail',
   '/log [n] – last n events (default 8, max 20)',
+  '/scan – pools passing the bot filters right now (~20s)',
+  '/suggest – Claude advice on the scan result (~40s)',
   '/help – this list',
 ].join('\n');
 
@@ -230,6 +271,19 @@ async function reply(text: string): Promise<string> {
     case '/pnl': return pnlText();
     case '/posisi': case '/position': return posText();
     case '/log': return logText(arg);
+    case '/scan':
+    case '/suggest': {
+      if (busy) return 'another scan/suggest is still running, wait';
+      busy = true;
+      await send(cmd.startsWith('/scan') ? 'scanning…' : 'scanning and asking Claude…');
+      try {
+        return cmd.startsWith('/scan') ? await scanText() : await suggestText();
+      } catch (e) {
+        return 'failed: ' + (e instanceof Error ? e.message.slice(0, 200) : 'unknown');
+      } finally {
+        busy = false;
+      }
+    }
     case '/help': case '/start': return HELP;
     default: return 'unknown command. /help';
   }
