@@ -80,6 +80,49 @@ async function walletSol(wallet: string): Promise<number | null> {
   }
 }
 
+/** Open DLMM positions per Meteora's portfolio API (ground truth, no SDK / private key); null if unreachable. */
+async function onChainPositionCount(wallet: string): Promise<number | null> {
+  try {
+    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`)).json()) as { totalPositions?: number };
+    return typeof j.totalPositions === 'number' ? j.totalPositions : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Non-SOL token balances in the wallet, priced in SOL via DexScreener (priceNative). Dust below 0.0005 SOL is dropped. */
+async function tokenHoldings(wallet: string): Promise<{ symbol: string; ui: number; sol: number | null }[]> {
+  const out: { symbol: string; ui: number; sol: number | null }[] = [];
+  if (!RPC_URL) return out;
+  for (const program of ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']) {
+    try {
+      const r = await fetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [wallet, { programId: program }, { encoding: 'jsonParsed' }] }) });
+      const j = (await r.json()) as { result?: { value?: { account: { data: { parsed: { info: { mint: string; tokenAmount: { uiAmount: number | null } } } } } }[] } };
+      for (const a of j.result?.value ?? []) {
+        const { mint, tokenAmount } = a.account.data.parsed.info;
+        const ui = tokenAmount.uiAmount ?? 0;
+        if (ui <= 0) continue;
+        let sol: number | null = null;
+        let symbol = mint.slice(0, 6);
+        try {
+          const d = (await (await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)).json()) as { pairs?: { priceNative?: string; baseToken?: { symbol?: string } }[] };
+          const pr = Number(d.pairs?.[0]?.priceNative);
+          symbol = d.pairs?.[0]?.baseToken?.symbol ?? symbol;
+          if (Number.isFinite(pr) && pr > 0) sol = ui * pr;
+        } catch {
+          /* unpriced */
+        }
+        if (sol === null || sol >= 0.0005) out.push({ symbol, ui, sol });
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return out;
+}
+
+const fmtHold = (h: { symbol: string; ui: number; sol: number | null }) => `${h.symbol} ${h.ui.toLocaleString('en', { maximumFractionDigits: 2 })}${h.sol === null ? ' (unpriced)' : ` ≈ ${h.sol.toFixed(4)} SOL`}`;
+
 // Reference points for /pnl (SOL): reconstructed from on-chain wallet deltas, see session notes 2026-10-14.
 const BASELINES: [string, number][] = [
   ['since 03:19 UTC restart 14 Oct', 1.1528],
@@ -117,33 +160,44 @@ const ageMin = (iso: string) => Math.round((Date.now() - Date.parse(iso)) / 60_0
 async function statusText(): Promise<string> {
   const st = readState();
   const lines: string[] = [`bot: ${botAlive() ? 'RUNNING' : 'STOPPED'}`];
-  if (!st) return lines.concat('state file unreadable').join('\n');
-  lines.push(st.pool ? `position: ${st.pool.slice(0, 6)}…` : 'position: none (flat)');
+  if (!st?.wallet) return lines.concat('state file unreadable').join('\n');
+  const [count, sol, holds] = await Promise.all([onChainPositionCount(st.wallet), walletSol(st.wallet), tokenHoldings(st.wallet)]);
+  lines.push(count === null ? `position (state file, unverified): ${st.pool ? st.pool.slice(0, 6) + '…' : 'none'}` : count === 0 ? 'position: none on-chain' + (st.pool ? ' (state file is stale)' : '') : `position: ${count} open on-chain`);
   if (st.pendingOrder) lines.push('pending limit order: yes');
   if (st.pendingSwap) lines.push('pending swap-back: yes');
-  const sol = st.wallet ? await walletSol(st.wallet) : null;
   if (sol !== null) lines.push(`wallet SOL: ${sol.toFixed(4)}`);
-  const h = st.pool ? lastHealth() : null;
+  for (const h of holds) lines.push(`holding: ${fmtHold(h)}`);
+  const h = count ? lastHealth() : null;
   if (h) lines.push(`pos ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (${hhmm(h.ts)}, ${ageMin(h.ts)}m ago)`);
   return lines.join('\n');
 }
 
 async function pnlText(): Promise<string> {
   const st = readState();
-  const sol = st?.wallet ? await walletSol(st.wallet) : null;
+  if (!st?.wallet) return 'state file unreadable';
+  const [count, sol, holds] = await Promise.all([onChainPositionCount(st.wallet), walletSol(st.wallet), tokenHoldings(st.wallet)]);
   if (sol === null) return 'wallet balance unavailable';
-  const h = st?.pool ? lastHealth() : null;
+  const h = count ? lastHealth() : null;
   const posVal = h ? h.currentValueSol + h.unclaimedFeesSol : 0;
-  const eq = sol + posVal;
-  const lines = [`equity ≈ ${eq.toFixed(4)} SOL (wallet ${sol.toFixed(4)} + position ${posVal.toFixed(4)}, rent refund not counted)`];
+  const holdVal = holds.reduce((acc, x) => acc + (x.sol ?? 0), 0);
+  const eq = sol + holdVal + posVal;
+  const parts = [`wallet ${sol.toFixed(4)}`];
+  if (holdVal) parts.push(`tokens ${holdVal.toFixed(4)}`);
+  if (posVal) parts.push(`position ${posVal.toFixed(4)}`);
+  const lines = [`equity ≈ ${eq.toFixed(4)} SOL (${parts.join(' + ')}; excludes rent refunds and anything locked in limit orders)`];
   for (const [label, base] of BASELINES) lines.push(`${label}: ${(eq - base >= 0 ? '+' : '') + (eq - base).toFixed(4)} SOL (${((eq / base - 1) * 100).toFixed(1)}%)`);
-  if (h) lines.push(`position value as of ${hhmm(h.ts)} (${ageMin(h.ts)}m ago${botAlive() ? '' : ', bot stopped: stale'})`);
+  if (count === null) lines.push('WARNING: could not verify on-chain positions, position value not included');
+  else if (h) lines.push(`position value as of ${hhmm(h.ts)} (${ageMin(h.ts)}m ago${botAlive() ? '' : ', bot stopped: stale'})`);
+  if (holds.some((x) => x.sol === null)) lines.push('some tokens unpriced, not in equity');
   return lines.join('\n');
 }
 
-function posText(): string {
+async function posText(): Promise<string> {
   const st = readState();
-  if (!st?.pool) return 'no open position';
+  if (!st?.wallet) return 'state file unreadable';
+  const count = await onChainPositionCount(st.wallet);
+  if (count === 0) return 'no open position on-chain' + (st.pool ? ' (state file still lists one: stale, bot not running or not yet reconciled)' : '');
+  if (!st.pool) return count === null ? 'no position in state; on-chain check unavailable' : `${count} position(s) on-chain but none in state`;
   const h = lastHealth();
   const lines = [`pool ${st.pool}`];
   if (h) {
