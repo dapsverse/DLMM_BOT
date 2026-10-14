@@ -932,7 +932,7 @@ export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<stri
  * in gains). Neither is a risk violation, so the pool stays a fully valid
  * candidate for the very next scan.
  */
-export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
+export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT' | 'FLOW_EXIT', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
   if (armChaseGuard) await recordExitForChaseGuard(ctx, chaseGuardPools);
   return closeAndConvertToSol(ctx, reason);
 }

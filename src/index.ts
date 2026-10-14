@@ -472,7 +472,7 @@ async function tick(): Promise<void> {
           txSampled: dollarFlow.txSampled,
         });
         try {
-          currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools));
+          currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'FLOW_EXIT', chaseGuardPools));
           // Short cooldown, not the long HARD_EXIT blacklist — same
           // reasoning as compoundCycle's "no longer eligible" abandon path:
           // this isn't a stop-loss/risk violation on the position itself,

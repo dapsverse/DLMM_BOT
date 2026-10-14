@@ -30,7 +30,7 @@ if (!TOKEN || !CHAT) {
 }
 
 const API = `https://api.telegram.org/bot${TOKEN}`;
-const EVENT_RE = /entered pool|closing position|HARD_EXIT|TAKE_PROFIT|down-break|limit order (placed|cancelled)|entry bid (placed|settled)|\] error|stop-loss|REBALANCE|skipping pool .*transfer fee/i;
+const EVENT_RE = /entered pool|closing position|HARD_EXIT|TAKE_PROFIT|FLOW_EXIT|down-break|limit order (placed|cancelled)|entry bid (placed|settled)|\] error|stop-loss|REBALANCE|skipping pool .*transfer fee/i;
 
 // Defense in depth: logs should never hold secrets, but strip anything that looks like one before it leaves the machine.
 const scrub = (s: string) =>
