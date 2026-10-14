@@ -4,10 +4,10 @@
  * - answers /status from YOUR chat id only (everything else is ignored)
  * Run: npx tsx src/scripts/telegramNotify.ts   (reads .env.telegram + RPC_URL from .env.live; prints no secrets)
  */
-import { execFile, execSync } from 'node:child_process';
+import { execFile, execSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -94,8 +94,8 @@ async function onChainPositionCount(wallet: string): Promise<number | null> {
 }
 
 /** Non-SOL token balances in the wallet, priced in SOL via DexScreener (priceNative). Dust below 0.0005 SOL is dropped. */
-async function tokenHoldings(wallet: string): Promise<{ symbol: string; ui: number; sol: number | null }[]> {
-  const out: { symbol: string; ui: number; sol: number | null }[] = [];
+async function tokenHoldings(wallet: string): Promise<{ mint: string; symbol: string; ui: number; sol: number | null }[]> {
+  const out: { mint: string; symbol: string; ui: number; sol: number | null }[] = [];
   if (!RPC_URL) return out;
   for (const program of ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']) {
     try {
@@ -115,7 +115,7 @@ async function tokenHoldings(wallet: string): Promise<{ symbol: string; ui: numb
         } catch {
           /* unpriced */
         }
-        if (sol === null || sol >= 0.0005) out.push({ symbol, ui, sol });
+        if (sol === null || sol >= 0.0005) out.push({ mint, symbol, ui, sol });
       }
     } catch {
       /* ignore */
@@ -124,7 +124,7 @@ async function tokenHoldings(wallet: string): Promise<{ symbol: string; ui: numb
   return out;
 }
 
-const fmtHold = (h: { symbol: string; ui: number; sol: number | null }) => `${h.symbol} ${h.ui.toLocaleString('en', { maximumFractionDigits: 2 })}${h.sol === null ? ' (unpriced)' : ` ≈ ${h.sol.toFixed(4)} SOL`}`;
+const fmtHold = (h: { mint?: string; symbol: string; ui: number; sol: number | null }) => `${h.symbol} ${h.ui.toLocaleString('en', { maximumFractionDigits: 2 })}${h.sol === null ? ' (unpriced)' : ` ≈ ${h.sol.toFixed(4)} SOL`}`;
 
 // Reference points for /pnl (SOL): reconstructed from on-chain wallet deltas, see session notes 2026-10-14.
 const BASELINES: [string, number][] = [
@@ -254,6 +254,142 @@ async function suggestText(): Promise<string> {
   return out.trim() || 'no answer';
 }
 
+// ---- Manual controls (bot must be STOPPED for open/close/clean; every mutation needs /ya <code>) ----
+const LIVECTL = 'scripts/livectl.sh';
+let pending: { desc: string; code: string; expires: number; exec: () => Promise<string> } | null = null;
+let lastHoldings: Awaited<ReturnType<typeof tokenHoldings>> = [];
+
+const botPid = (): string | null => {
+  try {
+    return execSync('pgrep -f "node dist/index.js"', { encoding: 'utf8' }).trim().split('\n')[0] || null;
+  } catch {
+    return null;
+  }
+};
+
+async function ops(args: string[], timeoutMs: number): Promise<string> {
+  try {
+    const { stdout } = await run(LIVECTL, ['npx', 'tsx', 'src/scripts/manualOps.ts', ...args], { timeout: timeoutMs, maxBuffer: 4_000_000 });
+    const lines = scrub(stdout).split('\n').filter((l) => l.trim() && !/\b429\b/.test(l));
+    return lines.slice(-12).join('\n') || '(no output)';
+  } catch (e) {
+    const out = (e as { stdout?: string }).stdout ?? '';
+    return 'FAILED: ' + (scrub(out).split('\n').filter((l) => l.trim()).slice(-4).join('\n') || (e instanceof Error ? e.message.slice(0, 200) : 'unknown'));
+  }
+}
+
+const needStopped = (): string | null => (botPid() ? 'Bot sedang jalan. Matikan dulu dengan /stopbot, baru perintah manual bisa dipakai.' : null);
+
+function arm(desc: string, exec: () => Promise<string>): string {
+  const code = String(1000 + Math.floor(Math.random() * 9000));
+  pending = { desc, code, expires: Date.now() + 120_000, exec };
+  return `${desc}\n\nKetik /ya ${code} untuk eksekusi (berlaku 2 menit), atau /batal.`;
+}
+
+async function confirmText(arg: string): Promise<string> {
+  if (!pending || Date.now() > pending.expires) {
+    pending = null;
+    return 'tidak ada aksi yang menunggu konfirmasi (atau sudah kedaluwarsa)';
+  }
+  if (arg !== pending.code) return 'kode salah';
+  const { exec } = pending;
+  pending = null;
+  if (busy) return 'operasi lain masih berjalan';
+  busy = true;
+  try {
+    return await exec();
+  } finally {
+    busy = false;
+  }
+}
+
+async function startBot(): Promise<string> {
+  if (botPid()) return 'bot sudah jalan';
+  try {
+    await run('npm', ['run', 'build'], { timeout: 180_000, maxBuffer: 4_000_000 });
+  } catch (e) {
+    return 'build gagal: ' + (e instanceof Error ? e.message.slice(0, 200) : 'unknown');
+  }
+  mkdirSync('logs', { recursive: true });
+  const fd = openSync(`logs/live-${Math.floor(Date.now() / 1000)}.log`, 'a');
+  const child = spawn(LIVECTL, ['node', 'dist/index.js'], { detached: true, stdio: ['ignore', fd, fd] });
+  child.unref();
+  await new Promise((r) => setTimeout(r, 15_000));
+  return botPid() ? 'bot STARTED (log baru dibuat; event akan masuk lewat notifikasi)' : 'bot mati lagi saat boot, cek /log';
+}
+
+async function stopBot(force: boolean): Promise<string> {
+  const pid = botPid();
+  if (!pid) return 'bot sudah mati';
+  const st = readState();
+  const inflight = (() => {
+    try {
+      return (JSON.parse(readFileSync('state/live-state.json', 'utf8')) as { inFlight?: boolean }).inFlight === true;
+    } catch {
+      return false;
+    }
+  })();
+  if (inflight && !force) return 'bot sedang di tengah operasi on-chain (inFlight). Tunggu selesai, atau /stopbot force kalau yakin.';
+  process.kill(Number(pid), 'SIGTERM');
+  for (let i = 0; i < 10 && botPid(); i++) await new Promise((r) => setTimeout(r, 1000));
+  const count = st?.wallet ? await onChainPositionCount(st.wallet) : null;
+  return `${botPid() ? 'bot MASIH jalan (SIGTERM belum berhasil)' : 'bot STOPPED'}. Posisi on-chain: ${count ?? '?'} (stop bot TIDAK menutup posisi, tidak ada yang mengelolanya sampai /startbot).`;
+}
+
+async function openCmd(arg: string): Promise<string> {
+  const stopped = needStopped();
+  if (stopped) return stopped;
+  const [pool = '', sol = ''] = arg.split(/\s+/);
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(pool)) return 'pakai: /open <alamat pool> [jumlah SOL]';
+  if (sol && !(Number(sol) > 0)) return 'jumlah SOL tidak valid';
+  const summary = await ops(['open-dry', pool, sol], 120_000);
+  if (/^(FAILED|ERROR)/m.test(summary)) return summary;
+  return arm('BUKA POSISI (uang asli)\n' + summary, async () => {
+    const stopped2 = needStopped();
+    if (stopped2) return stopped2;
+    await send('membuka posisi… (bisa 1-3 menit)');
+    return ops(['open', pool, sol], 600_000);
+  });
+}
+
+async function closeCmd(): Promise<string> {
+  const stopped = needStopped();
+  if (stopped) return stopped;
+  const summary = await ops(['close-dry'], 120_000);
+  if (/^(FAILED|ERROR)/m.test(summary) || /no open position/.test(summary)) return summary;
+  return arm('TUTUP POSISI (uang asli)\n' + summary, async () => {
+    const stopped2 = needStopped();
+    if (stopped2) return stopped2;
+    await send('menutup posisi… (bisa 1-3 menit)');
+    return ops(['close'], 600_000);
+  });
+}
+
+async function cleanCmd(arg: string): Promise<string> {
+  const stopped = needStopped();
+  if (stopped) return stopped;
+  const st = readState();
+  if (!st?.wallet) return 'state file unreadable';
+  if (!arg) {
+    lastHoldings = await tokenHoldings(st.wallet);
+    if (!lastHoldings.length) return 'tidak ada token nyangkut di wallet (debu di bawah 0,0005 SOL disembunyikan)';
+    return lastHoldings.map((h, i) => `${i + 1}. ${fmtHold(h)}`).join('\n') + '\n\nJual: /clean <nomor> atau /clean all';
+  }
+  const list = lastHoldings;
+  if (!list.length) return 'ketik /clean dulu untuk melihat daftar';
+  const picks = arg === 'all' ? list : [list[Number(arg) - 1]].filter((x): x is NonNullable<typeof x> => !!x);
+  if (!picks.length) return 'nomor tidak valid';
+  const desc = 'JUAL TOKEN ke SOL via Jupiter (uang asli, harga market)\n' + picks.map((h) => fmtHold(h)).join('\n') + (picks.some((h) => h.sol === null) ? '\nWARNING: ada token tanpa harga, hasil jual tidak bisa diperkirakan' : '');
+  return arm(desc, async () => {
+    const stopped2 = needStopped();
+    if (stopped2) return stopped2;
+    const res: string[] = [];
+    for (const h of picks) res.push(`${h.symbol}: ` + (await ops(['sell', h.mint], 300_000)).split('\n').slice(-2).join(' '));
+    lastHoldings = [];
+    return res.join('\n');
+  });
+}
+
 const HELP = [
   '/status – bot up/down, position, wallet SOL',
   '/pnl – equity and PnL vs baselines',
@@ -261,6 +397,13 @@ const HELP = [
   '/log [n] – last n events (default 8, max 20)',
   '/scan – pools passing the bot filters right now (~20s)',
   '/suggest – Claude advice on the scan result (~40s)',
+  '/startbot – build and start the live bot (needs /ya)',
+  '/stopbot – stop the live bot, positions stay open (needs /ya)',
+  '/open <pool> [sol] – manual open, only while the bot is stopped (needs /ya)',
+  '/close – manual close, only while the bot is stopped (needs /ya)',
+  '/clean [n|all] – list or sell stuck tokens, only while the bot is stopped (needs /ya)',
+  '/ya <code> – confirm the pending action',
+  '/batal – cancel the pending action',
   '/help – this list',
 ].join('\n');
 
@@ -284,6 +427,13 @@ async function reply(text: string): Promise<string> {
         busy = false;
       }
     }
+    case '/startbot': return botPid() ? 'bot sudah jalan' : arm('NYALAKAN BOT (build ulang lalu start, uang asli; bot akan melanjutkan posisi yang terbuka dan boleh masuk pool sendiri)', startBot);
+    case '/stopbot': return botPid() ? arm('MATIKAN BOT (posisi yang terbuka TIDAK ditutup dan tidak dikelola)', () => stopBot(arg === 'force')) : 'bot sudah mati';
+    case '/open': return openCmd(text.trim().slice(cmd.length).trim());
+    case '/close': return closeCmd();
+    case '/clean': return cleanCmd(arg);
+    case '/ya': return confirmText(arg);
+    case '/batal': pending = null; return 'dibatalkan';
     case '/help': case '/start': return HELP;
     default: return 'unknown command. /help';
   }

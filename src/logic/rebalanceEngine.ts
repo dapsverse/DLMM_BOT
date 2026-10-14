@@ -937,6 +937,11 @@ export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAK
   return closeAndConvertToSol(ctx, reason);
 }
 
+/** Manual close (Telegram /close, bot stopped): close, swap the token side to SOL (fee-sized token portion kept), return the next capital. */
+export async function executeManualClose(ctx: PoolContext): Promise<number> {
+  return closeAndConvertToSol(ctx, 'MANUAL_CLOSE');
+}
+
 /**
  * Exit after the token price stayed below the range for MAX_IDLE_OUT_OF_RANGE_MINUTES: close, put the token on an ask
  * DOWNBREAK_ASK_PCT above the price (Jupiter after DOWNBREAK_ASK_WAIT_MIN). No chase guard: re-entering the same pool is allowed.
