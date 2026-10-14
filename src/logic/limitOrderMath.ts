@@ -60,6 +60,15 @@ export function shouldAbortEntry(fraction: number, priceChangePct: number, maxCh
 }
 
 /**
+ * The flow re-check after an entry-bid wait only applies when the bid mostly did NOT fill (the rest is bought at market).
+ * A bid fills BECAUSE sellers hit it, so re-checking sell dominance after a fill fails by construction: live 2026-10-14 baton bid 72.7%
+ * filled, re-check read buyRatio 0.372 < 0.4, the filled token was sold straight back (-1.7%).
+ */
+export function needsFlowRecheck(fraction: number): boolean {
+  return fraction < 0.5;
+}
+
+/**
  * Fraction (0..1) of the deposit that has been filled, from the order's deposit-side totals.
  * The SDK's parsed order reports UI (decimal) amounts such as "0.005", not raw units (found on a mainnet test 2026-10-14).
  */

@@ -15,7 +15,7 @@ import {
   supportsLimitOrder,
   type DlmmPool,
 } from '../services/meteoraDLMM.js';
-import { binsForMove, tokenPriceChangePct, shouldAbortEntry } from './limitOrderMath.js';
+import { binsForMove, tokenPriceChangePct, shouldAbortEntry, needsFlowRecheck } from './limitOrderMath.js';
 import { settlePendingSwapBack, DUST_RAW, type PendingSwapBack } from './pendingSwapBack.js';
 import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from '../services/jupiterSwap.js';
 import { connection, getWalletSolBalance, getTokenBalance, waitForTokenBalance } from '../services/solana.js';
@@ -742,7 +742,7 @@ async function acquireViaBid(
     if (tokenRaw.gten(DUST_RAW)) await swapBackOrPend(otherMint, tokenRaw, 'entry bid ran-away abort');
     throw new Error(`[rebalanceEngine] entry aborted: bid ${(fraction * 100).toFixed(0)}% filled and the price is ${priceChangePct.toFixed(1)}% above the bid time (max ${env.ENTRY_LIMIT_MAX_CHASE_PCT}%) — rescanning`);
   }
-  if (recheck) {
+  if (recheck && needsFlowRecheck(fraction)) {
     let ok = false;
     try {
       ok = await recheck();

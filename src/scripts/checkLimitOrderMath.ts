@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import BN from 'bn.js';
-import { orderSpec, binsForMove, spreadBins, filledFraction, tokenPriceChangePct, shouldAbortEntry } from '../logic/limitOrderMath.js';
+import { orderSpec, binsForMove, spreadBins, filledFraction, tokenPriceChangePct, shouldAbortEntry, needsFlowRecheck } from '../logic/limitOrderMath.js';
 
 // Token is X (SOL is Y): buy cheaper = bid below active (deposit Y=SOL); sell higher = ask above (deposit X=token).
 assert.deepEqual(orderSpec(false, 'buyToken'), { isAskSide: false, dir: -1, depositIsX: false });
@@ -36,4 +36,7 @@ assert.equal(shouldAbortEntry(0.6, 4.06, 3), false); // mostly filled: keep goin
 assert.equal(shouldAbortEntry(0, 2, 3), false); // within tolerance
 assert.equal(shouldAbortEntry(0, -5, 3), false); // price fell, no chase
 assert.equal(shouldAbortEntry(0, 50, 0), false); // disabled
+assert.equal(needsFlowRecheck(0.727), false); // baton 2026-10-14: filled, sell-dominant by construction
+assert.equal(needsFlowRecheck(0), true);
+assert.equal(needsFlowRecheck(0.49), true);
 console.log('checkLimitOrderMath ok');
