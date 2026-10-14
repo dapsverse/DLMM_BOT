@@ -237,17 +237,62 @@ async function scanText(): Promise<string> {
   return scrub(stdout).trim() || 'scan returned nothing';
 }
 
-async function suggestText(): Promise<string> {
-  const scan = await scanText();
-  if (/No pool passes/.test(scan)) return 'Tidak ada pool yang lolos filter bot sekarang, jadi tidak ada saran masuk. Tunggu scan berikutnya.\n\n' + scan.split('\n').slice(-2).join('\n');
-  const ctx = await statusText();
-  const prompt = [
-    'Kamu penasihat untuk bot Meteora DLMM (mode range, modal ~1 SOL, uang asli). Jawab Bahasa Indonesia, maksimal 150 kata, tanpa tabel.',
-    'Dari kandidat hasil scan di bawah, beri: (1) pool mana yang paling layak dimasuki atau "tidak ada" beserta alasan singkat berbasis data, (2) satu risiko utama per pool yang kamu sebut.',
-    'Aturan bot: range ±6% pada bin step 50, bid limit 5% di bawah harga, stop-loss 25%, jangan token dengan transfer fee, hindari token yang sudah naik tajam (pump) atau dominan jual. Jangan mengarang data yang tidak ada di bawah; sebut jika datanya kurang. Ini saran, bukan kepastian.',
-    '', 'KONDISI BOT:', ctx, '', 'HASIL SCAN:', scan.slice(0, 6000),
-  ].join('\n');
-  const child = execFile('claude', ['-p', '--tools', '', '--no-session-persistence'], { cwd: tmpdir(), timeout: 120_000, maxBuffer: 1_000_000 });
+/** Compact fact sheet for one pool: Meteora pool API + DexScreener pair stats + token transfer fee. Best-effort, missing parts are skipped. */
+async function poolFacts(addr: string): Promise<string> {
+  const lines: string[] = [];
+  try {
+    const d = (await (await fetch(`https://dlmm.datapi.meteora.ag/pools/${addr}`)).json()) as {
+      name?: string; tvl?: number; current_price?: number; created_at?: number; launchpad?: string; dynamic_fee_pct?: number;
+      pool_config?: { bin_step?: number; base_fee_pct?: number; collect_fee_mode?: number };
+      volume?: Record<string, number>; fees?: Record<string, number>; fee_tvl_ratio?: Record<string, number>;
+      token_x?: { address?: string; symbol?: string; holders?: number; market_cap?: number };
+      token_y?: { address?: string; symbol?: string; holders?: number; market_cap?: number };
+    };
+    const tok = d.token_x?.address === 'So11111111111111111111111111111111111111112' ? d.token_y : d.token_x;
+    const v = d.volume ?? {};
+    const rr = (x?: number, mult = 1) => (x && v['24h'] ? ((x * mult) / v['24h']).toFixed(2) : '?');
+    lines.push(`POOL ${d.name} ${addr}`);
+    lines.push(`bin step ${d.pool_config?.bin_step}, base fee ${d.pool_config?.base_fee_pct}%, dynamic fee ${d.dynamic_fee_pct?.toFixed(2)}%, collect_fee_mode ${d.pool_config?.collect_fee_mode}, launchpad ${d.launchpad ?? '-'}`);
+    lines.push(`TVL $${Math.round(d.tvl ?? 0)}, price ${d.current_price}, age ${d.created_at ? Math.round((Date.now() - d.created_at) / 3_600_000) : '?'}h, token ${tok?.symbol} mcap $${Math.round(tok?.market_cap ?? 0)}, holders ${tok?.holders}`);
+    lines.push('volume $: ' + ['30m', '1h', '4h', '12h', '24h'].map((w) => `${w}=${Math.round(v[w] ?? 0)}`).join(' '));
+    lines.push('fee/TVL %: ' + ['30m', '1h', '4h', '12h', '24h'].map((w) => `${w}=${(d.fee_tvl_ratio?.[w] ?? 0).toFixed(2)}`).join(' '));
+    lines.push(`volume run-rate vs 24h total: 30m x48 = ${rr(v['30m'], 48)}, 1h x24 = ${rr(v['1h'], 24)}, 4h x6 = ${rr(v['4h'], 6)} (below 1 = fading)`);
+    if (tok?.address) {
+      const fee = await getTransferFee(tok.address);
+      lines.push(`transfer fee: ${fee === null ? 'unknown' : fee === 0 ? 'none' : fee / 100 + '% (AVOID)'}`);
+    }
+  } catch {
+    lines.push(`POOL ${addr}: Meteora API unavailable`);
+  }
+  try {
+    const dx = (await (await fetch(`https://api.dexscreener.com/latest/dex/pairs/solana/${addr}`)).json()) as {
+      pair?: { priceChange?: Record<string, number>; txns?: Record<string, { buys: number; sells: number }>; volume?: Record<string, number> };
+    };
+    const pc = dx.pair?.priceChange;
+    const tx = dx.pair?.txns;
+    if (pc) lines.push(`price change %: 5m=${pc.m5} 1h=${pc.h1} 6h=${pc.h6} 24h=${pc.h24}`);
+    if (tx) lines.push('tx buys/sells: ' + ['m5', 'h1', 'h6', 'h24'].map((w) => `${w}=${tx[w]?.buys}/${tx[w]?.sells}`).join(' '));
+  } catch {
+    /* optional */
+  }
+  return lines.join('\n');
+}
+
+async function getTransferFee(mint: string): Promise<number | null> {
+  if (!RPC_URL) return null;
+  try {
+    const r = await fetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAccountInfo', params: [mint, { encoding: 'jsonParsed' }] }) });
+    const j = (await r.json()) as { result?: { value?: { data?: { parsed?: { info?: { extensions?: { extension: string; state?: { newerTransferFee?: { transferFeeBasisPoints?: number } } }[] } } } } } };
+    const info = j.result?.value?.data?.parsed?.info;
+    if (!info) return null;
+    return info.extensions?.find((e) => e.extension === 'transferFeeConfig')?.state?.newerTransferFee?.transferFeeBasisPoints ?? 0;
+  } catch {
+    return null;
+  }
+}
+
+async function askClaude(prompt: string): Promise<string> {
+  const child = execFile('claude', ['-p', '--tools', '', '--no-session-persistence'], { cwd: tmpdir(), timeout: 180_000, maxBuffer: 1_000_000 });
   child.stdin?.end(prompt);
   const out = await new Promise<string>((resolve, reject) => {
     let buf = '';
@@ -256,6 +301,30 @@ async function suggestText(): Promise<string> {
     child.on('close', (code) => (code === 0 ? resolve(buf) : reject(new Error(`claude exited ${code}`))));
   });
   return out.trim() || 'no answer';
+}
+
+async function suggestText(arg: string): Promise<string> {
+  let addrs: string[];
+  let header: string;
+  if (arg) {
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(arg)) return 'pakai: /suggest (kandidat scan) atau /suggest <alamat pool>';
+    addrs = [arg];
+    header = 'Analisis satu pool pilihan user (bukan hasil scan, jadi belum tentu lolos filter bot):';
+  } else {
+    const scan = await scanText();
+    if (/No pool passes/.test(scan)) return 'Tidak ada pool yang lolos filter bot sekarang, jadi tidak ada saran masuk. Untuk pool tertentu: /suggest <alamat pool>.';
+    addrs = [...new Set([...scan.matchAll(/pool=([1-9A-HJ-NP-Za-km-z]{32,44})/g)].map((m) => m[1]!))].slice(0, 5);
+    header = 'Kandidat yang lolos scan bot saat ini:';
+  }
+  const facts = await Promise.all(addrs.map(poolFacts));
+  let knowledge = '';
+  try {
+    knowledge = readFileSync('docs/dlmm-analyst-context.md', 'utf8');
+  } catch {
+    knowledge = 'Kamu analis volume DLMM Meteora profesional. Jawab Bahasa Indonesia, ringkas, jangan mengarang data.';
+  }
+  const ctx = await statusText();
+  return askClaude([knowledge, '', 'KONDISI BOT SEKARANG:', ctx, '', header, ...facts.map((f) => '\n' + f)].join('\n'));
 }
 
 // ---- Manual controls (bot must be STOPPED for open/close/clean; every mutation needs /ya <code>) ----
@@ -400,7 +469,7 @@ const HELP = [
   '/posisi – open position detail',
   '/log [n] – last n events (default 8, max 20)',
   '/scan – pools passing the bot filters right now (~20s)',
-  '/suggest – Claude advice on the scan result (~40s)',
+  '/suggest [pool] – Claude volume analyst on the scan result, or on one pool (~40s)',
   '/startbot – build and start the live bot (needs /ya)',
   '/stopbot – stop the live bot, positions stay open (needs /ya)',
   '/open <pool> [sol] – manual open, only while the bot is stopped (needs /ya)',
@@ -424,7 +493,7 @@ async function reply(text: string): Promise<string> {
       busy = true;
       await send(cmd.startsWith('/scan') ? 'scanning…' : 'scanning and asking Claude…');
       try {
-        return cmd.startsWith('/scan') ? await scanText() : await suggestText();
+        return cmd.startsWith('/scan') ? await scanText() : await suggestText(arg);
       } catch (e) {
         return 'failed: ' + (e instanceof Error ? e.message.slice(0, 200) : 'unknown');
       } finally {
