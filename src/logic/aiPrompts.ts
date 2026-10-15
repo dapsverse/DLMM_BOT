@@ -103,7 +103,7 @@ export function buildScreenerPrompt(candidates: AiCandidate[], capitalSol: numbe
     `CANDIDATES (JSON):\n${JSON.stringify(candidates, null, 1)}`,
     `OUTPUT: reply with ONLY one JSON object, no prose, no code fence:
 {"action":"deploy"|"skip","pool":"<exact pool address from the list, required for deploy>","bins_below":<35-69>,"conviction":<1-10>,"reason":"<=400 chars: the specific thesis, the main risk, and what the web check found"}
-Use "deploy" only with conviction >= 7. Otherwise "skip" with the reason none qualify.`,
+Pick "deploy" for the highest-conviction candidate when your conviction is real; if only weak candidates remain, "skip" and explain why none qualify.`,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -138,7 +138,7 @@ export function buildReactScreenerPrompt(capitalSol: number, memory: string, rec
     `HOW TO WORK: call get_candidates first (every candidate there already passed the hard numeric filters; you can only pick from them or skip). For at most 2 finalists, call get_pool_detail and get_token_info, and optionally WebSearch the token narrative / X sentiment (at most 2 searches). If the narrative is unknown or generic hype with no identifiable subject treat it as negative; never invent facts. Candidate fields priorOutcomes are our own earlier results on that pool/token: a token that already lost money is a strong skip signal unless the setup is clearly different.`,
     memory,
     recentDecisions.length ? `RECENT AGENT DECISIONS (newest last):\n${recentDecisions.join('\n')}` : '',
-    'FINISH by calling submit_decision exactly once: action "deploy" (pool, bins_below, conviction 1-10, reason) only with conviction >= 7, otherwise action "skip" with the reason none qualify and your conviction in the best candidate. Do not write a final answer without calling submit_decision.',
+    'FINISH by calling submit_decision exactly once: action "deploy" (pool, bins_below, conviction 1-10, reason) for the highest-conviction candidate when your conviction is real, otherwise action "skip" with the reason none qualify and your conviction in the best candidate. Do not write a final answer without calling submit_decision.',
   ]
     .filter(Boolean)
     .join('\n\n');
