@@ -112,6 +112,15 @@ export interface DlmmPool {
     user: PublicKey;
     slippage?: number;
   }): Promise<Transaction>;
+  createExtendedEmptyPosition(lowerBinId: number, upperBinId: number, position: PublicKey, owner: PublicKey): Promise<Transaction>;
+  addLiquidityByStrategyChunkable(params: {
+    positionPubKey: PublicKey;
+    totalXAmount: BN;
+    totalYAmount: BN;
+    strategy: { minBinId: number; maxBinId: number; strategyType: StrategyType; singleSidedX?: boolean };
+    user: PublicKey;
+    slippage?: number;
+  }): Promise<Transaction[]>;
   claimSwapFee(params: { owner: PublicKey; position: LbPosition }): Promise<Transaction[]>;
   removeLiquidity(params: {
     user: PublicKey;
@@ -167,12 +176,12 @@ export function stripComputeBudgetInstructions<T extends { programId: PublicKey 
   return instructions.filter((ix) => ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID);
 }
 
-async function withPriorityFee(tx: Transaction, writableAccounts: PublicKey[]): Promise<Transaction> {
+async function withPriorityFee(tx: Transaction, writableAccounts: PublicKey[], computeUnitLimit = COMPUTE_UNIT_LIMIT): Promise<Transaction> {
   const microLamports = await getDynamicPriorityFeeMicroLamports(writableAccounts);
   tx.instructions = stripComputeBudgetInstructions(tx.instructions);
   tx.instructions.unshift(
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
-    ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
   );
   return tx;
 }
@@ -304,6 +313,58 @@ export async function openPosition(params: OpenPositionParams): Promise<OpenPosi
       return { positionPubkey: positionKeypair.publicKey, signature, centerBinId: activeBin.binId };
     },
     { maxRetries: 3, baseDelayMs: 1_000, label: 'openPositionFreshBin' },
+  );
+}
+
+/** Simulated 681k CU for a 69-bin ladder create+add in one tx (2026-10-15); headroom on top. */
+export const LADDER_COMPUTE_UNIT_LIMIT = 900_000;
+
+export interface LadderTx {
+  tx: Transaction;
+  positionKeypair: Keypair;
+  minBinId: number;
+  maxBinId: number;
+  activeBinId: number;
+}
+
+/**
+ * Builds ONE transaction that creates an extended position and deposits SOL only, as a bid-ask ladder BELOW the price
+ * (meridian-style): bins [active-(n-1), active] when SOL is token Y, [active, active+(n-1)] when SOL is token X (token
+ * price falling = bin id rising there). No token side, so no entry swap. SDK emits create + add as two txs; their
+ * instructions are merged (verified by simulateTransaction: 1116 bytes, 681k CU for 69 bins). Refetches pool state first.
+ */
+export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, user: PublicKey = wallet.publicKey): Promise<LadderTx> {
+  await pool.refetchStates();
+  const activeBinId = (await getActiveBin(pool)).binId;
+  const minBinId = xIsSol ? activeBinId : activeBinId - (bins - 1);
+  const maxBinId = xIsSol ? activeBinId + (bins - 1) : activeBinId;
+  const positionKeypair = Keypair.generate();
+  const create = await pool.createExtendedEmptyPosition(minBinId, maxBinId, positionKeypair.publicKey, user);
+  const adds = await pool.addLiquidityByStrategyChunkable({
+    positionPubKey: positionKeypair.publicKey,
+    totalXAmount: xIsSol ? solLamports : new BN(0),
+    totalYAmount: xIsSol ? new BN(0) : solLamports,
+    strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk, singleSidedX: xIsSol },
+    user,
+    slippage: 1,
+  });
+  if (adds.length !== 1) throw new Error(`[dlmm] ladder deposit needs ${adds.length} txs, expected 1 (bins=${bins})`);
+  const tx = new Transaction();
+  tx.add(...stripComputeBudgetInstructions([...create.instructions, ...(adds[0]?.instructions ?? [])]));
+  return { tx, positionKeypair, minBinId, maxBinId, activeBinId };
+}
+
+/** Opens the SOL-only ladder (see buildLadderTx), rebuilding from a fresh active bin on every retry. */
+export async function openLadderPosition(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number): Promise<OpenPositionResult> {
+  return withRetry(
+    async () => {
+      const { tx, positionKeypair, minBinId, maxBinId, activeBinId } = await buildLadderTx(pool, xIsSol, solLamports, bins);
+      await withPriorityFee(tx, [wallet.publicKey, positionKeypair.publicKey], LADDER_COMPUTE_UNIT_LIMIT);
+      const signature = await sendTx(tx, [positionKeypair], 'openLadder');
+      logger.info('[dlmm] ladder position opened', { position: positionKeypair.publicKey.toBase58(), signature, minBinId, maxBinId, activeBinId });
+      return { positionPubkey: positionKeypair.publicKey, signature, centerBinId: activeBinId };
+    },
+    { maxRetries: 3, baseDelayMs: 1_000, label: 'openLadderFreshBin' },
   );
 }
 
