@@ -1408,3 +1408,13 @@ Not done: a tiny live limit-order test (needs user approval), bin-step preferenc
   `false` **locally for this repo only** to unblock commits in this
   sandbox (no TTY for the passphrase prompt) — already done, don't
   redo/ask again unless a fresh clone needs it too.
+
+## 2026-10-15 session: meridian mode + Claude AI agent (live, 0.3 SOL cap)
+
+- `ENTRY_STRATEGY_MODE=meridian`: yunus-0x/meridian screening window (`MERIDIAN_*` env, `src/logic/meridianFilter.ts`) + SOL-only 69-bin bid-ask ladder in ONE tx (`buildLadderTx`/`openLadderEntry`, extended position, no entry swap; `src/logic/ladderRange.ts` geometry; `ctx.ladderBins`). Sim: 69-bin bid-ask ~breakeven in a falling market (`moonbot/solonlysim.mjs`), no edge for swing tokens.
+- Exits for ladders: price above the ladder `LADDER_OOR_EXIT_MIN` (30) -> clean exit, no recenter; below -> existing down-break ask flow; SL 25%, volume drop, trailing TP unchanged. `DOLLAR_FLOW_ENABLED=false` removes the entry $-flow gate and FLOW_EXIT. `MAX_CAPITAL_SOL` caps capital at boot, refresh, post-exit and compound.
+- AI agent (`AI_AGENT=true`, `src/services/aiAgent.ts`, `src/logic/aiPrompts.ts`/`aiDecision.ts`): `claude -p` screener (picks one eligible candidate or skips, conviction>=7, bins 35-69) + manager (hold/close every 5 min, never blocks the tick). Code validates every answer; failures = skip/hold. Decision log `logs/ai-decisions.jsonl`; outcome memory `state/ai-outcomes.jsonl` (win rate + per-pool priors in prompts).
+- Verified live: ladder open + close (single tx each), upside-break exit, AI screener skips with conviction. NOT yet seen live: AI deploy path, AI_EXIT, down-break on a ladder.
+- PENDING: meridian-style auto threshold evolution (see memory `meridian-mode-ai-agent-2026-10-15`); wait for 20-30 closed positions.
+- Gotcha: scripts that import `dist/services/solana.js` must load `.env.live` (`set -a; . ./.env.live; set +a`), else they silently load the old `.env` wallet (GRxK1D, empty).
+- Helius free plan: ~75k credits/day burned before dollar-flow was disabled; 429s come from the per-second limit.
