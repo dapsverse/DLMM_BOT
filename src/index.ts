@@ -54,6 +54,10 @@ const chaseGuardPools = new Map<string, number>(); // see ScannerConfig.chaseGua
 for (const addr of (process.env.BOOT_BLACKLIST_POOLS ?? '').split(',').map((a) => a.trim()).filter(Boolean)) {
   blacklistPools.set(addr, Date.now() + env.BLACKLIST_DURATION_MS);
 }
+// User-managed pools: kept out of every scan for good (10y expiry; also hard-blocked in meteoraDLMM.ts).
+for (const addr of (process.env.PROTECTED_POOLS ?? '').split(',').map((a) => a.trim()).filter(Boolean)) {
+  blacklistPools.set(addr, Date.now() + 10 * 365 * 86_400_000);
+}
 let currentPool: PoolContext | null = null;
 // Non-SOL mint of the last pool we entered; used by the flat kill-switch to liquidate leftovers.
 let lastOtherMint: string | null = null;
