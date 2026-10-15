@@ -22,6 +22,8 @@ assert.equal(P('{"action":"deploy","pool":"POOL_A","bins_below":60,"reason":"no 
 assert.equal(P('{"action":"deploy","pool":"POOL_A","reason":"no bins"}').action, 'skip');
 assert.equal(P('I think pool A is great').action, 'skip');
 assert.equal(P('{"action":"skip","reason":"all weak"}').action, 'skip');
+assert.equal((P('{"action":"skip","conviction":3,"reason":"knife"}') as { conviction?: number }).conviction, 3); // skip keeps its conviction for the log
+assert.equal((P('{"action":"deploy","pool":"POOL_A","bins_below":60,"conviction":6,"reason":"meh"}') as { conviction?: number }).conviction, 6); // below-threshold keeps it too
 assert.equal(P('{"action":"buy_more","pool":"POOL_A"}').action, 'skip');
 
 assert.equal(parseManagerDecision('{"action":"close","reason":"thesis broken"}').action, 'close');

@@ -1,7 +1,7 @@
 /** Pure parsing/validation of the Claude agent's JSON answers. Every invalid answer fails closed (skip / hold). */
 
 export type ScreenerDecision =
-  | { action: 'skip'; reason: string }
+  | { action: 'skip'; reason: string; conviction?: number }
   | { action: 'deploy'; pool: string; bins: number; conviction: number; reason: string };
 
 export type ManagerDecision = { action: 'hold' | 'close'; reason: string };
@@ -37,11 +37,13 @@ const reasonOf = (o: Record<string, unknown>): string => (typeof o.reason === 's
 export function parseScreenerDecision(text: string, allowedPools: ReadonlySet<string>, minBins: number, maxBins: number, minConviction: number): ScreenerDecision {
   const o = extractJson(text);
   if (!o) return { action: 'skip', reason: 'invalid answer: no JSON object' };
-  if (o.action === 'skip') return { action: 'skip', reason: reasonOf(o) };
+  const rawConv = Number(o.conviction);
+  const convOpt = Number.isFinite(rawConv) ? { conviction: rawConv } : {};
+  if (o.action === 'skip') return { action: 'skip', reason: reasonOf(o), ...convOpt };
   if (o.action !== 'deploy') return { action: 'skip', reason: 'invalid answer: unknown action' };
   if (typeof o.pool !== 'string' || !allowedPools.has(o.pool)) return { action: 'skip', reason: 'invalid answer: pool is not an eligible candidate' };
   const conviction = Number(o.conviction);
-  if (!Number.isFinite(conviction) || conviction < minConviction) return { action: 'skip', reason: `conviction ${String(o.conviction)} below ${minConviction}: ${reasonOf(o)}` };
+  if (!Number.isFinite(conviction) || conviction < minConviction) return { action: 'skip', reason: `conviction ${String(o.conviction)} below ${minConviction}: ${reasonOf(o)}`, ...convOpt };
   const binsRaw = Number(o.bins_below);
   if (!Number.isFinite(binsRaw)) return { action: 'skip', reason: 'invalid answer: bins_below missing' };
   const bins = Math.min(maxBins, Math.max(minBins, Math.round(binsRaw)));
