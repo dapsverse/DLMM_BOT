@@ -1,5 +1,15 @@
 node_modules/
 dist/
 .env
+.env.live
 logs/
 *.log
+.DS_Store
+moonbot/data/
+moonbot/data_new/
+moonbot/data_old/
+moonbot/data5m/
+moonbot/data5m2/
+state/
+moonbot/databc/
+.env.telegram
