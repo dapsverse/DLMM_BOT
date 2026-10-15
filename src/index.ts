@@ -70,7 +70,7 @@ interface EligibleCandidate {
   xIsSol: boolean;
   reserveSolAccount: string;
   solPriceUsd: number;
-  dollarFlow: DollarFlowResult;
+  dollarFlow: DollarFlowResult | null;
   audit: TokenAudit;
 }
 
@@ -100,8 +100,8 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
     priceChange24hPct: c.priceChange24hPct ?? null,
     drawdownFrom14dHighPct: dd,
     buyRatio1hByTxCount: c.buyRatio1h ?? null,
-    dollarFlowBuyRatio: +e.dollarFlow.buyRatioUsd.toFixed(3),
-    dollarFlowTxSampled: e.dollarFlow.txSampled,
+    dollarFlowBuyRatio: e.dollarFlow ? +e.dollarFlow.buyRatioUsd.toFixed(3) : null,
+    dollarFlowTxSampled: e.dollarFlow?.txSampled ?? null,
     poolAgeHours: Math.round((Date.now() - c.createdAtMs) / 3_600_000),
   };
 }
@@ -294,19 +294,21 @@ async function tryEnterPool(): Promise<void> {
       continue;
     }
     logger.info('[index] token audit ok', { pool: candidate.address, audit });
-    const dollarFlow = await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd);
-    if (dollarFlow === null) {
-      logger.warn(`[index] skipping pool ${candidate.address} — dollar-flow check failed/insufficient sample (fail-closed)`);
-      continue;
-    }
-    if (dollarFlow.buyRatioUsd < env.MIN_DOLLAR_BUY_RATIO) {
-      logger.info(`[index] skipping pool ${candidate.address} — $ volume sell-dominant`, {
-        buyRatioUsd: +dollarFlow.buyRatioUsd.toFixed(3),
-        buyVolumeUsd: +dollarFlow.buyVolumeUsd.toFixed(2),
-        sellVolumeUsd: +dollarFlow.sellVolumeUsd.toFixed(2),
-        txSampled: dollarFlow.txSampled,
-      });
-      continue;
+    const dollarFlow = env.DOLLAR_FLOW_ENABLED ? await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd) : null;
+    if (env.DOLLAR_FLOW_ENABLED) {
+      if (dollarFlow === null) {
+        logger.warn(`[index] skipping pool ${candidate.address} — dollar-flow check failed/insufficient sample (fail-closed)`);
+        continue;
+      }
+      if (dollarFlow.buyRatioUsd < env.MIN_DOLLAR_BUY_RATIO) {
+        logger.info(`[index] skipping pool ${candidate.address} — $ volume sell-dominant`, {
+          buyRatioUsd: +dollarFlow.buyRatioUsd.toFixed(3),
+          buyVolumeUsd: +dollarFlow.buyVolumeUsd.toFixed(2),
+          sellVolumeUsd: +dollarFlow.sellVolumeUsd.toFixed(2),
+          txSampled: dollarFlow.txSampled,
+        });
+        continue;
+      }
     }
 
     eligible.push({ candidate, xIsSol, reserveSolAccount, solPriceUsd, dollarFlow, audit });
@@ -366,7 +368,7 @@ async function tryEnterPool(): Promise<void> {
         buyRatio1h: candidate.buyRatio1h ?? null,
         priceContext,
         feeYield: { r24h: candidate.feeTvlRatio24h, r4hx6: candidate.feeTvlRatio4h == null ? null : +(candidate.feeTvlRatio4h * 6).toFixed(3) },
-        dollarFlow: { buyRatioUsd: +dollarFlow.buyRatioUsd.toFixed(3), txSampled: dollarFlow.txSampled },
+        dollarFlow: dollarFlow ? { buyRatioUsd: +dollarFlow.buyRatioUsd.toFixed(3), txSampled: dollarFlow.txSampled } : null,
       });
       return;
     } catch (err) {
@@ -592,7 +594,7 @@ async function tick(): Promise<void> {
   // as a cheap, already-existing cadence rather than inventing a new env
   // var. A null result (RPC hiccup, no sampled activity) is unknown — don't
   // act on it, same permissive policy as the rest of the screen.
-  if (now - lastDollarFlowCheckAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
+  if (env.DOLLAR_FLOW_ENABLED && now - lastDollarFlowCheckAtMs >= env.OPPORTUNITY_SCAN_INTERVAL_MS) {
     lastDollarFlowCheckAtMs = now;
     const solPriceUsd = await getSolPriceUsd(ctx.poolAddress);
     if (solPriceUsd !== null) {

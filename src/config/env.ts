@@ -286,6 +286,8 @@ export const env = {
   // naturally lumpier (one legitimate whale trade can swing it hard even
   // on an otherwise healthy pool); this is a brand-new, unvalidated signal,
   // same "low-confidence starting guess" caveat as other knobs here.
+  /** false = no on-chain dollar-flow reads at all (entry gate + FLOW_EXIT); meridian has none and each read costs ~150 RPC credits. */
+  DOLLAR_FLOW_ENABLED: bool('DOLLAR_FLOW_ENABLED', true),
   MIN_DOLLAR_BUY_RATIO: num('MIN_DOLLAR_BUY_RATIO', 0.4),
 
   // EXIT-side thresholds for the held-position dollar-flow check (looser than
