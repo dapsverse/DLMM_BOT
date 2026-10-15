@@ -7,7 +7,7 @@ import { parseManagerDecision, parseScreenerDecision, type ManagerDecision, type
 import { buildManagerPrompt, buildScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
 import { memoryBlock } from '../logic/aiMemory.js';
 import { loadOutcomes } from './aiOutcomes.js';
-import { reactScreen } from './aiReact.js';
+import { reactManage, reactScreen } from './aiReact.js';
 import { logger } from '../utils/logger.js';
 
 const DECISION_LOG = 'logs/ai-decisions.jsonl';
@@ -88,6 +88,19 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
 /** Manager: hold or close. Any failure = hold (the automatic exits keep protecting the position). */
 export async function aiManage(snapshot: AiPositionSnapshot, rules: AiRules): Promise<ManagerDecision> {
   let decision: ManagerDecision;
+  if (env.AI_REACT_MANAGER) {
+    let extra: Record<string, unknown> = {};
+    try {
+      const r = await reactManage(snapshot, rules, recentLines('manage', 5));
+      decision = r.decision;
+      extra = { react: true, turns: r.turns, costUsd: r.costUsd, tools: r.toolCalls };
+    } catch (err) {
+      decision = { action: 'hold', reason: `react manager failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    logDecision('manage', { pool: snapshot.pool, valueSol: snapshot.valueSol, profitPct: snapshot.profitPct, ...decision, ...extra });
+    logger.info('[ai] manager decision', { pool: snapshot.pool, ...decision, ...extra });
+    return decision;
+  }
   try {
     const text = await askClaude(buildManagerPrompt(snapshot, rules, recentLines('manage', 5), memoryBlock(loadOutcomes(), 5)), false, env.AI_MANAGE_TIMEOUT_S * 1000);
     decision = parseManagerDecision(text);

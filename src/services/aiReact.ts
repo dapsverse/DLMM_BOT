@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { memoryBlock } from '../logic/aiMemory.js';
-import { buildReactScreenerPrompt, type AiCandidate } from '../logic/aiPrompts.js';
-import { type ScreenerDecision } from '../logic/aiDecision.js';
+import { buildReactManagerPrompt, buildReactScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
+import { type ManagerDecision, type ScreenerDecision } from '../logic/aiDecision.js';
 import { loadOutcomes } from './aiOutcomes.js';
 import { logger } from '../utils/logger.js';
 
@@ -37,6 +37,63 @@ export function validateSubmit(
   return { action: 'deploy', pool: a.pool, bins: Math.min(maxBins, Math.max(minBins, Math.round(a.bins_below))), conviction: a.conviction, reason };
 }
 
+
+export async function fetchPoolDetail(pool: string): Promise<unknown> {
+  try {
+    const d = (await getJson(`https://dlmm.datapi.meteora.ag/pools/${pool}`)) as Record<string, unknown> & { pool_config?: { base_fee_pct?: number } };
+    const end = Math.floor(Date.now() / 1000);
+    let closes: number[] = [];
+    try {
+      const o = (await getJson(`https://dlmm.datapi.meteora.ag/pools/${pool}/ohlcv?timeframe=1h&start_time=${end - 86_400}&end_time=${end}`)) as { data?: { close?: number }[] };
+      closes = (o.data ?? []).map((c) => Number(c.close)).filter(Number.isFinite);
+    } catch {
+      /* candles optional */
+    }
+    const hi = Math.max(...closes);
+    const lo = Math.min(...closes);
+    const last = closes[closes.length - 1];
+    return {
+      tvl: d.tvl,
+      volume: d.volume,
+      feeTvlRatio: d.fee_tvl_ratio,
+      baseFeePct: d.pool_config?.base_fee_pct,
+      hourlyCloses: closes.length,
+      rangePct24h: closes.length && lo > 0 ? +(((hi - lo) / lo) * 100).toFixed(1) : null,
+      lastCloseVsHighPct: closes.length && last !== undefined && hi > 0 ? +(((last - hi) / hi) * 100).toFixed(1) : null,
+    };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function fetchTokenInfo(mint: string): Promise<unknown> {
+  try {
+    const d = (await getJson(`https://datapi.jup.ag/v1/assets/search?query=${mint}`)) as unknown;
+    const list = Array.isArray(d) ? d : ((d as { assets?: unknown[] }).assets ?? []);
+    const a = (list as Record<string, unknown>[]).find((x) => x.id === mint);
+    if (!a) return { error: 'not found' };
+    return { symbol: a.symbol, organicScore: a.organicScore, holderCount: a.holderCount, globalFeesSol: a.fees, mcap: a.mcap, audit: a.audit, bundlerStats: a.bundlerStats, launchpad: a.launchpad, stats24h: a.stats24h };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Common Agent SDK options: only our MCP server + WebSearch, no settings, no secrets in the subprocess env. */
+function sdkOptions(server: ReturnType<typeof createSdkMcpServer>, toolNames: string[], system: string) {
+  return {
+    mcpServers: { dlmm: server },
+    tools: ['WebSearch'],
+    allowedTools: [...toolNames.map((n) => `mcp__dlmm__${n}`), 'WebSearch'],
+    maxTurns: env.AI_REACT_MAX_TURNS,
+    maxBudgetUsd: env.AI_REACT_MAX_BUDGET_USD,
+    cwd: tmpdir(),
+    settingSources: [] as never[],
+    persistSession: false,
+    systemPrompt: system,
+    env: agentEnv(),
+  };
+}
+
 export interface ReactResult {
   decision: ScreenerDecision;
   toolCalls: string[];
@@ -61,44 +118,12 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
   const getPoolDetail = tool('get_pool_detail', 'Meteora pool detail plus hourly price closes of the last 24h summarised (range %, distance from the 24h high). Finalists only.', { pool: z.string() }, async ({ pool }) => {
     note('get_pool_detail', { pool });
     if (!allowed.has(pool)) return text({ error: 'not an eligible candidate' });
-    try {
-      const d = (await getJson(`https://dlmm.datapi.meteora.ag/pools/${pool}`)) as Record<string, unknown> & { pool_config?: { base_fee_pct?: number } };
-      const end = Math.floor(Date.now() / 1000);
-      let closes: number[] = [];
-      try {
-        const o = (await getJson(`https://dlmm.datapi.meteora.ag/pools/${pool}/ohlcv?timeframe=1h&start_time=${end - 86_400}&end_time=${end}`)) as { data?: { close?: number }[] };
-        closes = (o.data ?? []).map((c) => Number(c.close)).filter(Number.isFinite);
-      } catch {
-        /* candles optional */
-      }
-      const hi = Math.max(...closes);
-      const lo = Math.min(...closes);
-      const last = closes[closes.length - 1];
-      return text({
-        tvl: d.tvl,
-        volume: d.volume,
-        feeTvlRatio: d.fee_tvl_ratio,
-        baseFeePct: d.pool_config?.base_fee_pct,
-        hourlyCloses: closes.length,
-        rangePct24h: closes.length && lo > 0 ? +(((hi - lo) / lo) * 100).toFixed(1) : null,
-        lastCloseVsHighPct: closes.length && last !== undefined && hi > 0 ? +(((last - hi) / hi) * 100).toFixed(1) : null,
-      });
-    } catch (e) {
-      return text({ error: e instanceof Error ? e.message : String(e) });
-    }
+    return text(await fetchPoolDetail(pool));
   });
   const getTokenInfo = tool('get_token_info', 'Jupiter token facts: organic score, holders, global fees, top-holder and bot-holder %, bundler stats, launchpad. Finalists only.', { mint: z.string() }, async ({ mint }) => {
     note('get_token_info', { mint });
     if (!candidates.some((c) => c.tokenMint === mint)) return text({ error: 'not an eligible candidate token' });
-    try {
-      const d = (await getJson(`https://datapi.jup.ag/v1/assets/search?query=${mint}`)) as unknown;
-      const list = Array.isArray(d) ? d : ((d as { assets?: unknown[] }).assets ?? []);
-      const a = (list as Record<string, unknown>[]).find((x) => x.id === mint);
-      if (!a) return text({ error: 'not found' });
-      return text({ symbol: a.symbol, organicScore: a.organicScore, holderCount: a.holderCount, globalFeesSol: a.fees, mcap: a.mcap, audit: a.audit, bundlerStats: a.bundlerStats, launchpad: a.launchpad, stats24h: a.stats24h });
-    } catch (e) {
-      return text({ error: e instanceof Error ? e.message : String(e) });
-    }
+    return text(await fetchTokenInfo(mint));
   });
   const submitDecision = tool(
     'submit_decision',
@@ -115,18 +140,7 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
 
   const q = query({
     prompt: buildReactScreenerPrompt(capitalSol, memoryBlock(loadOutcomes()), recentDecisions),
-    options: {
-      mcpServers: { dlmm: server },
-      tools: ['WebSearch'],
-      allowedTools: ['mcp__dlmm__get_candidates', 'mcp__dlmm__get_pool_detail', 'mcp__dlmm__get_token_info', 'mcp__dlmm__submit_decision', 'WebSearch'],
-      maxTurns: env.AI_REACT_MAX_TURNS,
-      maxBudgetUsd: env.AI_REACT_MAX_BUDGET_USD,
-      cwd: tmpdir(),
-      settingSources: [],
-      persistSession: false,
-      systemPrompt: 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.',
-      env: agentEnv(),
-    },
+    options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
   });
   let costUsd: number | null = null;
   let turns = 0;
@@ -142,5 +156,64 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
     clearTimeout(timer);
   }
   const decision: ScreenerDecision = submitted ?? { action: 'skip', reason: 'react agent ended without submit_decision' };
+  return { decision, toolCalls, costUsd, turns };
+}
+
+/** Pure: the manager can only hold or close; anything else is hold. */
+export function validateManagerSubmit(a: { action: 'hold' | 'close'; reason: string }): ManagerDecision {
+  return { action: a.action === 'close' ? 'close' : 'hold', reason: a.reason.slice(0, 600) };
+}
+
+export interface ReactManageResult {
+  decision: ManagerDecision;
+  toolCalls: string[];
+  costUsd: number | null;
+  turns: number;
+}
+
+/** ReAct manager: reads the live position and may pull pool/token context, then submits hold|close. No submit / error / timeout = hold. */
+export async function reactManage(snapshot: AiPositionSnapshot, rules: AiRules, recentDecisions: string[]): Promise<ReactManageResult> {
+  const toolCalls: string[] = [];
+  let submitted: ManagerDecision | null = null;
+  const note = (n: string, a: unknown) => toolCalls.push(`${n} ${JSON.stringify(a)}`.slice(0, 160));
+
+  const getPosition = tool('get_position', 'The live snapshot of the open position: value, profit, fees, range status, minutes out of range, token share, volume vs entry baseline, entry thesis.', {}, async () => {
+    note('get_position', {});
+    return text(snapshot);
+  });
+  const getPoolDetail = tool('get_pool_detail', 'Meteora detail for the HELD pool plus hourly price closes of the last 24h summarised.', {}, async () => {
+    note('get_pool_detail', {});
+    return text(await fetchPoolDetail(snapshot.pool));
+  });
+  const getTokenInfo = tool('get_token_info', 'Jupiter facts for the HELD token: organic score, holders, top/bot holder %, bundlers, launchpad.', {}, async () => {
+    note('get_token_info', {});
+    return text(await fetchTokenInfo(snapshot.tokenMint));
+  });
+  const submitDecision = tool('submit_decision', 'Submit your decision, exactly once: hold or close.', { action: z.enum(['hold', 'close']), reason: z.string() }, async (a) => {
+    note('submit_decision', { action: a.action });
+    if (submitted) return text({ error: 'already submitted' });
+    submitted = validateManagerSubmit(a);
+    return text({ ok: true, recorded: submitted.action });
+  });
+  const server = createSdkMcpServer({ name: 'dlmm', tools: [getPosition, getPoolDetail, getTokenInfo, submitDecision] });
+
+  const q = query({
+    prompt: buildReactManagerPrompt(rules, memoryBlock(loadOutcomes(), 5), recentDecisions),
+    options: sdkOptions(server, ['get_position', 'get_pool_detail', 'get_token_info', 'submit_decision'], 'You are an autonomous DLMM LP position manager agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
+  });
+  let costUsd: number | null = null;
+  let turns = 0;
+  const timer = setTimeout(() => q.close(), env.AI_MANAGE_TIMEOUT_S * 1000);
+  try {
+    for await (const m of q) {
+      if (m.type === 'assistant') turns++;
+      if (m.type === 'result') costUsd = typeof m.total_cost_usd === 'number' ? m.total_cost_usd : null;
+    }
+  } catch (err) {
+    logger.warn('[ai] react manager error', { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    clearTimeout(timer);
+  }
+  const decision: ManagerDecision = submitted ?? { action: 'hold', reason: 'react manager ended without submit_decision (default hold)' };
   return { decision, toolCalls, costUsd, turns };
 }

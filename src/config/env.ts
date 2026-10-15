@@ -505,6 +505,8 @@ export const env = {
   AI_CLAUDE_BIN: optionalStr('AI_CLAUDE_BIN', 'claude'),
   /** ReAct screener (Claude Agent SDK + tools) instead of the one-shot JSON screener. Off by default. */
   AI_REACT: bool('AI_REACT', false),
+  /** ReAct manager (Agent SDK + tools) instead of the one-shot JSON manager. Off by default. */
+  AI_REACT_MANAGER: bool('AI_REACT_MANAGER', false),
   AI_REACT_MAX_TURNS: num('AI_REACT_MAX_TURNS', 14),
   AI_REACT_MAX_BUDGET_USD: num('AI_REACT_MAX_BUDGET_USD', 0.6),
   /** minutes the price may stay above the ladder (all SOL, earning nothing) before the position is closed */

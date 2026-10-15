@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentEnv, validateSubmit } from '../services/aiReact.js';
+import { agentEnv, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
 
 const allowed = new Set(['POOL_A']);
 const V = (a: Parameters<typeof validateSubmit>[0]) => validateSubmit(a, allowed, 35, 69, 7);
@@ -15,4 +15,7 @@ assert.equal(V({ action: 'deploy', bins_below: 60, conviction: 9, reason: 'no po
 
 const e = agentEnv({ PATH: '/bin', HOME: '/h', PRIVATE_KEY: 'k', RPC_URL: 'u', TELEGRAM_BOT_TOKEN: 't', HELIUS_API_KEY: 'a', MY_SECRET: 's' });
 assert.deepEqual(Object.keys(e).sort(), ['HOME', 'PATH']); // secrets never reach the agent subprocess
+assert.equal(validateManagerSubmit({ action: 'close', reason: 'dead' }).action, 'close');
+assert.equal(validateManagerSubmit({ action: 'hold', reason: 'ok' }).action, 'hold');
+assert.equal(validateManagerSubmit({ action: 'sell_all' as never, reason: 'x' }).action, 'hold'); // anything unknown = hold
 console.log('checkAiReact ok');
