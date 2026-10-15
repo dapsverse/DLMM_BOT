@@ -492,9 +492,14 @@ export const env = {
   AI_MIN_CONVICTION: num('AI_MIN_CONVICTION', 7),
   AI_MIN_BINS: num('AI_MIN_BINS', 35),
   AI_MAX_BINS: num('AI_MAX_BINS', 69),
-  AI_MANAGE_INTERVAL_MIN: num('AI_MANAGE_INTERVAL_MIN', 5),
+  /** slow periodic manager health check (meridian: 10-60 min); event triggers are in logic/aiTriggers.ts */
+  AI_MANAGE_INTERVAL_MIN: num('AI_MANAGE_INTERVAL_MIN', 30),
+  AI_MANAGE_TRIGGER_COOLDOWN_MIN: num('AI_MANAGE_TRIGGER_COOLDOWN_MIN', 10),
+  AI_TRIGGER_OOR_MIN: num('AI_TRIGGER_OOR_MIN', 5),
+  AI_TRIGGER_LOSS_PCT: num('AI_TRIGGER_LOSS_PCT', 8),
+  AI_TRIGGER_VOLUME_BELOW_PCT: num('AI_TRIGGER_VOLUME_BELOW_PCT', 50),
   /** same eligible set is not re-sent to the screener sooner than this (a skip is cached) */
-  AI_SCREEN_MIN_INTERVAL_MIN: num('AI_SCREEN_MIN_INTERVAL_MIN', 10),
+  AI_SCREEN_MIN_INTERVAL_MIN: num('AI_SCREEN_MIN_INTERVAL_MIN', 30),
   AI_SCREEN_TIMEOUT_S: num('AI_SCREEN_TIMEOUT_S', 300),
   AI_MANAGE_TIMEOUT_S: num('AI_MANAGE_TIMEOUT_S', 150),
   AI_CLAUDE_BIN: optionalStr('AI_CLAUDE_BIN', 'claude'),

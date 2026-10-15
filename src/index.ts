@@ -32,6 +32,7 @@ import { getDollarVolumeBuyRatio, type DollarFlowResult } from './services/flowA
 import { aiScreen, aiManage } from './services/aiAgent.js';
 import type { AiCandidate } from './logic/aiPrompts.js';
 import { outcomeLine, priorFor } from './logic/aiMemory.js';
+import { managerTrigger } from './logic/aiTriggers.js';
 import { loadOutcomes, recordOutcome } from './services/aiOutcomes.js';
 import type { TokenAudit } from './logic/tokenAudit.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
@@ -385,6 +386,7 @@ async function tryEnterPool(): Promise<void> {
         ),
       );
       currentPool.poolName = candidate.name;
+      aiManagerLastAtMs = Date.now(); // first manager check comes after the periodic interval, not at entry
       if (aiReason) currentPool.aiEntryReason = aiReason;
       if (aiConviction !== undefined) currentPool.aiEntryConviction = aiConviction;
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
@@ -593,10 +595,25 @@ async function tick(): Promise<void> {
       }
       return;
     }
-    if (!aiManagerBusy && now - aiManagerLastAtMs >= env.AI_MANAGE_INTERVAL_MIN * 60_000) {
+    const tokenShare = currentValueSol > 0 ? (otherPrincipalSol / currentValueSol) * 100 : 0;
+    const volVsBase = volume1hNowUsd !== null && ctx.volume1hBaselineUsd > 0 ? Math.round((volume1hNowUsd / ctx.volume1hBaselineUsd) * 100) : null;
+    const trigger = aiManagerBusy
+      ? null
+      : managerTrigger(
+          {
+            isOutOfRange: binStatus.isOutOfRange,
+            minutesOutOfRange: ctx.outOfRangeSinceMs ? Math.round((now - ctx.outOfRangeSinceMs) / 60_000) : null,
+            profitPct: currentProfitPct,
+            volumeVsBaselinePct: volVsBase,
+            tokenSharePct: tokenShare,
+            minutesSinceLastCall: aiManagerLastAtMs === 0 ? Infinity : (now - aiManagerLastAtMs) / 60_000,
+          },
+          { periodicMin: env.AI_MANAGE_INTERVAL_MIN, cooldownMin: env.AI_MANAGE_TRIGGER_COOLDOWN_MIN, oorMin: env.AI_TRIGGER_OOR_MIN, lossPct: env.AI_TRIGGER_LOSS_PCT, volumeBelowPct: env.AI_TRIGGER_VOLUME_BELOW_PCT },
+        );
+    if (trigger) {
+      logger.info('[ai] manager triggered', { pool: ctx.poolAddress, trigger });
       aiManagerBusy = true;
       aiManagerLastAtMs = now;
-      const tokenShare = currentValueSol > 0 ? (otherPrincipalSol / currentValueSol) * 100 : 0;
       const priceVsLadder = !binStatus.isOutOfRange ? 'inside' : binStatus.tokenBelowRange ? 'below (all token)' : 'above (all SOL, earning nothing)';
       void aiManage(
         {

@@ -54,7 +54,7 @@ let lastScreen: { key: string; atMs: number; decision: ScreenerDecision } | null
 /** Screener: pick one of the eligible candidates or skip. Any failure = skip (fail-closed). */
 export async function aiScreen(candidates: AiCandidate[], capitalSol: number, nowMs = Date.now()): Promise<ScreenerDecision> {
   const key = candidates.map((c) => c.pool).sort().join(',');
-  if (lastScreen && lastScreen.key === key && nowMs - lastScreen.atMs < env.AI_SCREEN_MIN_INTERVAL_MIN * 60_000 && lastScreen.decision.action === 'skip') {
+  if (lastScreen && nowMs - lastScreen.atMs < env.AI_SCREEN_MIN_INTERVAL_MIN * 60_000 && lastScreen.decision.action === 'skip') {
     return lastScreen.decision;
   }
   let decision: ScreenerDecision;
