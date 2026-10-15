@@ -27,6 +27,8 @@ import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './l
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
+import { getTokenAudit } from './services/tokenAudit.js';
+import { auditRejectReason } from './logic/tokenAudit.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
@@ -222,6 +224,21 @@ async function tryEnterPool(): Promise<void> {
       logger.info(`[index] skipping pool ${candidate.address} — token has a ${feeBps / 100}% transfer fee (max ${env.MAX_TRANSFER_FEE_BPS / 100}%)`);
       continue;
     }
+    const audit = await getTokenAudit(tokenMint);
+    if (audit === null) {
+      logger.warn(`[index] skipping pool ${candidate.address} — token audit lookup failed (fail-closed)`);
+      continue;
+    }
+    const auditReject = auditRejectReason(audit, {
+      maxTopHoldersPct: env.MAX_TOP_HOLDERS_PCT,
+      maxBotHoldersPct: env.MAX_BOT_HOLDERS_PCT,
+      minGlobalFeesSol: env.MIN_TOKEN_GLOBAL_FEES_SOL,
+    });
+    if (auditReject) {
+      logger.info(`[index] skipping pool ${candidate.address} — token audit: ${auditReject}`, { audit });
+      continue;
+    }
+    logger.info('[index] token audit ok', { pool: candidate.address, audit });
     const dollarFlow = await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd);
     if (dollarFlow === null) {
       logger.warn(`[index] skipping pool ${candidate.address} — dollar-flow check failed/insufficient sample (fail-closed)`);

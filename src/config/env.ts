@@ -466,6 +466,11 @@ export const env = {
   ENTRY_LIMIT_MAX_CHASE_PCT: num('ENTRY_LIMIT_MAX_CHASE_PCT', 3),
   // Reject tokens whose Token-2022 transfer fee exceeds this (bps). Every swap/deposit/withdraw loses the fee; 0 = any fee rejects.
   MAX_TRANSFER_FEE_BPS: num('MAX_TRANSFER_FEE_BPS', 0),
+  // Holder/bot/fee gates from Jupiter datapi (keyless), copied from the Meridian bot's screen. Entry only, fail-closed on missing data.
+  // top-holders share, bot-holders share (%, 0 or >=100 disables) and minimum all-time fees paid on the token (SOL, 0 disables: proves real trading, not wash volume).
+  MAX_TOP_HOLDERS_PCT: num('MAX_TOP_HOLDERS_PCT', 60),
+  MAX_BOT_HOLDERS_PCT: num('MAX_BOT_HOLDERS_PCT', 30),
+  MIN_TOKEN_GLOBAL_FEES_SOL: num('MIN_TOKEN_GLOBAL_FEES_SOL', 30),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.
