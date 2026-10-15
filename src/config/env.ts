@@ -503,6 +503,10 @@ export const env = {
   AI_SCREEN_TIMEOUT_S: num('AI_SCREEN_TIMEOUT_S', 300),
   AI_MANAGE_TIMEOUT_S: num('AI_MANAGE_TIMEOUT_S', 150),
   AI_CLAUDE_BIN: optionalStr('AI_CLAUDE_BIN', 'claude'),
+  /** ReAct screener (Claude Agent SDK + tools) instead of the one-shot JSON screener. Off by default. */
+  AI_REACT: bool('AI_REACT', false),
+  AI_REACT_MAX_TURNS: num('AI_REACT_MAX_TURNS', 14),
+  AI_REACT_MAX_BUDGET_USD: num('AI_REACT_MAX_BUDGET_USD', 0.6),
   /** minutes the price may stay above the ladder (all SOL, earning nothing) before the position is closed */
   LADDER_OOR_EXIT_MIN: num('LADDER_OOR_EXIT_MIN', 30),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),

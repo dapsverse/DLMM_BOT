@@ -7,6 +7,7 @@ import { parseManagerDecision, parseScreenerDecision, type ManagerDecision, type
 import { buildManagerPrompt, buildScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
 import { memoryBlock } from '../logic/aiMemory.js';
 import { loadOutcomes } from './aiOutcomes.js';
+import { reactScreen } from './aiReact.js';
 import { logger } from '../utils/logger.js';
 
 const DECISION_LOG = 'logs/ai-decisions.jsonl';
@@ -58,6 +59,20 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
     return lastScreen.decision;
   }
   let decision: ScreenerDecision;
+  let extra: Record<string, unknown> = {};
+  if (env.AI_REACT) {
+    try {
+      const r = await reactScreen(candidates, capitalSol, recentLines('screen', 5));
+      decision = r.decision;
+      extra = { react: true, turns: r.turns, costUsd: r.costUsd, tools: r.toolCalls };
+    } catch (err) {
+      decision = { action: 'skip', reason: `react agent failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    lastScreen = { key, atMs: Date.now(), decision };
+    logDecision('screen', { candidates: candidates.map((c) => c.name), ...decision, ...extra });
+    logger.info('[ai] screener decision', { ...decision, ...extra });
+    return decision;
+  }
   try {
     const text = await askClaude(buildScreenerPrompt(candidates, capitalSol, recentLines('screen', 5), memoryBlock(loadOutcomes())), true, env.AI_SCREEN_TIMEOUT_S * 1000);
     decision = parseScreenerDecision(text, new Set(candidates.map((c) => c.pool)), env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION);
