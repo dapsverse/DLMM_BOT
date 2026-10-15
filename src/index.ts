@@ -1,5 +1,6 @@
 import { env } from './config/env.js';
 import { getWalletPubkey, getWalletSolBalance, getTokenBalance } from './services/solana.js';
+import { nonSolToken, type MeteoraPair } from './services/meteoraScanner.js';
 import { scanPools, defaultScannerConfig, getVolume1hUsd, scanForBetterOpportunity, volumeSpikeRatio, getSolPriceUsd, missingEntryData } from './services/meteoraScanner.js';
 import { openPool, getUserPositions } from './services/meteoraDLMM.js';
 import {
@@ -27,7 +28,10 @@ import {
 } from './logic/rebalanceEngine.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
-import { getDollarVolumeBuyRatio } from './services/flowAnalysis.js';
+import { getDollarVolumeBuyRatio, type DollarFlowResult } from './services/flowAnalysis.js';
+import { aiScreen, aiManage } from './services/aiAgent.js';
+import type { AiCandidate } from './logic/aiPrompts.js';
+import type { TokenAudit } from './logic/tokenAudit.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
 import { getTokenAudit } from './services/tokenAudit.js';
 import { auditRejectReason } from './logic/tokenAudit.js';
@@ -54,6 +58,53 @@ let currentCapitalSol = env.INITIAL_LP_CAPITAL_SOL;
 let lastOpportunityScanAtMs = 0;
 let lastSwitchAtMs: number | null = null;
 let lastDollarFlowCheckAtMs = 0;
+let lastDollarFlowBuyRatio: number | null = null;
+// AI manager: one in-flight `claude -p` call at a time, never awaited by the tick (deterministic exits keep running).
+let aiManagerBusy = false;
+let aiManagerLastAtMs = 0;
+let aiManagerClose: { pool: string; reason: string } | null = null;
+const aiOn = (): boolean => env.AI_AGENT && env.ENTRY_STRATEGY_MODE === 'meridian';
+
+interface EligibleCandidate {
+  candidate: MeteoraPair;
+  xIsSol: boolean;
+  reserveSolAccount: string;
+  solPriceUsd: number;
+  dollarFlow: DollarFlowResult;
+  audit: TokenAudit;
+}
+
+async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
+  const c = e.candidate;
+  const tok = nonSolToken(c);
+  const dd = await getDrawdownFromHighPct(c.address, env.DRAWDOWN_WINDOW_DAYS).catch(() => null);
+  return {
+    pool: c.address,
+    name: c.name,
+    tokenMint: e.xIsSol ? c.mint_y : c.mint_x,
+    binStep: c.bin_step,
+    baseFeePct: c.baseFeePct,
+    tvlUsd: Math.round(Number(c.liquidity)),
+    vol24hUsd: Math.round(Number(c.trade_volume_24h)),
+    vol1hUsd: Math.round(c.volume1hUsd),
+    feeTvl24hPct: c.feeTvlRatio24h ?? null,
+    feeTvl4hScaledTo24hPct: c.feeTvlRatio4h == null ? null : +(c.feeTvlRatio4h * 6).toFixed(2),
+    mcapUsd: Math.round(tok?.marketCapUsd ?? 0),
+    holders: tok?.holders ?? 0,
+    organicScore: e.audit.organicScore,
+    topHoldersPct: e.audit.topHoldersPct,
+    botHoldersPct: e.audit.botHoldersPct,
+    globalFeesSol: e.audit.globalFeesSol,
+    priceChange1hPct: c.priceChange1hPct ?? null,
+    priceChange6hPct: c.priceChange6hPct ?? null,
+    priceChange24hPct: c.priceChange24hPct ?? null,
+    drawdownFrom14dHighPct: dd,
+    buyRatio1hByTxCount: c.buyRatio1h ?? null,
+    dollarFlowBuyRatio: +e.dollarFlow.buyRatioUsd.toFixed(3),
+    dollarFlowTxSampled: e.dollarFlow.txSampled,
+    poolAgeHours: Math.round((Date.now() - c.createdAtMs) / 3_600_000),
+  };
+}
 let dollarFlowBreach: { pool: string; count: number; sinceMs?: number } = { pool: '', count: 0 };
 // true while an irreversible multi-step operation (close/rebalance/entry) runs; persisted so a restart can tell an interrupted op from a clean state.
 let inFlight = false;
@@ -170,6 +221,7 @@ async function tryEnterPool(): Promise<void> {
     currentCapitalSol = walletCapitalSol(walletNow);
   }
   const candidates = await scanPools(defaultScannerConfig(blacklistPools, chaseGuardPools), currentCapitalSol);
+  const eligible: EligibleCandidate[] = [];
   for (const candidate of candidates) {
     const xIsSol = candidate.mint_x === WSOL_MINT;
     const yIsSol = candidate.mint_y === WSOL_MINT;
@@ -257,13 +309,32 @@ async function tryEnterPool(): Promise<void> {
       continue;
     }
 
+    eligible.push({ candidate, xIsSol, reserveSolAccount, solPriceUsd, dollarFlow, audit });
+  }
+
+  // AI agent (meridian-style screener): picks ONE of the eligible candidates or skips. Fail-closed.
+  let toTry = eligible;
+  let aiBins: number | undefined;
+  let aiReason: string | undefined;
+  if (aiOn() && eligible.length > 0) {
+    const decision = await aiScreen(await Promise.all(eligible.map((e) => toAiCandidate(e))), currentCapitalSol);
+    if (decision.action === 'skip') {
+      logger.info('[index] AI screener: skip', { reason: decision.reason });
+      toTry = [];
+    } else {
+      toTry = eligible.filter((e) => e.candidate.address === decision.pool);
+      aiBins = decision.bins;
+      aiReason = decision.reason;
+    }
+  }
+  for (const { candidate, xIsSol, reserveSolAccount, solPriceUsd, dollarFlow } of toTry) {
     const priceContext = await getEntryPriceContext(candidate.address); // observability only, never gates entry
     try {
       const pool = await openPool(candidate.address);
       lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
       currentPool = await guarded(() =>
         env.ENTRY_STRATEGY_MODE === 'meridian'
-          ? openLadderEntry(pool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y)
+          ? openLadderEntry(pool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y, aiBins)
           : openInitialPosition(
           pool,
           candidate.address,
@@ -280,6 +351,7 @@ async function tryEnterPool(): Promise<void> {
           },
         ),
       );
+      if (aiReason) currentPool.aiEntryReason = aiReason;
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
       currentPool.volume1hBaselineSetAtMs = Date.now();
       // Decision-context snapshot (2026-09-24) — same reasoning as
@@ -461,6 +533,58 @@ async function tick(): Promise<void> {
     return;
   }
 
+  // AI manager (meridian-style): hold/close from Claude. Never blocks the tick; the automatic exits above/below always run first.
+  if (aiOn() && ctx.ladderBins !== undefined) {
+    if (aiManagerClose && aiManagerClose.pool === ctx.poolAddress) {
+      const { reason } = aiManagerClose;
+      aiManagerClose = null;
+      logger.warn('[index] AI manager: closing position', { pool: ctx.poolAddress, reason });
+      try {
+        currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'AI_EXIT', chaseGuardPools));
+        addToBlacklist(blacklistPools, ctx.poolAddress, now, env.LEFT_POOL_COOLDOWN_MS);
+        currentPool = null;
+      } catch (err) {
+        logger.error('[index] executeCleanExit (AI manager) threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+        currentPool = await reconcilePoolStateAfterFailure(ctx);
+      }
+      return;
+    }
+    if (!aiManagerBusy && now - aiManagerLastAtMs >= env.AI_MANAGE_INTERVAL_MIN * 60_000) {
+      aiManagerBusy = true;
+      aiManagerLastAtMs = now;
+      const tokenShare = currentValueSol > 0 ? (otherPrincipalSol / currentValueSol) * 100 : 0;
+      const priceVsLadder = !binStatus.isOutOfRange ? 'inside' : binStatus.tokenBelowRange ? 'below (all token)' : 'above (all SOL, earning nothing)';
+      void aiManage(
+        {
+          pool: ctx.poolAddress,
+          tokenMint: ctx.xIsSol ? ctx.mintY : ctx.mintX,
+          minutesOpen: ctx.openedAtMs ? Math.round((now - ctx.openedAtMs) / 60_000) : null,
+          depositSol: ctx.initialDepositSol,
+          valueSol: currentValueSol,
+          profitPct: +currentProfitPct.toFixed(2),
+          peakProfitPct: +ctx.peakProfitPct.toFixed(2),
+          unclaimedFeesSol,
+          tokenShareOfValuePct: +tokenShare.toFixed(1),
+          isOutOfRange: binStatus.isOutOfRange,
+          minutesOutOfRange: ctx.outOfRangeSinceMs ? Math.round((now - ctx.outOfRangeSinceMs) / 60_000) : null,
+          priceVsLadder,
+          ladderBins: ctx.ladderBins,
+          volume1hNowUsd,
+          volume1hBaselineUsd: ctx.volume1hBaselineUsd,
+          dollarFlowBuyRatio: lastDollarFlowBuyRatio,
+          entryReason: ctx.aiEntryReason ?? null,
+        },
+        { stopLossPct: env.STOP_LOSS_PCT, ladderOorExitMin: env.LADDER_OOR_EXIT_MIN, idleOutOfRangeMin: env.MAX_IDLE_OUT_OF_RANGE_MINUTES, volumeDropExitPct: env.VOLUME_DROP_HARD_EXIT_PCT },
+      )
+        .then((d) => {
+          if (d.action === 'close') aiManagerClose = { pool: ctx.poolAddress, reason: d.reason };
+        })
+        .finally(() => {
+          aiManagerBusy = false;
+        });
+    }
+  }
+
   // Dollar-volume-weighted sell-pressure check (flowAnalysis.ts) — runs
   // for the held position regardless of ENTRY_STRATEGY_MODE (unlike the
   // momentum-only switch check below, whale-dump detection is a general
@@ -473,6 +597,7 @@ async function tick(): Promise<void> {
     const solPriceUsd = await getSolPriceUsd(ctx.poolAddress);
     if (solPriceUsd !== null) {
       const dollarFlow = await getDollarVolumeBuyRatio(ctx.reserveSolAccount, solPriceUsd);
+      lastDollarFlowBuyRatio = dollarFlow?.buyRatioUsd ?? null;
       // Only a QUALIFIED read (enough samples + $ volume) counts; thin reads are ignored
       // (neither confirm nor clear). Exit needs N consecutive qualified breaches.
       if (dollarFlowBreach.pool !== ctx.poolAddress) dollarFlowBreach = { pool: ctx.poolAddress, count: 0 };

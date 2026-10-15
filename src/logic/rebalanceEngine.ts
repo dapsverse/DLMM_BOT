@@ -65,6 +65,10 @@ export interface PoolContext {
   reserveSolAccount: string;
   /** Set for a SOL-only ladder position (meridian mode): number of bins below the open price. Absent = classic 50:50 position. */
   ladderBins?: number;
+  /** epoch ms the position was opened (ladder entries) */
+  openedAtMs?: number;
+  /** AI screener's stated thesis for this entry */
+  aiEntryReason?: string;
 }
 
 /**
@@ -266,6 +270,7 @@ export async function openLadderEntry(
   capitalSol: number,
   binStep: number,
   reserveSolAccount: string,
+  bins: number = env.LADDER_BINS,
 ): Promise<PoolContext> {
   const otherMint = xIsSol ? mintY : mintX;
   const walletSol = await getWalletSolBalance();
@@ -276,8 +281,8 @@ export async function openLadderEntry(
   const effectiveCapitalSol = Math.min(capitalSol, maxFundableSol);
   if (effectiveCapitalSol <= 0) throw new Error(`[rebalanceEngine] wallet ${walletSol} SOL cannot fund a ladder after gas reserve + rent`);
   const otherMintDecimals = await getMintDecimals(otherMint);
-  logger.info('[rebalanceEngine] opening SOL-only ladder', { poolAddress, capitalSol: effectiveCapitalSol, bins: env.LADDER_BINS, otherMintDecimals });
-  const result = await openLadderPosition(pool, xIsSol, new BN(Math.round(effectiveCapitalSol * LAMPORTS_PER_SOL)), env.LADDER_BINS);
+  logger.info('[rebalanceEngine] opening SOL-only ladder', { poolAddress, capitalSol: effectiveCapitalSol, bins, otherMintDecimals });
+  const result = await openLadderPosition(pool, xIsSol, new BN(Math.round(effectiveCapitalSol * LAMPORTS_PER_SOL)), bins);
   return {
     poolAddress,
     pool,
@@ -296,7 +301,8 @@ export async function openLadderEntry(
     peakProfitPct: 0,
     otherMintDecimals,
     reserveSolAccount,
-    ladderBins: env.LADDER_BINS,
+    ladderBins: bins,
+    openedAtMs: Date.now(),
   };
 }
 
@@ -1009,7 +1015,7 @@ export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<stri
  * in gains). Neither is a risk violation, so the pool stays a fully valid
  * candidate for the very next scan.
  */
-export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT' | 'FLOW_EXIT', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
+export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT' | 'FLOW_EXIT' | 'AI_EXIT', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
   if (armChaseGuard) await recordExitForChaseGuard(ctx, chaseGuardPools);
   return closeAndConvertToSol(ctx, reason);
 }

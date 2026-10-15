@@ -485,6 +485,17 @@ export const env = {
   MERIDIAN_MIN_HOLDERS: num('MERIDIAN_MIN_HOLDERS', 500),
   /** bins in the SOL-only ladder below the active bin (moonbot/solonlysim.mjs: 69 beat 35) */
   LADDER_BINS: num('LADDER_BINS', 69),
+  // AI agent (meridian-style): `claude -p` screens candidates and manages the open position. Off by default.
+  AI_AGENT: bool('AI_AGENT', false),
+  AI_MIN_CONVICTION: num('AI_MIN_CONVICTION', 7),
+  AI_MIN_BINS: num('AI_MIN_BINS', 35),
+  AI_MAX_BINS: num('AI_MAX_BINS', 69),
+  AI_MANAGE_INTERVAL_MIN: num('AI_MANAGE_INTERVAL_MIN', 5),
+  /** same eligible set is not re-sent to the screener sooner than this (a skip is cached) */
+  AI_SCREEN_MIN_INTERVAL_MIN: num('AI_SCREEN_MIN_INTERVAL_MIN', 10),
+  AI_SCREEN_TIMEOUT_S: num('AI_SCREEN_TIMEOUT_S', 300),
+  AI_MANAGE_TIMEOUT_S: num('AI_MANAGE_TIMEOUT_S', 150),
+  AI_CLAUDE_BIN: optionalStr('AI_CLAUDE_BIN', 'claude'),
   /** minutes the price may stay above the ladder (all SOL, earning nothing) before the position is closed */
   LADDER_OOR_EXIT_MIN: num('LADDER_OOR_EXIT_MIN', 30),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
