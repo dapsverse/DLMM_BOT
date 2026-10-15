@@ -298,6 +298,12 @@ export function isCapitalUnderfunded(capitalSol: number, fundableSol: number): b
   return fundableSol > 0 && capitalSol < fundableSol * MIN_CAPITAL_FUND_RATIO;
 }
 
+/** Capital the bot may deploy from a wallet balance: balance minus gas reserve, clamped to MAX_CAPITAL_SOL when set. */
+export function walletCapitalSol(solBalance: number): number {
+  const c = Math.max(solBalance - computeGasReserveSol(solBalance), 0);
+  return env.MAX_CAPITAL_SOL > 0 ? Math.min(c, env.MAX_CAPITAL_SOL) : c;
+}
+
 export function computeGasReserveSol(equitySol: number): number {
   return Math.max(env.MIN_GAS_RESERVE_SOL, equitySol * (env.MIN_GAS_RESERVE_PCT / 100));
 }
@@ -420,8 +426,16 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   const solBalance = await getWalletSolBalance();
   const reserveLamports = new BN(Math.round(computeGasReserveSol(solBalance) * LAMPORTS_PER_SOL));
   const solAmount = ctx.xIsSol ? balX : balY;
-  const spendableSolLamports = BN.max(solAmount.sub(reserveLamports), new BN(0));
+  const fullSpendableLamports = BN.max(solAmount.sub(reserveLamports), new BN(0));
   const otherValueSol = await otherTokenValueInSol(ctx, otherAmount);
+  // MAX_CAPITAL_SOL: idle wallet SOL beyond the cap stays out of the reopen (never shrinks the position itself).
+  let spendableSolLamports = fullSpendableLamports;
+  if (env.MAX_CAPITAL_SOL > 0) {
+    const capTotalSol = Math.max(env.MAX_CAPITAL_SOL, preClose.currentValueSol + preClose.unclaimedFeesSol);
+    const capLamports = new BN(Math.round(Math.max(capTotalSol - otherValueSol, 0) * LAMPORTS_PER_SOL));
+    spendableSolLamports = BN.min(fullSpendableLamports, capLamports);
+  }
+  const heldBackLamports = fullSpendableLamports.sub(spendableSolLamports);
 
   logger.info('[rebalanceEngine] post-close balances', {
     solBalance,
@@ -452,7 +466,10 @@ export async function compoundCycle(ctx: PoolContext, scannerConfig: ScannerConf
   // Re-check balances after swap before reopening.
   const [freshX, freshY] = await Promise.all([getTokenBalance(ctx.mintX), getTokenBalance(ctx.mintY)]);
   const radius = computeBinRadius(ctx.binStep);
-  const { depositX, depositY } = reserveGasFromSolSide(freshX, freshY, ctx.xIsSol);
+  const reservedDeposit = reserveGasFromSolSide(freshX, freshY, ctx.xIsSol);
+  const { depositX, depositY } = heldBackLamports.gtn(0)
+    ? capSolDeposit(reservedDeposit.depositX, reservedDeposit.depositY, ctx.xIsSol, (ctx.xIsSol ? reservedDeposit.depositX : reservedDeposit.depositY).sub(heldBackLamports))
+    : reservedDeposit;
 
   // binRadius only (not a precomputed minBinId/maxBinId) — openPosition
   // fetches the active bin itself, FRESH, inside its own retry loop. See
@@ -902,7 +919,7 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
   }
 
   const solBalance = await getWalletSolBalance();
-  const nextCapital = Math.max(solBalance - computeGasReserveSol(solBalance), 0);
+  const nextCapital = walletCapitalSol(solBalance);
   logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital });
   return nextCapital;
 }

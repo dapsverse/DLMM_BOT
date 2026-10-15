@@ -42,6 +42,8 @@ export const env = {
 
   // Capital allocation
   INITIAL_LP_CAPITAL_SOL: num('INITIAL_LP_CAPITAL_SOL', 4.2),
+  /** hard ceiling on capital the bot deploys per position, also after exits (0 = off: capital follows the whole wallet). Keeps the rest of the wallet untouched. */
+  MAX_CAPITAL_SOL: num('MAX_CAPITAL_SOL', 0),
   // MIN_GAS_RESERVE_SOL is now an ABSOLUTE FLOOR, not the full reserve — see
   // computeGasReserveSol (rebalanceEngine.ts). Idea borrowed 2026-10-08 from
   // comparing against CryptoGnome/dlmmbot's reserveSol(): a flat reserve
@@ -127,8 +129,8 @@ export const env = {
   // ones already running.
   ENTRY_STRATEGY_MODE: (() => {
     const v = optionalStr('ENTRY_STRATEGY_MODE', 'momentum');
-    if (v !== 'momentum' && v !== 'trend' && v !== 'range') throw new Error(`[env] ENTRY_STRATEGY_MODE must be "momentum", "trend", or "range", got "${v}"`);
-    return v as 'momentum' | 'trend' | 'range';
+    if (v !== 'momentum' && v !== 'trend' && v !== 'range' && v !== 'meridian') throw new Error(`[env] ENTRY_STRATEGY_MODE must be "momentum", "trend", "range", or "meridian", got "${v}"`);
+    return v as 'momentum' | 'trend' | 'range' | 'meridian';
   })(),
   TREND_MIN_SUSTAINED_PCT: num('TREND_MIN_SUSTAINED_PCT', 20),
 
@@ -471,6 +473,20 @@ export const env = {
   MAX_TOP_HOLDERS_PCT: num('MAX_TOP_HOLDERS_PCT', 60),
   MAX_BOT_HOLDERS_PCT: num('MAX_BOT_HOLDERS_PCT', 30),
   MIN_TOKEN_GLOBAL_FEES_SOL: num('MIN_TOKEN_GLOBAL_FEES_SOL', 30),
+  /** Jupiter organic score floor, 0 = off (meridian uses 60). */
+  MIN_ORGANIC_SCORE: num('MIN_ORGANIC_SCORE', 0),
+  // 'meridian' entry mode (SOL-only bid-ask ladder below price, from yunus-0x/meridian) — size window + ladder shape.
+  MERIDIAN_MIN_MCAP_USD: num('MERIDIAN_MIN_MCAP_USD', 150_000),
+  MERIDIAN_MAX_MCAP_USD: num('MERIDIAN_MAX_MCAP_USD', 10_000_000),
+  MERIDIAN_MIN_TVL_USD: num('MERIDIAN_MIN_TVL_USD', 10_000),
+  MERIDIAN_MAX_TVL_USD: num('MERIDIAN_MAX_TVL_USD', 150_000),
+  MERIDIAN_MIN_BIN_STEP: num('MERIDIAN_MIN_BIN_STEP', 80),
+  MERIDIAN_MAX_BIN_STEP: num('MERIDIAN_MAX_BIN_STEP', 125),
+  MERIDIAN_MIN_HOLDERS: num('MERIDIAN_MIN_HOLDERS', 500),
+  /** bins in the SOL-only ladder below the active bin (moonbot/solonlysim.mjs: 69 beat 35) */
+  LADDER_BINS: num('LADDER_BINS', 69),
+  /** minutes the price may stay above the ladder (all SOL, earning nothing) before the position is closed */
+  LADDER_OOR_EXIT_MIN: num('LADDER_OOR_EXIT_MIN', 30),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.

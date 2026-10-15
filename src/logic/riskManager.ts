@@ -42,7 +42,7 @@ export function trailingTakeProfitFloorPct(peakProfitPct: number, tiers = TAKE_P
  * threshold — in which case the caller should recenter and keep holding
  * instead of abandoning the pool.
  */
-export function rangeCeilingProfitOverride(rejectReasons: string[], entryStrategyMode: 'momentum' | 'trend' | 'range', currentProfitPct: number): boolean {
+export function rangeCeilingProfitOverride(rejectReasons: string[], entryStrategyMode: 'momentum' | 'trend' | 'range' | 'meridian', currentProfitPct: number): boolean {
   if (entryStrategyMode !== 'range' || rejectReasons.length === 0) return false;
   const ceilingOnly = rejectReasons.every((r) => r.includes('no longer range-bound'));
   return ceilingOnly && currentProfitPct > env.RANGE_CEILING_PROFIT_OVERRIDE_PCT;

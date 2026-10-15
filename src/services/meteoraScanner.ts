@@ -1,3 +1,4 @@
+import { meridianPoolReject, type MeridianLimits } from '../logic/meridianFilter.js';
 import axios from 'axios';
 import { env } from '../config/env.js';
 import {
@@ -225,7 +226,9 @@ export interface ScannerConfig {
   /** Entry-only floor on volumeSpikeRatio — below this, a pool isn't accelerating at all, regardless of how it ranks against other candidates. Only enforced in 'momentum' entryStrategyMode. */
   entryMinSpikeRatio: number;
   /** Which entry track to use — see ENTRY_STRATEGY_MODE (env.ts) for the full rationale. 'momentum' (default) chases acceleration (entryMinSpikeRatio + rankCandidates). 'trend' requires a large SUSTAINED move (trendMinSustainedPct on both 6h and 24h) and ranks by TVL (rankTrendCandidates). 'range' is the opposite of both — requires LOW volatility (rangeMaxVolatilityPct) and ranks by vol/TVL turnover (rankRangeCandidates), for the DLMM/LP execution path specifically (fee yield with minimal IL). */
-  entryStrategyMode: 'momentum' | 'trend' | 'range';
+  entryStrategyMode: 'momentum' | 'trend' | 'range' | 'meridian';
+  /** Size window for 'meridian' mode (entry-only). Undefined = not applied. */
+  meridianLimits?: MeridianLimits;
   /** Entry-only floor (both 6h AND 24h price change must clear this) for 'trend' entryStrategyMode — unknown data fails closed, unlike the rest of the screen's permissive-unknown policy, since verifying a sustained trend is the entire point of this mode. */
   trendMinSustainedPct: number;
   /** Ceiling on |1h| and |6h| price change for 'range' entryStrategyMode — unlike every other sizing check, NOT skipped on re-screen (see RANGE_MAX_VOLATILITY_PCT, env.ts): a held range-bound position that starts trending broke its own investment thesis. */
@@ -602,6 +605,10 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     if (!opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) return false;
     if (memecoin.holders < config.minTokenHolders) return false;
     if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) return false;
+    if (!opts.skipSizingChecks && config.entryStrategyMode === 'meridian' && config.meridianLimits) {
+      const why = meridianPoolReject({ tvlUsd: tvl, binStep: pair.bin_step, mcapUsd: memecoin.marketCapUsd, holders: memecoin.holders }, config.meridianLimits);
+      if (why) return false;
+    }
 
     return true;
   });
@@ -742,7 +749,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
   const shortlist =
     config.entryStrategyMode === 'trend'
       ? rankTrendCandidates(candidates)
-      : config.entryStrategyMode === 'range'
+      : config.entryStrategyMode === 'range' || config.entryStrategyMode === 'meridian'
         ? rankRangeCandidates(candidates)
         : rankCandidates(candidates);
   logger.info(`[scanner] ${candidates.length}/${pairs.length} pairs pass filters (${config.entryStrategyMode} mode), top ${shortlist.length} shortlisted`);
@@ -1079,6 +1086,15 @@ export function defaultScannerConfig(blacklistPools: Map<string, number>, chaseG
     entryMinBuyRatio1h: env.ENTRY_MIN_BUY_RATIO_1H,
     entryMinSpikeRatio: env.ENTRY_MIN_SPIKE_RATIO,
     entryStrategyMode: env.ENTRY_STRATEGY_MODE,
+    meridianLimits: {
+      minMcapUsd: env.MERIDIAN_MIN_MCAP_USD,
+      maxMcapUsd: env.MERIDIAN_MAX_MCAP_USD,
+      minTvlUsd: env.MERIDIAN_MIN_TVL_USD,
+      maxTvlUsd: env.MERIDIAN_MAX_TVL_USD,
+      minBinStep: env.MERIDIAN_MIN_BIN_STEP,
+      maxBinStep: env.MERIDIAN_MAX_BIN_STEP,
+      minHolders: env.MERIDIAN_MIN_HOLDERS,
+    },
     trendMinSustainedPct: env.TREND_MIN_SUSTAINED_PCT,
     rangeMaxVolatilityPct: env.RANGE_MAX_VOLATILITY_PCT,
     rangeEntryMax6hChangePct: env.RANGE_ENTRY_MAX_6H_CHANGE_PCT,
