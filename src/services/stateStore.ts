@@ -31,6 +31,8 @@ export interface PersistedPosition {
   peakProfitPct: number;
   otherMintDecimals: number;
   reserveSolAccount: string;
+  /** SOL-only ladder width (meridian mode); absent for classic positions and files written before 2026-10-15 */
+  ladderBins?: number;
 }
 
 export interface PersistedState {

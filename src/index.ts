@@ -14,6 +14,7 @@ import {
   estimateCycleGasCostSol,
   computeGasReserveSol,
   walletCapitalSol,
+  openLadderEntry,
   retryPendingSwapBack,
   getPendingSwapBack,
   restorePendingSwapBack,
@@ -204,7 +205,7 @@ async function tryEnterPool(): Promise<void> {
         continue;
       }
     }
-    if (env.MAX_BELOW_HIGH_48H_PCT > 0) {
+    if (env.MAX_BELOW_HIGH_48H_PCT > 0 && env.ENTRY_STRATEGY_MODE !== 'meridian') {
       const below48hPct = await getDrawdownFromHighPct(candidate.address, 2);
       if (below48hPct === null) {
         logger.warn(`[index] skipping pool ${candidate.address} — 48h-high distance unavailable (fail-closed)`);
@@ -261,7 +262,9 @@ async function tryEnterPool(): Promise<void> {
       const pool = await openPool(candidate.address);
       lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
       currentPool = await guarded(() =>
-        openInitialPosition(
+        env.ENTRY_STRATEGY_MODE === 'meridian'
+          ? openLadderEntry(pool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y)
+          : openInitialPosition(
           pool,
           candidate.address,
           candidate.mint_x,
@@ -354,7 +357,7 @@ async function tick(): Promise<void> {
   });
 
   if (decision !== 'HARD_EXIT' && shouldExitOnUpsideBreak({
-    exitAfterMin: env.UPSIDE_BREAK_EXIT_MIN,
+    exitAfterMin: ctx.ladderBins !== undefined ? env.LADDER_OOR_EXIT_MIN : env.UPSIDE_BREAK_EXIT_MIN,
     isOutOfRange: binStatus.isOutOfRange,
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
     nowMs: now,
@@ -420,6 +423,19 @@ async function tick(): Promise<void> {
         currentPool = null;
       } catch (err) {
         logger.error('[index] executeDownBreakExit threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+        currentPool = await reconcilePoolStateAfterFailure(ctx);
+      }
+      return;
+    }
+    // Ladder (meridian mode): never recenter/re-buy. Above the ladder is handled by the upside-break exit; anything else
+    // that reaches REBALANCE is closed to SOL and the scanner picks the next pool.
+    if (ctx.ladderBins !== undefined) {
+      logger.warn('[index] ladder idle-forced rebalance — closing to SOL instead of recentering', { pool: ctx.poolAddress });
+      try {
+        currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'SWITCH', chaseGuardPools));
+        currentPool = null;
+      } catch (err) {
+        logger.error('[index] executeCleanExit (ladder rebalance) threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
         currentPool = await reconcilePoolStateAfterFailure(ctx);
       }
       return;

@@ -5,6 +5,7 @@ import { LAMPORTS_PER_SOL } from '../config/constants.js';
 import {
   getUserPositions,
   openPosition,
+  openLadderPosition,
   closePositionFull,
   getActiveBin,
   getFreshActiveBinId,
@@ -22,6 +23,7 @@ import { connection, getWalletSolBalance, getTokenBalance, waitForTokenBalance }
 import { isPoolStillEligible, getCurrentPriceUsd, recordChaseGuardExit, type ScannerConfig } from '../services/meteoraScanner.js';
 import { addToBlacklist, rangeCeilingProfitOverride } from './riskManager.js';
 import { computeBinRadius } from './binRange.js';
+import { ladderRangeStatus } from './ladderRange.js';
 import { computeOutOfRangeTracking } from './outOfRangeTracking.js';
 import { logger } from '../utils/logger.js';
 import type { PersistedPosition } from '../services/stateStore.js';
@@ -61,6 +63,8 @@ export interface PoolContext {
   otherMintDecimals: number;
   /** Pool's own on-chain SOL-side reserve account — constant for the pool's lifetime, used by flowAnalysis.ts's getDollarVolumeBuyRatio for the held position's periodic dollar-flow check (index.ts). */
   reserveSolAccount: string;
+  /** Set for a SOL-only ladder position (meridian mode): number of bins below the open price. Absent = classic 50:50 position. */
+  ladderBins?: number;
 }
 
 /**
@@ -149,6 +153,7 @@ export interface BinRangeStatus {
  */
 export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatus> {
   const activeBin = await getActiveBin(ctx.pool);
+  if (ctx.ladderBins !== undefined) return { currentBinId: activeBin.binId, ...ladderRangeStatus(activeBin.binId, ctx.centerBinId, ctx.ladderBins, ctx.xIsSol) };
   const radius = computeBinRadius(ctx.binStep);
   const isOutOfRange = ctx.centerBinId === null || Math.abs(activeBin.binId - ctx.centerBinId) > radius;
   const tokenBelowRange =
@@ -237,7 +242,62 @@ export async function rebuildContextFromChain(pool: DlmmPool, poolAddress: strin
   };
   const { currentValueSol, unclaimedFeesSol } = await getPositionHealthSnapshot(ctx);
   ctx.initialDepositSol = currentValueSol + unclaimedFeesSol;
+  if (env.ENTRY_STRATEGY_MODE === 'meridian') {
+    // ladder geometry from the chain: the open-time active bin is the ladder's top edge (SOL=Y) or bottom edge (SOL=X)
+    const [position] = await getUserPositions(pool);
+    if (position) {
+      ctx.ladderBins = position.positionData.upperBinId - position.positionData.lowerBinId + 1;
+      ctx.centerBinId = xIsSol ? position.positionData.lowerBinId : position.positionData.upperBinId;
+    }
+  }
   return ctx;
+}
+
+/**
+ * meridian mode entry: SOL-only bid-ask ladder `env.LADDER_BINS` bins below the active bin, ONE tx, no entry swap.
+ * Capital is capped by what the wallet can fund after the gas reserve and the position rent (same pre-flight as openInitialPosition).
+ */
+export async function openLadderEntry(
+  pool: DlmmPool,
+  poolAddress: string,
+  mintX: string,
+  mintY: string,
+  xIsSol: boolean,
+  capitalSol: number,
+  binStep: number,
+  reserveSolAccount: string,
+): Promise<PoolContext> {
+  const otherMint = xIsSol ? mintY : mintX;
+  const walletSol = await getWalletSolBalance();
+  const maxFundableSol = walletSol - computeGasReserveSol(walletSol) - POSITION_RENT_BUFFER_SOL;
+  if (isCapitalUnderfunded(capitalSol, maxFundableSol)) {
+    throw new Error(`[rebalanceEngine] requested capital ${capitalSol} SOL is under ${MIN_CAPITAL_FUND_RATIO * 100}% of the ${maxFundableSol.toFixed(4)} SOL the wallet can fund — refusing ladder entry`);
+  }
+  const effectiveCapitalSol = Math.min(capitalSol, maxFundableSol);
+  if (effectiveCapitalSol <= 0) throw new Error(`[rebalanceEngine] wallet ${walletSol} SOL cannot fund a ladder after gas reserve + rent`);
+  const otherMintDecimals = await getMintDecimals(otherMint);
+  logger.info('[rebalanceEngine] opening SOL-only ladder', { poolAddress, capitalSol: effectiveCapitalSol, bins: env.LADDER_BINS, otherMintDecimals });
+  const result = await openLadderPosition(pool, xIsSol, new BN(Math.round(effectiveCapitalSol * LAMPORTS_PER_SOL)), env.LADDER_BINS);
+  return {
+    poolAddress,
+    pool,
+    mintX,
+    mintY,
+    xIsSol,
+    initialDepositSol: effectiveCapitalSol,
+    rebalanceTimestamps: [],
+    lastRebalanceAt: 0,
+    volume1hBaselineUsd: 0,
+    volume1hBaselineSetAtMs: 0,
+    binStep,
+    centerBinId: result.centerBinId,
+    outOfRangeSinceMs: null,
+    inRangeSinceMs: null,
+    peakProfitPct: 0,
+    otherMintDecimals,
+    reserveSolAccount,
+    ladderBins: env.LADDER_BINS,
+  };
 }
 
 export { estimateCycleGasCostSol } from './costEstimate.js';
