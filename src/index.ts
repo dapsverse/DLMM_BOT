@@ -111,6 +111,7 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
   const c = e.candidate;
   const tok = nonSolToken(c);
   const dd = await getDrawdownFromHighPct(c.address, env.DRAWDOWN_WINDOW_DAYS).catch(() => null);
+  const feeBps = await getTransferFeeBps(e.xIsSol ? c.mint_y : c.mint_x).catch(() => null);
   return {
     pool: c.address,
     name: c.name,
@@ -132,6 +133,9 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
     priceChange6hPct: c.priceChange6hPct ?? null,
     priceChange24hPct: c.priceChange24hPct ?? null,
     drawdownFrom14dHighPct: dd,
+    transferFeePct: feeBps === null ? null : feeBps / 100,
+    freezeAuthorityDisabled: tok?.freezeAuthorityDisabled ?? null,
+    mintAuthorityRevoked: tok?.mintAuthorityRevoked ?? null,
     buyRatio1hByTxCount: c.buyRatio1h ?? null,
     dollarFlowBuyRatio: e.dollarFlow ? +e.dollarFlow.buyRatioUsd.toFixed(3) : null,
     dollarFlowTxSampled: e.dollarFlow?.txSampled ?? null,
@@ -304,11 +308,12 @@ async function tryEnterPool(): Promise<void> {
     }
     const tokenMint = xIsSol ? candidate.mint_y : candidate.mint_x;
     const feeBps = await getTransferFeeBps(tokenMint);
-    if (feeBps === null) {
+    // meridian mode: the AI judges transfer-fee tokens (it sees transferFeePct), no hard gate
+    if (env.ENTRY_STRATEGY_MODE !== 'meridian' && feeBps === null) {
       logger.warn(`[index] skipping pool ${candidate.address} — transfer-fee lookup failed (fail-closed)`);
       continue;
     }
-    if (feeBps > env.MAX_TRANSFER_FEE_BPS) {
+    if (env.ENTRY_STRATEGY_MODE !== 'meridian' && feeBps !== null && feeBps > env.MAX_TRANSFER_FEE_BPS) {
       logger.info(`[index] skipping pool ${candidate.address} — token has a ${feeBps / 100}% transfer fee (max ${env.MAX_TRANSFER_FEE_BPS / 100}%)`);
       continue;
     }

@@ -561,7 +561,7 @@ export interface FilterOpts {
 export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerConfig, opts: FilterOpts = {}): Promise<MeteoraPair[]> {
   updateChaseGuardResets(config.chaseGuardPools, pairs);
   // 'meridian' mode screens ONLY by meridian's own window (meridianPoolReject, applied below) plus the token audit in index.ts;
-  // our older heuristics are skipped. Kept on: freeze/mint authority (rug safety) and the check that TVL/volume parse.
+  // our older heuristics are skipped (authority checks included; the AI sees those fields). Only the TVL/volume parse check stays.
   const mer = config.entryStrategyMode === 'meridian';
 
   const preFiltered = pairs.filter((pair) => {
@@ -607,7 +607,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     if (!mer && !opts.skipSizingChecks && isChaseGuarded(config.chaseGuardPools, memecoin.address)) return false;
     if (!mer && !opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) return false;
     if (!mer && memecoin.holders < config.minTokenHolders) return false;
-    if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) return false;
+    if (!mer && config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) return false;
     if (!opts.skipSizingChecks && config.entryStrategyMode === 'meridian' && config.meridianLimits) {
       const why = meridianPoolReject({ tvlUsd: tvl, binStep: pair.bin_step, mcapUsd: memecoin.marketCapUsd, holders: memecoin.holders }, config.meridianLimits);
       if (why) return false;
@@ -696,7 +696,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
       return false;
     }
 
-    if (config.requireMintAuthorityDisabled) {
+    if (!mer && config.requireMintAuthorityDisabled) {
       const memecoin = nonSolToken(pair);
       // fail-closed: unknown (RPC lookup failed) or still-active mint authority both block the pool
       if (!memecoin || memecoin.mintAuthorityRevoked !== true) return false;

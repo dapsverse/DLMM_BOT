@@ -21,6 +21,10 @@ export interface AiCandidate {
   priceChange6hPct: number | null;
   priceChange24hPct: number | null;
   drawdownFrom14dHighPct: number | null;
+  /** token's own transfer tax (Token-2022), percent per transfer; null = unknown */
+  transferFeePct: number | null;
+  freezeAuthorityDisabled: boolean | null;
+  mintAuthorityRevoked: boolean | null;
   buyRatio1hByTxCount: number | null;
   dollarFlowBuyRatio: number | null;
   dollarFlowTxSampled: number | null;
