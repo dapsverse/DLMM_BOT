@@ -275,12 +275,12 @@ async function tryEnterPool(): Promise<void> {
     // 2026-10-08) — see missingEntryData for the same policy on the rest.
     const solPriceUsd = xIsSol ? candidate.tokenX.priceUsd : candidate.tokenY.priceUsd;
     const reserveSolAccount = xIsSol ? candidate.reserve_x : candidate.reserve_y;
-    const missing = missingEntryData(candidate);
+    const missing = env.ENTRY_STRATEGY_MODE === 'meridian' ? [] : missingEntryData(candidate);
     if (missing.length > 0) {
       logger.warn(`[index] skipping pool ${candidate.address} — entry data incomplete (fail-closed)`, { missing });
       continue;
     }
-    if (env.MAX_DRAWDOWN_FROM_HIGH_PCT > 0) {
+    if (env.MAX_DRAWDOWN_FROM_HIGH_PCT > 0 && env.ENTRY_STRATEGY_MODE !== 'meridian') {
       const drawdownPct = await getDrawdownFromHighPct(candidate.address, env.DRAWDOWN_WINDOW_DAYS);
       if (drawdownPct === null) {
         logger.warn(`[index] skipping pool ${candidate.address} — drawdown-from-high unavailable (fail-closed)`);
