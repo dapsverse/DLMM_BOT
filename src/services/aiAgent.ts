@@ -5,6 +5,8 @@ import { dirname } from 'node:path';
 import { env } from '../config/env.js';
 import { parseManagerDecision, parseScreenerDecision, type ManagerDecision, type ScreenerDecision } from '../logic/aiDecision.js';
 import { buildManagerPrompt, buildScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
+import { memoryBlock } from '../logic/aiMemory.js';
+import { loadOutcomes } from './aiOutcomes.js';
 import { logger } from '../utils/logger.js';
 
 const DECISION_LOG = 'logs/ai-decisions.jsonl';
@@ -57,7 +59,7 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
   }
   let decision: ScreenerDecision;
   try {
-    const text = await askClaude(buildScreenerPrompt(candidates, capitalSol, recentLines('screen', 5)), true, env.AI_SCREEN_TIMEOUT_S * 1000);
+    const text = await askClaude(buildScreenerPrompt(candidates, capitalSol, recentLines('screen', 5), memoryBlock(loadOutcomes())), true, env.AI_SCREEN_TIMEOUT_S * 1000);
     decision = parseScreenerDecision(text, new Set(candidates.map((c) => c.pool)), env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION);
   } catch (err) {
     decision = { action: 'skip', reason: `claude call failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -72,7 +74,7 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
 export async function aiManage(snapshot: AiPositionSnapshot, rules: AiRules): Promise<ManagerDecision> {
   let decision: ManagerDecision;
   try {
-    const text = await askClaude(buildManagerPrompt(snapshot, rules, recentLines('manage', 5)), false, env.AI_MANAGE_TIMEOUT_S * 1000);
+    const text = await askClaude(buildManagerPrompt(snapshot, rules, recentLines('manage', 5), memoryBlock(loadOutcomes(), 5)), false, env.AI_MANAGE_TIMEOUT_S * 1000);
     decision = parseManagerDecision(text);
   } catch (err) {
     decision = { action: 'hold', reason: `claude call failed: ${err instanceof Error ? err.message : String(err)}` };

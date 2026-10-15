@@ -31,6 +31,8 @@ import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio, type DollarFlowResult } from './services/flowAnalysis.js';
 import { aiScreen, aiManage } from './services/aiAgent.js';
 import type { AiCandidate } from './logic/aiPrompts.js';
+import { outcomeLine, priorFor } from './logic/aiMemory.js';
+import { loadOutcomes, recordOutcome } from './services/aiOutcomes.js';
 import type { TokenAudit } from './logic/tokenAudit.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
 import { getTokenAudit } from './services/tokenAudit.js';
@@ -60,6 +62,32 @@ let lastSwitchAtMs: number | null = null;
 let lastDollarFlowCheckAtMs = 0;
 let lastDollarFlowBuyRatio: number | null = null;
 // AI manager: one in-flight `claude -p` call at a time, never awaited by the tick (deterministic exits keep running).
+let lastSnap = { valueSol: 0, profitPct: 0, peakPct: 0 };
+let pendingExit: { ctx: PoolContext; reason: string; snap: typeof lastSnap } | null = null;
+/** Remember why the position is about to be closed; the outcome is written once the position is really gone (next tick). */
+function noteExit(ctx: PoolContext, reason: string): void {
+  pendingExit = { ctx, reason, snap: { ...lastSnap } };
+}
+function flushOutcome(now: number): void {
+  if (!pendingExit) return;
+  const { ctx, reason, snap } = pendingExit;
+  pendingExit = null;
+  if (currentPool) return; // exit failed or reopened: the position lives on
+  recordOutcome({
+    at: new Date(now).toISOString(),
+    pool: ctx.poolAddress,
+    name: ctx.poolName ?? null,
+    tokenMint: ctx.xIsSol ? ctx.mintY : ctx.mintX,
+    minutesHeld: ctx.openedAtMs ? Math.round((now - ctx.openedAtMs) / 60_000) : null,
+    depositSol: ctx.initialDepositSol,
+    lastValueSol: snap.valueSol,
+    pnlPct: +snap.profitPct.toFixed(2),
+    peakPct: +snap.peakPct.toFixed(2),
+    exitReason: reason,
+    entryConviction: ctx.aiEntryConviction ?? null,
+    entryReason: ctx.aiEntryReason ?? null,
+  });
+}
 let aiManagerBusy = false;
 let aiManagerLastAtMs = 0;
 let aiManagerClose: { pool: string; reason: string } | null = null;
@@ -103,6 +131,7 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
     dollarFlowBuyRatio: e.dollarFlow ? +e.dollarFlow.buyRatioUsd.toFixed(3) : null,
     dollarFlowTxSampled: e.dollarFlow?.txSampled ?? null,
     poolAgeHours: Math.round((Date.now() - c.createdAtMs) / 3_600_000),
+    priorOutcomes: priorFor(loadOutcomes(), c.address, e.xIsSol ? c.mint_y : c.mint_x).map(outcomeLine),
   };
 }
 let dollarFlowBreach: { pool: string; count: number; sinceMs?: number } = { pool: '', count: 0 };
@@ -318,6 +347,7 @@ async function tryEnterPool(): Promise<void> {
   let toTry = eligible;
   let aiBins: number | undefined;
   let aiReason: string | undefined;
+  let aiConviction: number | undefined;
   if (aiOn() && eligible.length > 0) {
     const decision = await aiScreen(await Promise.all(eligible.map((e) => toAiCandidate(e))), currentCapitalSol);
     if (decision.action === 'skip') {
@@ -327,6 +357,7 @@ async function tryEnterPool(): Promise<void> {
       toTry = eligible.filter((e) => e.candidate.address === decision.pool);
       aiBins = decision.bins;
       aiReason = decision.reason;
+      aiConviction = decision.conviction;
     }
   }
   for (const { candidate, xIsSol, reserveSolAccount, solPriceUsd, dollarFlow } of toTry) {
@@ -353,7 +384,9 @@ async function tryEnterPool(): Promise<void> {
           },
         ),
       );
+      currentPool.poolName = candidate.name;
       if (aiReason) currentPool.aiEntryReason = aiReason;
+      if (aiConviction !== undefined) currentPool.aiEntryConviction = aiConviction;
       currentPool.volume1hBaselineUsd = (await getVolume1hUsd(xIsSol ? candidate.mint_y : candidate.mint_x)) ?? 0;
       currentPool.volume1hBaselineSetAtMs = Date.now();
       // Decision-context snapshot (2026-09-24) — same reasoning as
@@ -381,6 +414,7 @@ async function tryEnterPool(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
+  flushOutcome(Date.now());
   if (!currentPool) {
     await tryEnterPool();
     return;
@@ -405,6 +439,7 @@ async function tick(): Promise<void> {
 
   const currentProfitPct = ctx.initialDepositSol > 0 ? ((currentValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
   ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
+  lastSnap = { valueSol: currentValueSol, profitPct: currentProfitPct, peakPct: ctx.peakProfitPct };
 
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
   const { decision, reasons } = evaluatePosition({
@@ -440,6 +475,7 @@ async function tick(): Promise<void> {
   })) {
     logger.warn('[index] upside break: position is all SOL and out of range — exiting instead of re-buying higher', { pool: ctx.poolAddress, currentValueSol, unclaimedFeesSol });
     try {
+      noteExit(ctx, 'UPSIDE_BREAK');
       currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false));
       currentPool = null;
     } catch (err) {
@@ -454,6 +490,7 @@ async function tick(): Promise<void> {
 
   if (decision === 'HARD_EXIT') {
     try {
+      noteExit(ctx, `HARD_EXIT: ${reasons.join('; ').slice(0, 120)}`);
       currentCapitalSol = await guarded(() => executeHardExit(ctx, blacklistPools, chaseGuardPools));
       currentPool = null;
     } catch (err) {
@@ -468,6 +505,7 @@ async function tick(): Promise<void> {
 
   if (decision === 'TAKE_PROFIT') {
     try {
+      noteExit(ctx, `TAKE_PROFIT: ${reasons.join('; ').slice(0, 120)}`);
       currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools));
       currentPool = null;
     } catch (err) {
@@ -493,6 +531,7 @@ async function tick(): Promise<void> {
     if (env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange) {
       logger.warn('[index] down-break held out of range — closing and selling the token on an ask limit order', { pool: ctx.poolAddress, askPct: env.DOWNBREAK_ASK_PCT });
       try {
+        noteExit(ctx, 'DOWN_BREAK_ASK');
         currentCapitalSol = await guarded(() => executeDownBreakExit(ctx));
         currentPool = null;
       } catch (err) {
@@ -506,6 +545,7 @@ async function tick(): Promise<void> {
     if (ctx.ladderBins !== undefined) {
       logger.warn('[index] ladder idle-forced rebalance — closing to SOL instead of recentering', { pool: ctx.poolAddress });
       try {
+        noteExit(ctx, 'LADDER_IDLE_REBALANCE');
         currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'SWITCH', chaseGuardPools));
         currentPool = null;
       } catch (err) {
@@ -520,6 +560,7 @@ async function tick(): Promise<void> {
     // doesn't (capital converted to SOL, no reopen) — next tick's
     // tryEnterPool() picks up from there.
     try {
+      noteExit(ctx, 'REBALANCE');
       currentPool = await guarded(() => compoundCycle(ctx, defaultScannerConfig(blacklistPools, chaseGuardPools), currentProfitPct));
       if (!currentPool) {
         const solBalance = await getWalletSolBalance();
@@ -542,6 +583,7 @@ async function tick(): Promise<void> {
       aiManagerClose = null;
       logger.warn('[index] AI manager: closing position', { pool: ctx.poolAddress, reason });
       try {
+        noteExit(ctx, `AI_EXIT: ${reason.slice(0, 120)}`);
         currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'AI_EXIT', chaseGuardPools));
         addToBlacklist(blacklistPools, ctx.poolAddress, now, env.LEFT_POOL_COOLDOWN_MS);
         currentPool = null;
@@ -573,6 +615,7 @@ async function tick(): Promise<void> {
           ladderBins: ctx.ladderBins,
           volume1hNowUsd,
           volume1hBaselineUsd: ctx.volume1hBaselineUsd,
+          volumeVsBaselinePct: volume1hNowUsd !== null && ctx.volume1hBaselineUsd > 0 ? Math.round((volume1hNowUsd / ctx.volume1hBaselineUsd) * 100) : null,
           dollarFlowBuyRatio: lastDollarFlowBuyRatio,
           entryReason: ctx.aiEntryReason ?? null,
         },
@@ -634,6 +677,7 @@ async function tick(): Promise<void> {
           txSampled: dollarFlow.txSampled,
         });
         try {
+          noteExit(ctx, 'FLOW_EXIT');
           currentCapitalSol = await guarded(() => executeCleanExit(ctx, 'FLOW_EXIT', chaseGuardPools));
           // Short cooldown, not the long HARD_EXIT blacklist — same
           // reasoning as compoundCycle's "no longer eligible" abandon path:

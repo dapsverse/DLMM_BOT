@@ -69,6 +69,9 @@ export interface PoolContext {
   openedAtMs?: number;
   /** AI screener's stated thesis for this entry */
   aiEntryReason?: string;
+  aiEntryConviction?: number;
+  /** pool display name, for the outcome log */
+  poolName?: string;
 }
 
 /**
