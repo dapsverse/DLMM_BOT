@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import { memoryBlock } from '../logic/aiMemory.js';
 import { buildReactManagerPrompt, buildReactScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
-import { type ManagerDecision, type ScreenerDecision, parseStrategy } from '../logic/aiDecision.js';
+import { type ManagerDecision, type ScreenerDecision, type SpotRules, parseStrategy } from '../logic/aiDecision.js';
+import { summarizePriceAction, type Candle } from '../logic/priceAction.js';
 import { loadOutcomes } from './aiOutcomes.js';
 import { checkSmartWalletsOnPool } from './smartWallets.js';
 import { logger } from '../utils/logger.js';
@@ -29,15 +30,29 @@ export function validateSubmit(
   minBins: number,
   maxBins: number,
   minConviction: number,
+  spot?: SpotRules,
 ): ScreenerDecision {
   const reason = a.reason.slice(0, 600);
   if (a.action === 'skip') return { action: 'skip', reason, ...(a.conviction !== undefined ? { conviction: a.conviction } : {}) };
   if (!a.pool || !allowed.has(a.pool)) return { action: 'skip', reason: 'invalid submit: pool is not an eligible candidate' };
   if (a.conviction === undefined || a.conviction < minConviction) return { action: 'skip', reason: `conviction ${String(a.conviction)} below ${minConviction}: ${reason}`, ...(a.conviction !== undefined ? { conviction: a.conviction } : {}) };
   if (a.bins_below === undefined) return { action: 'skip', reason: 'invalid submit: bins_below missing' };
-  return { action: 'deploy', pool: a.pool, bins: Math.min(maxBins, Math.max(minBins, Math.round(a.bins_below))), conviction: a.conviction, reason, strategy: parseStrategy(a.strategy) };
+  const strategy = parseStrategy(a.strategy);
+  if (strategy === 'token_spot' && spot && a.conviction < spot.minConviction) return { action: 'skip', reason: `token_spot needs conviction >= ${spot.minConviction}, got ${a.conviction}: ${reason}`, conviction: a.conviction };
+  return { action: 'deploy', pool: a.pool, bins: Math.min(maxBins, Math.max(strategy === 'token_spot' && spot ? spot.minBins : minBins, Math.round(a.bins_below))), conviction: a.conviction, reason, strategy };
 }
 
+
+/** Last ~3h of 5m candles for the pool, summarised (see priceAction.ts); null if unavailable. */
+export async function fetchPriceAction(pool: string): Promise<unknown> {
+  try {
+    const end = Math.floor(Date.now() / 1000);
+    const o = (await getJson(`https://dlmm.datapi.meteora.ag/pools/${pool}/ohlcv?timeframe=5m&start_time=${end - 3 * 3600}&end_time=${end}`)) as { data?: Candle[] };
+    return summarizePriceAction((o.data ?? []).map((c) => ({ open: +c.open, high: +c.high, low: +c.low, close: +c.close, volume: +c.volume, timestamp: +c.timestamp })), end) ?? { error: 'not enough 5m candles' };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 export async function fetchPoolDetail(pool: string): Promise<unknown> {
   try {
@@ -126,6 +141,11 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
     if (!candidates.some((c) => c.tokenMint === mint)) return text({ error: 'not an eligible candidate token' });
     return text(await fetchTokenInfo(mint));
   });
+  const getPriceAction = tool('get_price_action', 'Short-term price structure of a pool from 5m candles (last ~3h): distance from the low/high, minutes since the low, 15m/30m/1h change, RSI14, green candles, higher-low flag, volume trend, last closes. Use it to judge a local bottom before choosing token_spot. Finalists only.', { pool: z.string() }, async ({ pool }) => {
+    note('get_price_action', { pool });
+    if (!allowed.has(pool)) return text({ error: 'not an eligible candidate' });
+    return text(await fetchPriceAction(pool));
+  });
   const checkSmartWallets = tool('check_smart_wallets_on_pool', 'Which tracked smart (LP) wallets currently hold a position in this pool. A hit is a strong signal; none is neutral. Finalists only.', { pool: z.string() }, async ({ pool }) => {
     note('check_smart_wallets_on_pool', { pool });
     if (!allowed.has(pool)) return text({ error: 'not an eligible candidate' });
@@ -138,15 +158,15 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
     async (a) => {
       note('submit_decision', { action: a.action, pool: a.pool, conviction: a.conviction });
       if (submitted) return text({ error: 'already submitted' });
-      submitted = validateSubmit(a, allowed, env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION);
+      submitted = validateSubmit(a, allowed, env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION, { minConviction: env.TOKEN_SPOT_MIN_CONVICTION, minBins: env.TOKEN_SPOT_MIN_BINS });
       return text({ ok: true, recorded: submitted.action });
     },
   );
-  const server = createSdkMcpServer({ name: 'dlmm', tools: [getCandidates, getPoolDetail, getTokenInfo, checkSmartWallets, submitDecision] });
+  const server = createSdkMcpServer({ name: 'dlmm', tools: [getCandidates, getPoolDetail, getTokenInfo, getPriceAction, checkSmartWallets, submitDecision] });
 
   const q = query({
     prompt: buildReactScreenerPrompt(capitalSol, memoryBlock(loadOutcomes()), recentDecisions),
-    options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'check_smart_wallets_on_pool', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
+    options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'get_price_action', 'check_smart_wallets_on_pool', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
   });
   let costUsd: number | null = null;
   let turns = 0;

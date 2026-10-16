@@ -552,7 +552,7 @@ async function tick(): Promise<void> {
         trailingTriggerPct: env.MERIDIAN_TRAILING_TRIGGER_PCT,
         trailingDropPct: env.MERIDIAN_TRAILING_DROP_PCT,
         outOfRangeBinsToClose: env.MERIDIAN_OOR_BINS_TO_CLOSE,
-        outOfRangeWaitMinutes: env.MERIDIAN_OOR_WAIT_MIN,
+        outOfRangeWaitMinutes: ctx.tokenSpot ? env.MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN : env.MERIDIAN_OOR_WAIT_MIN,
         minFeePerTvl24hPct: env.MERIDIAN_MIN_FEE_TVL_24H_PCT,
         minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
       },
@@ -565,7 +565,7 @@ async function tick(): Promise<void> {
         currentCapitalSol = await guarded(() =>
           signal!.startsWith('stop loss')
             ? executeCleanExit(ctx, 'STOP_LOSS', chaseGuardPools, false)
-            : env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange
+            : env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange && !ctx.tokenSpot
               ? executeDownBreakExit(ctx)
               : executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false),
         );

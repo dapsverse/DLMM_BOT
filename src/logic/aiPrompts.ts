@@ -120,7 +120,8 @@ DEPLOY RULES:
 
 STRATEGY — choose ONE per deploy ("strategy" field), whichever fits the data best (descriptions from meridian's strategy library):
 - sol_ladder (default): the DEPLOY RULES above. SOL only (amount_y), bid-ask below the price, bins_above=0. As price drops through the bins the SOL buys the token; fits volatile/degen tokens where big swings are expected.
-- token_spot: bullish directional view (meridian's custom_ratio_spot at 100% token). The whole deploy amount is swapped into the token and deposited as a spot (flat) distribution ABOVE the price (amount_x only); bins_below is then the number of bins above the price (35-69). The token sells into SOL as price rises; fits net_buyers > 0, price up, strong narrative, momentum. It earns nothing and loses value if the price falls.`,
+- token_spot: a bounce trade (meridian's custom_ratio_spot at 100% token). The whole deploy amount is swapped into the token and deposited as a spot (flat) distribution starting ONE bin above the price (amount_x only), so the ~1% entry cost is covered as soon as price trades into the range. bins_below is then the number of bins above that (20-69). The token sells into SOL as price rises. It earns nothing and loses value if the price keeps falling, and the position is closed if price has not reached the range (or has left it) for 15 minutes.
+  Only choose token_spot when you judge the token is AT A LOCAL BOTTOM and a bounce is likely, with conviction >= 8. Call get_price_action (5m candles, last 3h) on the finalist and judge from it: selling exhausted (falling pace slowing, long lower wicks, RSI oversold and turning up), price stopped making lower lows (higher low forming), volume fading on the way down and returning on green candles, and not a fresh dump still in progress. A token that is merely falling, or already extended after a pump, is not a local bottom. Anything less than a high-conviction bounce: choose sol_ladder or skip.`,
     TIMEFRAME_SCALING,
     memory ? `LESSONS LEARNED:\n${memory}` : '',
     recentDecisions.length ? `RECENT DECISIONS:\n${recentDecisions.join('\n')}` : '',
@@ -168,7 +169,7 @@ export function buildManagerPrompt(p: AiPositionSnapshot, _rules: AiRules, recen
 export function buildReactScreenerPrompt(capitalSol: number, memory: string, recentDecisions: string[]): string {
   return [
     screenerCore(capitalSol, memory, recentDecisions),
-    'Candidates are pre-loaded: call get_candidates. get_pool_detail, get_token_info and check_smart_wallets_on_pool give more detail. FINISH by calling submit_decision exactly once: action "deploy" (pool, strategy, bins_below, conviction 1-10, reason) or action "skip" (reason, conviction).',
+    'Candidates are pre-loaded: call get_candidates. get_pool_detail, get_token_info, get_price_action (5m price structure) and check_smart_wallets_on_pool give more detail. FINISH by calling submit_decision exactly once: action "deploy" (pool, strategy, bins_below, conviction 1-10, reason) or action "skip" (reason, conviction).',
   ].join('\n\n');
 }
 

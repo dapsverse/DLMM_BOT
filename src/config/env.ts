@@ -521,6 +521,12 @@ export const env = {
   MERIDIAN_MIN_FEE_TVL_24H_PCT: num('MERIDIAN_MIN_FEE_TVL_24H_PCT', 7),
   MERIDIAN_MIN_AGE_YIELD_CHECK_MIN: num('MERIDIAN_MIN_AGE_YIELD_CHECK_MIN', 60),
   MERIDIAN_CONFIRM_TICKS: num('MERIDIAN_CONFIRM_TICKS', 2),
+  // token_spot strategy (ours): spot starts N bins above the price so the ~1% entry friction is covered once price enters the range;
+  // shorter OOR wait (also acts as the "price must reach the range" timeout); the AI must be this convinced of a bounce from a local bottom.
+  TOKEN_SPOT_START_OFFSET_BINS: num('TOKEN_SPOT_START_OFFSET_BINS', 1),
+  MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN', 15),
+  TOKEN_SPOT_MIN_CONVICTION: num('TOKEN_SPOT_MIN_CONVICTION', 8),
+  TOKEN_SPOT_MIN_BINS: num('TOKEN_SPOT_MIN_BINS', 20),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.

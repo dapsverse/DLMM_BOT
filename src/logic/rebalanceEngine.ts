@@ -349,7 +349,7 @@ export async function openTokenSpotEntry(
     await waitForTokenBalance(otherMint, swapOut.muln(95).divn(100));
     const tokenAmount = await getTokenBalance(otherMint);
     // deposited token is X when the memecoin is X (i.e. SOL is Y): buildLadderTx's flag means "deposited side is X"
-    result = await openLadderPosition(pool, !xIsSol, tokenAmount, bins, StrategyType.Spot);
+    result = await openLadderPosition(pool, !xIsSol, tokenAmount, bins, StrategyType.Spot, env.TOKEN_SPOT_START_OFFSET_BINS);
   } catch (err) {
     logger.error('[rebalanceEngine] token-spot deposit failed after swap — swapping the token back to SOL', { poolAddress, otherMint, error: err instanceof Error ? err.message : String(err) });
     const stuck = await getTokenBalance(otherMint);

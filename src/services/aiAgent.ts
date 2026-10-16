@@ -75,7 +75,7 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
   }
   try {
     const text = await askClaude(buildScreenerPrompt(candidates, capitalSol, recentLines('screen', 5), memoryBlock(loadOutcomes())), true, env.AI_SCREEN_TIMEOUT_S * 1000);
-    decision = parseScreenerDecision(text, new Set(candidates.map((c) => c.pool)), env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION);
+    decision = parseScreenerDecision(text, new Set(candidates.map((c) => c.pool)), env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION, { minConviction: env.TOKEN_SPOT_MIN_CONVICTION, minBins: env.TOKEN_SPOT_MIN_BINS });
   } catch (err) {
     decision = { action: 'skip', reason: `claude call failed: ${err instanceof Error ? err.message : String(err)}` };
   }
