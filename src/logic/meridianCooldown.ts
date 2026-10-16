@@ -1,7 +1,7 @@
 /**
  * Meridian pool-memory cooldowns (pool-memory.js recordDeploy): after a close, how long to keep the pool out.
  * low yield close -> 4h; the last N closes all OOR -> 12h; the last N deploys all earned fees -> 12h.
- * Meridian also cools the base mint; here only the pool address is blacklisted.
+ * Pool and base mint are both blacklisted (the scanner checks either key).
  */
 export type CloseKind = 'low yield' | 'oor' | 'other';
 export interface CloseRec {
