@@ -575,6 +575,12 @@ async function tick(): Promise<void> {
       } catch (err) {
         logger.error('[index] meridian close threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
         currentPool = await reconcilePoolStateAfterFailure(ctx);
+        // A failed trailing close lets PnL drift far below the old peak; re-arm from where it is now so a later
+        // success does not dump the position at a loss on a stale peak (live 2026-10-16: peak 4.41% -> -0.55% during 388 failed closes).
+        if (currentPool && signal!.startsWith('trailing TP')) {
+          currentPool.peakProfitPct = currentProfitPct;
+          logger.warn('[index] trailing close failed: peak reset to current PnL', { pool: ctx.poolAddress, peakPct: +currentProfitPct.toFixed(2) });
+        }
       }
       return;
     }
