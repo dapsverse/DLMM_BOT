@@ -127,7 +127,7 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
   });
   const submitDecision = tool(
     'submit_decision',
-    'Submit your final decision. Call exactly once. deploy needs pool, bins_below (35-69) and conviction >= 7; otherwise skip.',
+    'Submit your final decision. Call exactly once. deploy needs pool, bins_below (35-69) and conviction (1-10, logged only); skip if only weak candidates remain.',
     { action: z.enum(['deploy', 'skip']), pool: z.string().optional(), bins_below: z.number().optional(), conviction: z.number().min(1).max(10).optional(), reason: z.string() },
     async (a) => {
       note('submit_decision', { action: a.action, pool: a.pool, conviction: a.conviction });

@@ -489,7 +489,7 @@ export const env = {
   LADDER_BINS: num('LADDER_BINS', 69),
   // AI agent (meridian-style): `claude -p` screens candidates and manages the open position. Off by default.
   AI_AGENT: bool('AI_AGENT', false),
-  AI_MIN_CONVICTION: num('AI_MIN_CONVICTION', 7),
+  AI_MIN_CONVICTION: num('AI_MIN_CONVICTION', 0),
   AI_MIN_BINS: num('AI_MIN_BINS', 35),
   AI_MAX_BINS: num('AI_MAX_BINS', 69),
   /** slow periodic manager health check (meridian: 10-60 min); event triggers are in logic/aiTriggers.ts */

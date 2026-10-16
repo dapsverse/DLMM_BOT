@@ -54,6 +54,10 @@ const chaseGuardPools = new Map<string, number>(); // see ScannerConfig.chaseGua
 for (const addr of (process.env.BOOT_BLACKLIST_POOLS ?? '').split(',').map((a) => a.trim()).filter(Boolean)) {
   blacklistPools.set(addr, Date.now() + env.BLACKLIST_DURATION_MS);
 }
+// User-managed pools: kept out of every scan for good (10y expiry; also hard-blocked in meteoraDLMM.ts).
+for (const addr of (process.env.PROTECTED_POOLS ?? '').split(',').map((a) => a.trim()).filter(Boolean)) {
+  blacklistPools.set(addr, Date.now() + 10 * 365 * 86_400_000);
+}
 let currentPool: PoolContext | null = null;
 // Non-SOL mint of the last pool we entered; used by the flat kill-switch to liquidate leftovers.
 let lastOtherMint: string | null = null;
@@ -107,6 +111,7 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
   const c = e.candidate;
   const tok = nonSolToken(c);
   const dd = await getDrawdownFromHighPct(c.address, env.DRAWDOWN_WINDOW_DAYS).catch(() => null);
+  const feeBps = await getTransferFeeBps(e.xIsSol ? c.mint_y : c.mint_x).catch(() => null);
   return {
     pool: c.address,
     name: c.name,
@@ -128,6 +133,9 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
     priceChange6hPct: c.priceChange6hPct ?? null,
     priceChange24hPct: c.priceChange24hPct ?? null,
     drawdownFrom14dHighPct: dd,
+    transferFeePct: feeBps === null ? null : feeBps / 100,
+    freezeAuthorityDisabled: tok?.freezeAuthorityDisabled ?? null,
+    mintAuthorityRevoked: tok?.mintAuthorityRevoked ?? null,
     buyRatio1hByTxCount: c.buyRatio1h ?? null,
     dollarFlowBuyRatio: e.dollarFlow ? +e.dollarFlow.buyRatioUsd.toFixed(3) : null,
     dollarFlowTxSampled: e.dollarFlow?.txSampled ?? null,
@@ -271,12 +279,12 @@ async function tryEnterPool(): Promise<void> {
     // 2026-10-08) — see missingEntryData for the same policy on the rest.
     const solPriceUsd = xIsSol ? candidate.tokenX.priceUsd : candidate.tokenY.priceUsd;
     const reserveSolAccount = xIsSol ? candidate.reserve_x : candidate.reserve_y;
-    const missing = missingEntryData(candidate);
+    const missing = env.ENTRY_STRATEGY_MODE === 'meridian' ? [] : missingEntryData(candidate);
     if (missing.length > 0) {
       logger.warn(`[index] skipping pool ${candidate.address} — entry data incomplete (fail-closed)`, { missing });
       continue;
     }
-    if (env.MAX_DRAWDOWN_FROM_HIGH_PCT > 0) {
+    if (env.MAX_DRAWDOWN_FROM_HIGH_PCT > 0 && env.ENTRY_STRATEGY_MODE !== 'meridian') {
       const drawdownPct = await getDrawdownFromHighPct(candidate.address, env.DRAWDOWN_WINDOW_DAYS);
       if (drawdownPct === null) {
         logger.warn(`[index] skipping pool ${candidate.address} — drawdown-from-high unavailable (fail-closed)`);
@@ -300,11 +308,12 @@ async function tryEnterPool(): Promise<void> {
     }
     const tokenMint = xIsSol ? candidate.mint_y : candidate.mint_x;
     const feeBps = await getTransferFeeBps(tokenMint);
-    if (feeBps === null) {
+    // meridian mode: the AI judges transfer-fee tokens (it sees transferFeePct), no hard gate
+    if (env.ENTRY_STRATEGY_MODE !== 'meridian' && feeBps === null) {
       logger.warn(`[index] skipping pool ${candidate.address} — transfer-fee lookup failed (fail-closed)`);
       continue;
     }
-    if (feeBps > env.MAX_TRANSFER_FEE_BPS) {
+    if (env.ENTRY_STRATEGY_MODE !== 'meridian' && feeBps !== null && feeBps > env.MAX_TRANSFER_FEE_BPS) {
       logger.info(`[index] skipping pool ${candidate.address} — token has a ${feeBps / 100}% transfer fee (max ${env.MAX_TRANSFER_FEE_BPS / 100}%)`);
       continue;
     }
