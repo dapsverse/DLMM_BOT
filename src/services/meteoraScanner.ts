@@ -565,7 +565,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
   const mer = config.entryStrategyMode === 'meridian';
 
   const preFiltered = pairs.filter((pair) => {
-    if (isBlacklisted(pair.address, config.blacklistPools)) return false;
+    if (isBlacklisted(pair.address, config.blacklistPools) || isBlacklisted(nonSolToken(pair)?.address ?? '', config.blacklistPools)) return false;
 
     const tvl = Number(pair.liquidity);
     const vol24h = Number(pair.trade_volume_24h);
@@ -922,7 +922,7 @@ export interface PoolEligibility {
  */
 export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts: FilterOpts = {}): string[] {
   const reasons: string[] = [];
-  if (isBlacklisted(pair.address, config.blacklistPools)) reasons.push('blacklisted');
+  if (isBlacklisted(pair.address, config.blacklistPools) || isBlacklisted(nonSolToken(pair)?.address ?? '', config.blacklistPools)) reasons.push('blacklisted');
   if (!opts.skipSizingChecks && pair.dexHydrationFailed) reasons.push('dexscreener batch hydration failed (unknown trend/tx data)');
 
   const tvl = Number(pair.liquidity);

@@ -88,7 +88,11 @@ function flushOutcome(now: number): void {
     const hist = [...(closeHistory.get(ctx.poolAddress) ?? []), { kind: closeKindFromReason(reason), feesSol: snap.feesSol }].slice(-10);
     closeHistory.set(ctx.poolAddress, hist);
     const hours = cooldownHoursAfterClose(hist, { oorCount: 3, oorHours: 12, repeatCount: 3, repeatHours: 12 });
-    if (hours > 0) addToBlacklist(blacklistPools, ctx.poolAddress, now, hours * 3_600_000);
+    if (hours > 0) {
+      // meridian cools both the pool and its base mint (the scanner checks the blacklist for either key)
+      addToBlacklist(blacklistPools, ctx.poolAddress, now, hours * 3_600_000);
+      addToBlacklist(blacklistPools, ctx.xIsSol ? ctx.mintY : ctx.mintX, now, hours * 3_600_000);
+    }
   }
   recordOutcome({
     at: new Date(now).toISOString(),
