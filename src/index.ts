@@ -43,12 +43,15 @@ import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleC
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct } from './logic/meridianExit.js';
 import { ladderBounds } from './logic/ladderRange.js';
+import { closeKindFromReason, cooldownHoursAfterClose, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
 
 const meridianConfirmer = new ExitConfirmer();
+// per-pool close history for meridian's cooldowns; in memory only (lost on restart)
+const closeHistory = new Map<string, CloseRec[]>();
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
 
 const blacklistPools = new Map<string, number>();
@@ -70,7 +73,7 @@ let lastSwitchAtMs: number | null = null;
 let lastDollarFlowCheckAtMs = 0;
 let lastDollarFlowBuyRatio: number | null = null;
 // AI manager: one in-flight `claude -p` call at a time, never awaited by the tick (deterministic exits keep running).
-let lastSnap = { valueSol: 0, profitPct: 0, peakPct: 0 };
+let lastSnap = { valueSol: 0, profitPct: 0, peakPct: 0, feesSol: 0 };
 let pendingExit: { ctx: PoolContext; reason: string; snap: typeof lastSnap } | null = null;
 /** Remember why the position is about to be closed; the outcome is written once the position is really gone (next tick). */
 function noteExit(ctx: PoolContext, reason: string): void {
@@ -81,6 +84,12 @@ function flushOutcome(now: number): void {
   const { ctx, reason, snap } = pendingExit;
   pendingExit = null;
   if (currentPool) return; // exit failed or reopened: the position lives on
+  if (env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined) {
+    const hist = [...(closeHistory.get(ctx.poolAddress) ?? []), { kind: closeKindFromReason(reason), feesSol: snap.feesSol }].slice(-10);
+    closeHistory.set(ctx.poolAddress, hist);
+    const hours = cooldownHoursAfterClose(hist, { oorCount: 3, oorHours: 12, repeatCount: 3, repeatHours: 12 });
+    if (hours > 0) addToBlacklist(blacklistPools, ctx.poolAddress, now, hours * 3_600_000);
+  }
   recordOutcome({
     at: new Date(now).toISOString(),
     pool: ctx.poolAddress,
@@ -453,7 +462,7 @@ async function tick(): Promise<void> {
 
   const currentProfitPct = ctx.initialDepositSol > 0 ? ((currentValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
   ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
-  lastSnap = { valueSol: currentValueSol, profitPct: currentProfitPct, peakPct: ctx.peakProfitPct };
+  lastSnap = { valueSol: currentValueSol, profitPct: currentProfitPct, peakPct: ctx.peakProfitPct, feesSol: unclaimedFeesSol };
 
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
   const evald = evaluatePosition({
@@ -473,8 +482,8 @@ async function tick(): Promise<void> {
   // Only the stop loss (STOP_LOSS_PCT) is kept from evaluatePosition.
   const meridianRules = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
   const slHit = evald.reasons.some((r) => r.includes('STOP_LOSS_PCT'));
-  const decision = meridianRules ? (slHit ? 'HARD_EXIT' : 'HOLD') : evald.decision;
-  const reasons = meridianRules ? (slHit ? evald.reasons.filter((r) => r.includes('STOP_LOSS_PCT')) : []) : evald.reasons;
+  const decision = meridianRules ? 'HOLD' : evald.decision;
+  const reasons = meridianRules ? [] : evald.reasons;
 
   logger.info(`[index] pool ${ctx.poolAddress} health check`, {
     decision,
@@ -515,7 +524,8 @@ async function tick(): Promise<void> {
       binsAbove = ctx.xIsSol ? lo - binStatus.currentBinId : binStatus.currentBinId - hi;
     }
     const ageMinutes = ctx.openedAtMs !== undefined ? (now - ctx.openedAtMs) / 60_000 : null;
-    const signal = meridianExitSignal(
+    const slReason = slHit ? evald.reasons.find((r) => r.includes('STOP_LOSS_PCT')) : undefined;
+    const signal = slReason !== undefined ? `stop loss: ${slReason}` : meridianExitSignal(
       {
         pnlPct: currentProfitPct,
         peakPnlPct: ctx.peakProfitPct,
@@ -541,7 +551,11 @@ async function tick(): Promise<void> {
       try {
         noteExit(ctx, `MERIDIAN: ${signal!.slice(0, 120)}`);
         currentCapitalSol = await guarded(() =>
-          env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange ? executeDownBreakExit(ctx) : executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false),
+          signal!.startsWith('stop loss')
+            ? executeCleanExit(ctx, 'STOP_LOSS', chaseGuardPools, false)
+            : env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange
+              ? executeDownBreakExit(ctx)
+              : executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false),
         );
         currentPool = null;
       } catch (err) {

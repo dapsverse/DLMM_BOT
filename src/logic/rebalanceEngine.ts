@@ -930,8 +930,11 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
     // balance, leaving thousands of dollars of tokens un-swapped and
     // un-tracked.
     const { feeX, feeY, totalXAmount, totalYAmount } = position.positionData;
-    feeOtherRaw = new BN(ctx.xIsSol ? feeY : feeX);
-    expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(feeOtherRaw);
+    // meridian mode sells the whole token side (no fee-sized portion kept)
+    const sellAll = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
+    const realFeeOther = new BN(ctx.xIsSol ? feeY : feeX);
+    feeOtherRaw = sellAll ? new BN(0) : realFeeOther;
+    expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(realFeeOther);
     logger.warn(`[rebalanceEngine] ${logPrefix}: closing position`, { pool: ctx.poolAddress });
     await closePositionFull(ctx.pool, position);
   }
@@ -1018,7 +1021,7 @@ export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<stri
  * in gains). Neither is a risk violation, so the pool stays a fully valid
  * candidate for the very next scan.
  */
-export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT' | 'FLOW_EXIT' | 'AI_EXIT', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
+export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT' | 'FLOW_EXIT' | 'AI_EXIT' | 'STOP_LOSS', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
   if (armChaseGuard) await recordExitForChaseGuard(ctx, chaseGuardPools);
   return closeAndConvertToSol(ctx, reason);
 }
