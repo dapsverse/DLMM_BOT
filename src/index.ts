@@ -16,6 +16,7 @@ import {
   computeGasReserveSol,
   walletCapitalSol,
   openLadderEntry,
+  openTokenSpotEntry,
   retryPendingSwapBack,
   getPendingSwapBack,
   restorePendingSwapBack,
@@ -107,6 +108,7 @@ function flushOutcome(now: number): void {
     exitReason: reason,
     entryConviction: ctx.aiEntryConviction ?? null,
     entryReason: ctx.aiEntryReason ?? null,
+    strategy: ctx.tokenSpot ? 'token_spot' : 'sol_ladder',
   });
 }
 let aiManagerBusy = false;
@@ -372,6 +374,7 @@ async function tryEnterPool(): Promise<void> {
   // AI agent (meridian-style screener): picks ONE of the eligible candidates or skips. Fail-closed.
   let toTry = eligible;
   let aiBins: number | undefined;
+  let aiStrategy: 'sol_ladder' | 'token_spot' = 'sol_ladder';
   let aiReason: string | undefined;
   let aiConviction: number | undefined;
   if (aiOn() && eligible.length > 0) {
@@ -382,6 +385,7 @@ async function tryEnterPool(): Promise<void> {
     } else {
       toTry = eligible.filter((e) => e.candidate.address === decision.pool);
       aiBins = decision.bins;
+      aiStrategy = decision.strategy;
       aiReason = decision.reason;
       aiConviction = decision.conviction;
     }
@@ -392,7 +396,9 @@ async function tryEnterPool(): Promise<void> {
       const pool = await openPool(candidate.address);
       lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
       currentPool = await guarded(() =>
-        env.ENTRY_STRATEGY_MODE === 'meridian'
+        env.ENTRY_STRATEGY_MODE === 'meridian' && aiStrategy === 'token_spot'
+          ? openTokenSpotEntry(pool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y, aiBins)
+          : env.ENTRY_STRATEGY_MODE === 'meridian'
           ? openLadderEntry(pool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y, aiBins)
           : openInitialPosition(
           pool,
@@ -526,7 +532,7 @@ async function tick(): Promise<void> {
   if (meridianRules && decision === 'HOLD') {
     let binsAbove = 0;
     if (ctx.centerBinId !== null && ctx.ladderBins !== undefined) {
-      const { lo, hi } = ladderBounds(ctx.centerBinId, ctx.ladderBins, ctx.xIsSol);
+      const { lo, hi } = ladderBounds(ctx.centerBinId, ctx.ladderBins, ctx.tokenSpot ? !ctx.xIsSol : ctx.xIsSol);
       binsAbove = ctx.xIsSol ? lo - binStatus.currentBinId : binStatus.currentBinId - hi;
     }
     const ageMinutes = ctx.openedAtMs !== undefined ? (now - ctx.openedAtMs) / 60_000 : null;
@@ -711,6 +717,7 @@ async function tick(): Promise<void> {
           isOutOfRange: binStatus.isOutOfRange,
           minutesOutOfRange: ctx.outOfRangeSinceMs ? Math.round((now - ctx.outOfRangeSinceMs) / 60_000) : null,
           priceVsLadder,
+          strategy: ctx.tokenSpot ? 'token_spot' : 'sol_ladder',
           ladderBins: ctx.ladderBins,
           volume1hNowUsd,
           volume1hBaselineUsd: ctx.volume1hBaselineUsd,

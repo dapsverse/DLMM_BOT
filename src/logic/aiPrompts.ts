@@ -46,6 +46,8 @@ export interface AiPositionSnapshot {
   isOutOfRange: boolean;
   minutesOutOfRange: number | null;
   priceVsLadder: 'inside' | 'above (all SOL, earning nothing)' | 'below (all token)';
+  /** sol_ladder (SOL only, bid-ask below the price) or token_spot (100% token, spot above the price) */
+  strategy?: 'sol_ladder' | 'token_spot';
   ladderBins: number;
   volume1hNowUsd: number | null;
   volume1hBaselineUsd: number;
@@ -114,7 +116,11 @@ DEPLOY RULES:
 - bins_below is an integer 35-69.
 - Use amount_y only, keep amount_x=0 and bins_above=0.
 - Bin steps must be [80-125].
-- Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.`,
+- Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
+
+STRATEGY — choose ONE per deploy ("strategy" field), whichever fits the data best (descriptions from meridian's strategy library):
+- sol_ladder (default): the DEPLOY RULES above. SOL only (amount_y), bid-ask below the price, bins_above=0. As price drops through the bins the SOL buys the token; fits volatile/degen tokens where big swings are expected.
+- token_spot: bullish directional view (meridian's custom_ratio_spot at 100% token). The whole deploy amount is swapped into the token and deposited as a spot (flat) distribution ABOVE the price (amount_x only); bins_below is then the number of bins above the price (35-69). The token sells into SOL as price rises; fits net_buyers > 0, price up, strong narrative, momentum. It earns nothing and loses value if the price falls.`,
     TIMEFRAME_SCALING,
     memory ? `LESSONS LEARNED:\n${memory}` : '',
     recentDecisions.length ? `RECENT DECISIONS:\n${recentDecisions.join('\n')}` : '',
@@ -145,7 +151,7 @@ export function buildScreenerPrompt(candidates: AiCandidate[], capitalSol: numbe
     screenerCore(capitalSol, memory, recentDecisions),
     `CANDIDATES (JSON):\n${JSON.stringify(candidates, null, 1)}`,
     `OUTPUT: reply with ONLY one JSON object, no prose, no code fence:
-{"action":"deploy"|"skip","pool":"<exact pool address from the list, required for deploy>","bins_below":<35-69>,"conviction":<1-10>,"reason":"<=400 chars"}`,
+{"action":"deploy"|"skip","pool":"<exact pool address from the list, required for deploy>","strategy":"sol_ladder"|"token_spot","bins_below":<35-69>,"conviction":<1-10>,"reason":"<=400 chars"}`,
   ].join('\n\n');
 }
 
@@ -162,7 +168,7 @@ export function buildManagerPrompt(p: AiPositionSnapshot, _rules: AiRules, recen
 export function buildReactScreenerPrompt(capitalSol: number, memory: string, recentDecisions: string[]): string {
   return [
     screenerCore(capitalSol, memory, recentDecisions),
-    'Candidates are pre-loaded: call get_candidates. get_pool_detail, get_token_info and check_smart_wallets_on_pool give more detail. FINISH by calling submit_decision exactly once: action "deploy" (pool, bins_below, conviction 1-10, reason) or action "skip" (reason, conviction).',
+    'Candidates are pre-loaded: call get_candidates. get_pool_detail, get_token_info and check_smart_wallets_on_pool give more detail. FINISH by calling submit_decision exactly once: action "deploy" (pool, strategy, bins_below, conviction 1-10, reason) or action "skip" (reason, conviction).',
   ].join('\n\n');
 }
 

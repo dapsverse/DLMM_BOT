@@ -2,7 +2,11 @@
 
 export type ScreenerDecision =
   | { action: 'skip'; reason: string; conviction?: number }
-  | { action: 'deploy'; pool: string; bins: number; conviction: number; reason: string };
+  | { action: 'deploy'; pool: string; bins: number; conviction: number; reason: string; strategy: Strategy };
+
+/** sol_ladder: SOL-only bid-ask below the price (default). token_spot: 100% token, spot distribution above the price. */
+export type Strategy = 'sol_ladder' | 'token_spot';
+export const parseStrategy = (v: unknown): Strategy => (v === 'token_spot' ? 'token_spot' : 'sol_ladder');
 
 export type ManagerDecision = { action: 'hold' | 'close'; reason: string };
 
@@ -47,7 +51,7 @@ export function parseScreenerDecision(text: string, allowedPools: ReadonlySet<st
   const binsRaw = Number(o.bins_below);
   if (!Number.isFinite(binsRaw)) return { action: 'skip', reason: 'invalid answer: bins_below missing' };
   const bins = Math.min(maxBins, Math.max(minBins, Math.round(binsRaw)));
-  return { action: 'deploy', pool: o.pool, bins, conviction, reason: reasonOf(o) };
+  return { action: 'deploy', pool: o.pool, bins, conviction, reason: reasonOf(o), strategy: parseStrategy(o.strategy) };
 }
 
 export function parseManagerDecision(text: string): ManagerDecision {

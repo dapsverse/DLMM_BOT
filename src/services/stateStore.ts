@@ -33,6 +33,8 @@ export interface PersistedPosition {
   reserveSolAccount: string;
   /** SOL-only ladder width (meridian mode); absent for classic positions and files written before 2026-10-15 */
   ladderBins?: number;
+  /** token-only spot strategy (meridian mode); absent = SOL-only ladder or classic */
+  tokenSpot?: boolean;
 }
 
 export interface PersistedState {

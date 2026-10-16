@@ -6,6 +6,7 @@ import {
   getUserPositions,
   openPosition,
   openLadderPosition,
+  StrategyType,
   closePositionFull,
   getActiveBin,
   getFreshActiveBinId,
@@ -65,6 +66,8 @@ export interface PoolContext {
   reserveSolAccount: string;
   /** Set for a SOL-only ladder position (meridian mode): number of bins below the open price. Absent = classic 50:50 position. */
   ladderBins?: number;
+  /** token-only spot strategy: 100% token deposited as a spot distribution ABOVE the price (ladderBins = its width); absent = SOL-only bid-ask ladder */
+  tokenSpot?: boolean;
   /** epoch ms the position was opened (ladder entries) */
   openedAtMs?: number;
   /** AI screener's stated thesis for this entry */
@@ -160,6 +163,11 @@ export interface BinRangeStatus {
  */
 export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatus> {
   const activeBin = await getActiveBin(ctx.pool);
+  if (ctx.ladderBins !== undefined && ctx.tokenSpot) {
+    // deposited side is the memecoin; price rising through the range sells it into SOL (fellThrough). Out of range the OTHER way = still all token.
+    const st = ladderRangeStatus(activeBin.binId, ctx.centerBinId, ctx.ladderBins, !ctx.xIsSol);
+    return { currentBinId: activeBin.binId, isOutOfRange: st.isOutOfRange, tokenBelowRange: st.isOutOfRange && !st.tokenBelowRange };
+  }
   if (ctx.ladderBins !== undefined) return { currentBinId: activeBin.binId, ...ladderRangeStatus(activeBin.binId, ctx.centerBinId, ctx.ladderBins, ctx.xIsSol) };
   const radius = computeBinRadius(ctx.binStep);
   const isOutOfRange = ctx.centerBinId === null || Math.abs(activeBin.binId - ctx.centerBinId) > radius;
@@ -305,6 +313,69 @@ export async function openLadderEntry(
     otherMintDecimals,
     reserveSolAccount,
     ladderBins: bins,
+    openedAtMs: Date.now(),
+  };
+}
+
+/**
+ * meridian mode, strategy `token_spot`: swap 100% of the capital into the token, then deposit it ALL as a flat (spot) distribution
+ * ABOVE the price in ONE tx (mirror of the SOL-only ladder). Sells into a rise, loses if the price falls. Same pre-flight as the
+ * ladder entry; if the deposit fails after the swap the token is swapped straight back to SOL.
+ */
+export async function openTokenSpotEntry(
+  pool: DlmmPool,
+  poolAddress: string,
+  mintX: string,
+  mintY: string,
+  xIsSol: boolean,
+  capitalSol: number,
+  binStep: number,
+  reserveSolAccount: string,
+  bins: number = env.LADDER_BINS,
+): Promise<PoolContext> {
+  const otherMint = xIsSol ? mintY : mintX;
+  const walletSol = await getWalletSolBalance();
+  const maxFundableSol = walletSol - computeGasReserveSol(walletSol) - POSITION_RENT_BUFFER_SOL;
+  if (isCapitalUnderfunded(capitalSol, maxFundableSol)) {
+    throw new Error(`[rebalanceEngine] requested capital ${capitalSol} SOL is under ${MIN_CAPITAL_FUND_RATIO * 100}% of the ${maxFundableSol.toFixed(4)} SOL the wallet can fund — refusing token-spot entry`);
+  }
+  const effectiveCapitalSol = Math.min(capitalSol, maxFundableSol);
+  if (effectiveCapitalSol <= 0) throw new Error(`[rebalanceEngine] wallet ${walletSol} SOL cannot fund a token-spot entry after gas reserve + rent`);
+  const otherMintDecimals = await getMintDecimals(otherMint);
+  logger.info('[rebalanceEngine] opening token-only spot (100% token above the price)', { poolAddress, capitalSol: effectiveCapitalSol, bins, otherMintDecimals });
+  const swapOut = new BN((await swapExactIn(WSOL_MINT, otherMint, new BN(Math.round(effectiveCapitalSol * LAMPORTS_PER_SOL)))).outAmount);
+  let result;
+  try {
+    await waitForTokenBalance(otherMint, swapOut.muln(95).divn(100));
+    const tokenAmount = await getTokenBalance(otherMint);
+    // deposited token is X when the memecoin is X (i.e. SOL is Y): buildLadderTx's flag means "deposited side is X"
+    result = await openLadderPosition(pool, !xIsSol, tokenAmount, bins, StrategyType.Spot);
+  } catch (err) {
+    logger.error('[rebalanceEngine] token-spot deposit failed after swap — swapping the token back to SOL', { poolAddress, otherMint, error: err instanceof Error ? err.message : String(err) });
+    const stuck = await getTokenBalance(otherMint);
+    if (stuck.gtn(0)) await swapBackOrPend(otherMint, stuck, 'token-spot entry rollback');
+    throw err;
+  }
+  return {
+    poolAddress,
+    pool,
+    mintX,
+    mintY,
+    xIsSol,
+    initialDepositSol: effectiveCapitalSol,
+    rebalanceTimestamps: [],
+    lastRebalanceAt: 0,
+    volume1hBaselineUsd: 0,
+    volume1hBaselineSetAtMs: 0,
+    binStep,
+    centerBinId: result.centerBinId,
+    outOfRangeSinceMs: null,
+    inRangeSinceMs: null,
+    peakProfitPct: 0,
+    otherMintDecimals,
+    reserveSolAccount,
+    ladderBins: bins,
+    tokenSpot: true,
     openedAtMs: Date.now(),
   };
 }

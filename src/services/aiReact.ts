@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import { memoryBlock } from '../logic/aiMemory.js';
 import { buildReactManagerPrompt, buildReactScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
-import { type ManagerDecision, type ScreenerDecision } from '../logic/aiDecision.js';
+import { type ManagerDecision, type ScreenerDecision, parseStrategy } from '../logic/aiDecision.js';
 import { loadOutcomes } from './aiOutcomes.js';
 import { checkSmartWalletsOnPool } from './smartWallets.js';
 import { logger } from '../utils/logger.js';
@@ -24,7 +24,7 @@ async function getJson(url: string): Promise<unknown> {
 
 /** Pure: validate the agent's submit_decision against the eligible set (same rules as the one-shot parser). */
 export function validateSubmit(
-  a: { action: 'deploy' | 'skip'; pool?: string; bins_below?: number; conviction?: number; reason: string },
+  a: { action: 'deploy' | 'skip'; pool?: string; bins_below?: number; conviction?: number; reason: string; strategy?: string },
   allowed: ReadonlySet<string>,
   minBins: number,
   maxBins: number,
@@ -35,7 +35,7 @@ export function validateSubmit(
   if (!a.pool || !allowed.has(a.pool)) return { action: 'skip', reason: 'invalid submit: pool is not an eligible candidate' };
   if (a.conviction === undefined || a.conviction < minConviction) return { action: 'skip', reason: `conviction ${String(a.conviction)} below ${minConviction}: ${reason}`, ...(a.conviction !== undefined ? { conviction: a.conviction } : {}) };
   if (a.bins_below === undefined) return { action: 'skip', reason: 'invalid submit: bins_below missing' };
-  return { action: 'deploy', pool: a.pool, bins: Math.min(maxBins, Math.max(minBins, Math.round(a.bins_below))), conviction: a.conviction, reason };
+  return { action: 'deploy', pool: a.pool, bins: Math.min(maxBins, Math.max(minBins, Math.round(a.bins_below))), conviction: a.conviction, reason, strategy: parseStrategy(a.strategy) };
 }
 
 
@@ -133,8 +133,8 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
   });
   const submitDecision = tool(
     'submit_decision',
-    'Submit your final decision. Call exactly once. deploy needs pool, bins_below (35-69) and conviction (1-10, logged only); skip if only weak candidates remain.',
-    { action: z.enum(['deploy', 'skip']), pool: z.string().optional(), bins_below: z.number().optional(), conviction: z.number().min(1).max(10).optional(), reason: z.string() },
+    'Submit your final decision. Call exactly once. deploy needs pool, strategy (sol_ladder default | token_spot), bins_below (35-69; for token_spot the number of bins ABOVE the price) and conviction (1-10, logged only); skip if only weak candidates remain.',
+    { action: z.enum(['deploy', 'skip']), pool: z.string().optional(), strategy: z.enum(['sol_ladder', 'token_spot']).optional(), bins_below: z.number().optional(), conviction: z.number().min(1).max(10).optional(), reason: z.string() },
     async (a) => {
       note('submit_decision', { action: a.action, pool: a.pool, conviction: a.conviction });
       if (submitted) return text({ error: 'already submitted' });

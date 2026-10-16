@@ -353,7 +353,8 @@ export interface LadderTx {
  * price falling = bin id rising there). No token side, so no entry swap. SDK emits create + add as two txs; their
  * instructions are merged (verified by simulateTransaction: 1116 bytes, 681k CU for 69 bins). Refetches pool state first.
  */
-export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, user: PublicKey = wallet.publicKey): Promise<LadderTx> {
+export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, user: PublicKey = wallet.publicKey, strategyType: StrategyType = StrategyType.BidAsk): Promise<LadderTx> {
+  // `xIsSol` here means "the single deposited token is X": SOL for the SOL-only ladder, the memecoin for the token-only spot position.
   await pool.refetchStates();
   const activeBinId = (await getActiveBin(pool)).binId;
   const minBinId = xIsSol ? activeBinId : activeBinId - (bins - 1);
@@ -364,7 +365,7 @@ export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports
     positionPubKey: positionKeypair.publicKey,
     totalXAmount: xIsSol ? solLamports : new BN(0),
     totalYAmount: xIsSol ? new BN(0) : solLamports,
-    strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk, singleSidedX: xIsSol },
+    strategy: { minBinId, maxBinId, strategyType, singleSidedX: xIsSol },
     user,
     slippage: 1,
   });
@@ -375,11 +376,11 @@ export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports
 }
 
 /** Opens the SOL-only ladder (see buildLadderTx), rebuilding from a fresh active bin on every retry. */
-export async function openLadderPosition(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number): Promise<OpenPositionResult> {
+export async function openLadderPosition(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, strategyType: StrategyType = StrategyType.BidAsk): Promise<OpenPositionResult> {
   assertNotProtected(pool);
   return withRetry(
     async () => {
-      const { tx, positionKeypair, minBinId, maxBinId, activeBinId } = await buildLadderTx(pool, xIsSol, solLamports, bins);
+      const { tx, positionKeypair, minBinId, maxBinId, activeBinId } = await buildLadderTx(pool, xIsSol, solLamports, bins, wallet.publicKey, strategyType);
       await withPriorityFee(tx, [wallet.publicKey, positionKeypair.publicKey], LADDER_COMPUTE_UNIT_LIMIT);
       const signature = await sendTx(tx, [positionKeypair], 'openLadder');
       logger.info('[dlmm] ladder position opened', { position: positionKeypair.publicKey.toBase58(), signature, minBinId, maxBinId, activeBinId });
