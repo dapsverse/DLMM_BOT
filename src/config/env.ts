@@ -511,6 +511,16 @@ export const env = {
   AI_REACT_MAX_BUDGET_USD: num('AI_REACT_MAX_BUDGET_USD', 0.6),
   /** minutes the price may stay above the ladder (all SOL, earning nothing) before the position is closed */
   LADDER_OOR_EXIT_MIN: num('LADDER_OOR_EXIT_MIN', 30),
+  // Meridian's close rules (config.js defaults); apply to ladder positions in meridian mode, replacing our own exit heuristics. Stop loss stays STOP_LOSS_PCT.
+  MERIDIAN_RULES: bool('MERIDIAN_RULES', true),
+  MERIDIAN_TAKE_PROFIT_PCT: num('MERIDIAN_TAKE_PROFIT_PCT', 5),
+  MERIDIAN_TRAILING_TRIGGER_PCT: num('MERIDIAN_TRAILING_TRIGGER_PCT', 3),
+  MERIDIAN_TRAILING_DROP_PCT: num('MERIDIAN_TRAILING_DROP_PCT', 1.5),
+  MERIDIAN_OOR_BINS_TO_CLOSE: num('MERIDIAN_OOR_BINS_TO_CLOSE', 10),
+  MERIDIAN_OOR_WAIT_MIN: num('MERIDIAN_OOR_WAIT_MIN', 30),
+  MERIDIAN_MIN_FEE_TVL_24H_PCT: num('MERIDIAN_MIN_FEE_TVL_24H_PCT', 7),
+  MERIDIAN_MIN_AGE_YIELD_CHECK_MIN: num('MERIDIAN_MIN_AGE_YIELD_CHECK_MIN', 60),
+  MERIDIAN_CONFIRM_TICKS: num('MERIDIAN_CONFIRM_TICKS', 2),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.

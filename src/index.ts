@@ -41,11 +41,14 @@ import { auditRejectReason } from './logic/tokenAudit.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
+import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct } from './logic/meridianExit.js';
+import { ladderBounds } from './logic/ladderRange.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
 
+const meridianConfirmer = new ExitConfirmer();
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
 
 const blacklistPools = new Map<string, number>();
@@ -453,7 +456,7 @@ async function tick(): Promise<void> {
   lastSnap = { valueSol: currentValueSol, profitPct: currentProfitPct, peakPct: ctx.peakProfitPct };
 
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
-  const { decision, reasons } = evaluatePosition({
+  const evald = evaluatePosition({
     initialDepositUsd: ctx.initialDepositSol,
     currentValueUsd: currentValueSol,
     rebalanceTimestamps: ctx.rebalanceTimestamps,
@@ -466,6 +469,12 @@ async function tick(): Promise<void> {
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
     peakProfitPct: ctx.peakProfitPct,
   }, now);
+  // Meridian mode: its deterministic close rules replace our own exit heuristics (volume drop, tiered TP, idle rebalance, upside break).
+  // Only the stop loss (STOP_LOSS_PCT) is kept from evaluatePosition.
+  const meridianRules = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
+  const slHit = evald.reasons.some((r) => r.includes('STOP_LOSS_PCT'));
+  const decision = meridianRules ? (slHit ? 'HARD_EXIT' : 'HOLD') : evald.decision;
+  const reasons = meridianRules ? (slHit ? evald.reasons.filter((r) => r.includes('STOP_LOSS_PCT')) : []) : evald.reasons;
 
   logger.info(`[index] pool ${ctx.poolAddress} health check`, {
     decision,
@@ -476,7 +485,7 @@ async function tick(): Promise<void> {
     currentBinId: binStatus.currentBinId,
   });
 
-  if (decision !== 'HARD_EXIT' && shouldExitOnUpsideBreak({
+  if (!meridianRules && decision !== 'HARD_EXIT' && shouldExitOnUpsideBreak({
     exitAfterMin: ctx.ladderBins !== undefined ? env.LADDER_OOR_EXIT_MIN : env.UPSIDE_BREAK_EXIT_MIN,
     isOutOfRange: binStatus.isOutOfRange,
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
@@ -497,6 +506,50 @@ async function tick(): Promise<void> {
       currentPool = await reconcilePoolStateAfterFailure(ctx);
     }
     return;
+  }
+
+  if (meridianRules && decision === 'HOLD') {
+    let binsAbove = 0;
+    if (ctx.centerBinId !== null && ctx.ladderBins !== undefined) {
+      const { lo, hi } = ladderBounds(ctx.centerBinId, ctx.ladderBins, ctx.xIsSol);
+      binsAbove = ctx.xIsSol ? lo - binStatus.currentBinId : binStatus.currentBinId - hi;
+    }
+    const ageMinutes = ctx.openedAtMs !== undefined ? (now - ctx.openedAtMs) / 60_000 : null;
+    const signal = meridianExitSignal(
+      {
+        pnlPct: currentProfitPct,
+        peakPnlPct: ctx.peakProfitPct,
+        binsAbove,
+        isOutOfRange: binStatus.isOutOfRange,
+        minutesOutOfRange: ctx.outOfRangeSinceMs !== null ? (now - ctx.outOfRangeSinceMs) / 60_000 : null,
+        feePerTvl24hPct: ageMinutes !== null && ageMinutes >= env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN ? await getPoolFeeTvl24hPct(ctx.poolAddress) : null,
+        ageMinutes,
+      },
+      {
+        takeProfitPct: env.MERIDIAN_TAKE_PROFIT_PCT,
+        trailingTriggerPct: env.MERIDIAN_TRAILING_TRIGGER_PCT,
+        trailingDropPct: env.MERIDIAN_TRAILING_DROP_PCT,
+        outOfRangeBinsToClose: env.MERIDIAN_OOR_BINS_TO_CLOSE,
+        outOfRangeWaitMinutes: env.MERIDIAN_OOR_WAIT_MIN,
+        minFeePerTvl24hPct: env.MERIDIAN_MIN_FEE_TVL_24H_PCT,
+        minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
+      },
+    );
+    if (signal) logger.info('[index] meridian rule signal', { pool: ctx.poolAddress, signal });
+    if (meridianConfirmer.hit(signal, env.MERIDIAN_CONFIRM_TICKS)) {
+      logger.warn('[index] meridian close rule confirmed — closing', { pool: ctx.poolAddress, signal });
+      try {
+        noteExit(ctx, `MERIDIAN: ${signal!.slice(0, 120)}`);
+        currentCapitalSol = await guarded(() =>
+          env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange ? executeDownBreakExit(ctx) : executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false),
+        );
+        currentPool = null;
+      } catch (err) {
+        logger.error('[index] meridian close threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+        currentPool = await reconcilePoolStateAfterFailure(ctx);
+      }
+      return;
+    }
   }
 
   if (decision === 'HARD_EXIT') {
