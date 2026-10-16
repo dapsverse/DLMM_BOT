@@ -248,6 +248,12 @@ export async function getAllPositionPoolAddresses(): Promise<string[]> {
   return [...map.keys()].filter((a) => !isProtectedPool(a));
 }
 
+/** Pool addresses where an arbitrary wallet (not ours) holds open positions. Read-only. */
+export async function getWalletPoolAddresses(walletAddress: string): Promise<string[]> {
+  const map = await withRetry(() => DLMM.getAllLbPairPositionsByUser(connection, new PublicKey(walletAddress)), { maxRetries: 2, baseDelayMs: 2_000, label: 'getWalletPoolAddresses' });
+  return [...map.keys()];
+}
+
 export async function getActiveBin(pool: DlmmPool): Promise<BinLiquidity> {
   return pool.getActiveBin();
 }

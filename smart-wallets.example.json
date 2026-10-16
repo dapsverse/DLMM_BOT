@@ -1,0 +1,5 @@
+{
+  "wallets": [
+    { "name": "example-lp", "address": "<SOLANA_WALLET_ADDRESS>", "category": "alpha", "type": "lp" }
+  ]
+}

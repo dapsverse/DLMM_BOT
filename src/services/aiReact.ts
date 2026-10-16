@@ -6,6 +6,7 @@ import { memoryBlock } from '../logic/aiMemory.js';
 import { buildReactManagerPrompt, buildReactScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
 import { type ManagerDecision, type ScreenerDecision } from '../logic/aiDecision.js';
 import { loadOutcomes } from './aiOutcomes.js';
+import { checkSmartWalletsOnPool } from './smartWallets.js';
 import { logger } from '../utils/logger.js';
 
 const text = (o: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(o).slice(0, 6000) }] });
@@ -125,6 +126,11 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
     if (!candidates.some((c) => c.tokenMint === mint)) return text({ error: 'not an eligible candidate token' });
     return text(await fetchTokenInfo(mint));
   });
+  const checkSmartWallets = tool('check_smart_wallets_on_pool', 'Which tracked smart (LP) wallets currently hold a position in this pool. A hit is a strong signal; none is neutral. Finalists only.', { pool: z.string() }, async ({ pool }) => {
+    note('check_smart_wallets_on_pool', { pool });
+    if (!allowed.has(pool)) return text({ error: 'not an eligible candidate' });
+    return text(await checkSmartWalletsOnPool(pool));
+  });
   const submitDecision = tool(
     'submit_decision',
     'Submit your final decision. Call exactly once. deploy needs pool, bins_below (35-69) and conviction (1-10, logged only); skip if only weak candidates remain.',
@@ -136,11 +142,11 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
       return text({ ok: true, recorded: submitted.action });
     },
   );
-  const server = createSdkMcpServer({ name: 'dlmm', tools: [getCandidates, getPoolDetail, getTokenInfo, submitDecision] });
+  const server = createSdkMcpServer({ name: 'dlmm', tools: [getCandidates, getPoolDetail, getTokenInfo, checkSmartWallets, submitDecision] });
 
   const q = query({
     prompt: buildReactScreenerPrompt(capitalSol, memoryBlock(loadOutcomes()), recentDecisions),
-    options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
+    options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'check_smart_wallets_on_pool', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
   });
   let costUsd: number | null = null;
   let turns = 0;
