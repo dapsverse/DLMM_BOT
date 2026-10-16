@@ -67,7 +67,7 @@ export const STRATEGY = `STRATEGY (Meteora DLMM, SOL-only bid-ask ladder below t
 - If the price dips, the ladder buys the token on the way down at progressively lower prices, and earns trading fees from every swap crossing the bins. If the price then rebounds through the same bins the tokens are sold back for SOL plus fees.
 - If the price rises and stays above the ladder, the position is all SOL and earns nothing; the bot closes it after the configured wait.
 - If the price falls through the whole ladder the position is all token and loses value; the bot's stop-loss limits that.
-- Best case: a pool with high real volume relative to TVL that oscillates inside the ladder. Worst case: a token that bleeds down continuously (knife) or rugs.`;
+- Best case: a pool with high real volume relative to TVL that oscillates inside the ladder.`;
 
 export const LESSONS = `SCREENING CONTEXT (meridian's own filters, already applied before you see candidates): mcap $150k-$10M, TVL $10k-$150k, bin step 80-125, holders >=500, organic >=60, top10 <=60%, bots <=30%, global fees >=30 SOL. Prefer real volume (high organic score, healthy holders, consistent fee/TVL) over wash-traded volume.`;
 
