@@ -425,7 +425,8 @@ export async function closePositionFull(pool: DlmmPool, position: LbPosition): P
 
   const signatures: string[] = [];
   for (const tx of txs) {
-    await withPriorityFee(tx, [wallet.publicKey]);
+    // 69-bin ladders with fees need far more than the default limit: ClaimFee2 ran out of CUs (live 2026-10-16, 388 failed simulations)
+    await withPriorityFee(tx, [wallet.publicKey], LADDER_COMPUTE_UNIT_LIMIT);
     signatures.push(await sendTx(tx, [], 'closePosition'));
   }
   logger.info('[dlmm] position fully closed + rent reclaimed', {
