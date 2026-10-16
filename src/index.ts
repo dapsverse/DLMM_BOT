@@ -464,14 +464,17 @@ async function tick(): Promise<void> {
     ctx.volume1hBaselineSetAtMs = now;
   }
 
-  const currentProfitPct = ctx.initialDepositSol > 0 ? ((currentValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
+  // Meridian's PnL (Meteora's own) includes unclaimed fees: value excludes them, so add them back in meridian mode (TP/trailing/SL all read this).
+  const meridianRules = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
+  const pnlValueSol = meridianRules ? currentValueSol + unclaimedFeesSol : currentValueSol;
+  const currentProfitPct = ctx.initialDepositSol > 0 ? ((pnlValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
   ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
   lastSnap = { valueSol: currentValueSol, profitPct: currentProfitPct, peakPct: ctx.peakProfitPct, feesSol: unclaimedFeesSol };
 
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
   const evald = evaluatePosition({
     initialDepositUsd: ctx.initialDepositSol,
-    currentValueUsd: currentValueSol,
+    currentValueUsd: pnlValueSol,
     rebalanceTimestamps: ctx.rebalanceTimestamps,
     volume1hNowUsd: volume1hNowUsd ?? ctx.volume1hBaselineUsd,
     volume1hBaselineUsd: ctx.volume1hBaselineUsd,
@@ -484,7 +487,6 @@ async function tick(): Promise<void> {
   }, now);
   // Meridian mode: its deterministic close rules replace our own exit heuristics (volume drop, tiered TP, idle rebalance, upside break).
   // Only the stop loss (STOP_LOSS_PCT) is kept from evaluatePosition.
-  const meridianRules = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
   const slHit = evald.reasons.some((r) => r.includes('STOP_LOSS_PCT'));
   const decision = meridianRules ? 'HOLD' : evald.decision;
   const reasons = meridianRules ? [] : evald.reasons;

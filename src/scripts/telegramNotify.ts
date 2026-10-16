@@ -119,7 +119,7 @@ async function tokenHoldings(wallet: string): Promise<{ mint: string; symbol: st
         } catch {
           /* unpriced */
         }
-        if (sol === null || sol >= 0.0005) out.push({ mint, symbol, ui, sol });
+        if (sol === null || sol >= 0.005) out.push({ mint, symbol, ui, sol });
       }
     } catch {
       /* ignore */
@@ -164,6 +164,38 @@ function readState(): { wallet: string | null; pool: string | null; outSince: nu
 const hhmm = (iso: string) => iso.slice(11, 16) + ' UTC';
 const ageMin = (iso: string) => Math.round((Date.now() - Date.parse(iso)) / 60_000);
 
+interface PortfolioPool { poolAddress: string; tokenX: string; tokenY: string; binStep: number; baseFee: number; balancesSol: string; balances: string; unclaimedFees: string; unclaimedFeesSol: string; pnlSol: string; pnlSolPctChange: string; totalDepositSol: string; feePerTvl24h: string; outOfRange: boolean }
+interface Portfolio { solPrice: number; pools: PortfolioPool[] }
+
+/** Meteora portfolio API: per-pool value, fees, PnL (PnL includes unclaimed fees); null if unreachable. */
+async function portfolio(wallet: string): Promise<Portfolio | null> {
+  try {
+    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`)).json()) as { solPrice?: string; pools?: PortfolioPool[] };
+    return { solPrice: Number(j.solPrice ?? 0), pools: j.pools ?? [] };
+  } catch {
+    return null;
+  }
+}
+const sg = (n: number, d = 4) => (n >= 0 ? '+' : '') + n.toFixed(d);
+
+function poolLines(p: PortfolioPool, solPrice: number, detail: boolean): string[] {
+  const val = Number(p.balancesSol), fee = Number(p.unclaimedFeesSol), dep = Number(p.totalDepositSol), pnl = Number(p.pnlSol), pct = Number(p.pnlSolPctChange);
+  const usd = (sol: number) => (solPrice > 0 ? ` ($${(sol * solPrice).toFixed(2)})` : '');
+  const out = [`${p.tokenX}-${p.tokenY}: value ${val.toFixed(4)} SOL${usd(val)}, fees ${fee.toFixed(4)} SOL${usd(fee)}, PnL ${sg(pnl)} SOL${usd(pnl)} (${sg(pct, 2)}%)`];
+  if (detail) {
+    out.push(
+      `deposit: ${dep.toFixed(4)} SOL${usd(dep)}`,
+      `fees generated (unclaimed): ${fee.toFixed(4)} SOL = $${Number(p.unclaimedFees).toFixed(2)}`,
+      `position value now: ${val.toFixed(4)} SOL = $${Number(p.balances).toFixed(2)}`,
+      `PnL incl. fees: ${sg(pnl)} SOL = ${sg(pnl * solPrice, 2).replace(/^([+-])/, '$1$')} (${sg(pct, 2)}%)`,
+      `pool fee/TVL 24h: ${Number(p.feePerTvl24h).toFixed(2)}%, bin step ${p.binStep}, base fee ${p.baseFee}%`,
+      `range: ${p.outOfRange ? 'OUT OF RANGE' : 'in range'}`,
+      `SOL price: $${solPrice.toFixed(2)}`,
+    );
+  }
+  return out;
+}
+
 async function statusText(): Promise<string> {
   const st = readState();
   const lines: string[] = [`bot: ${botAlive() ? 'RUNNING' : 'STOPPED'}`];
@@ -175,7 +207,9 @@ async function statusText(): Promise<string> {
   if (sol !== null) lines.push(`wallet SOL: ${sol.toFixed(4)}`);
   for (const h of holds) lines.push(`holding: ${fmtHold(h)}`);
   if (existsSync('state/manual-orders.json') && readFileSync('state/manual-orders.json', 'utf8').trim() !== '[]') lines.push('manual orders:\n' + (await ops(['orders'], 90_000)));
-  const h = count ? lastHealth() : null;
+  const pf = count ? await portfolio(st.wallet) : null;
+  if (pf?.pools.length) for (const p of pf.pools) lines.push(...poolLines(p, pf.solPrice, false));
+  const h = count && !pf?.pools.length ? lastHealth() : null;
   if (h) lines.push(`pos ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (${hhmm(h.ts)}, ${ageMin(h.ts)}m ago)`);
   return lines.join('\n');
 }
@@ -206,6 +240,15 @@ async function posText(): Promise<string> {
   const count = await onChainPositionCount(st.wallet);
   if (count === 0) return 'no open position on-chain' + (st.pool ? ' (state file still lists one: stale, bot not running or not yet reconciled)' : '');
   if (!st.pool) return count === null ? 'no position in state; on-chain check unavailable' : `${count} position(s) on-chain but none in state`;
+  const pf = await portfolio(st.wallet);
+  if (pf?.pools.length) {
+    const out: string[] = [];
+    for (const p of pf.pools) out.push(`pool ${p.poolAddress}`, ...poolLines(p, pf.solPrice, true), '');
+    const hh = lastHealth();
+    if (hh) out.push(`bot health: bin ${hh.currentBinId}, as of ${hhmm(hh.ts)} (${ageMin(hh.ts)}m ago)`);
+    if (st.outSince) out.push(`out of range since ${hhmm(new Date(st.outSince).toISOString())}`);
+    return out.join('\n').trim();
+  }
   const h = lastHealth();
   const lines = [`pool ${st.pool}`];
   if (h) {
