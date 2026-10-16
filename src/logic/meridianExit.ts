@@ -40,6 +40,12 @@ export function meridianExitSignal(i: MeridianExitInput, c: MeridianExitConfig):
   return null;
 }
 
+/** OOR wait: token_spot is closed fast if price never reaches the range, with more patience once it has been in range. */
+export function oorWaitMinutes(tokenSpot: boolean, reachedRange: boolean, c: { standard: number; spotFirst: number; spotAfterReach: number }): number {
+  if (!tokenSpot) return c.standard;
+  return reachedRange ? c.spotAfterReach : c.spotFirst;
+}
+
 /** Meridian confirms an exit over consecutive polls so one noisy tick cannot close a position. */
 export class ExitConfirmer {
   private key: string | null = null;

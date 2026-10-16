@@ -35,6 +35,7 @@ export interface PersistedPosition {
   ladderBins?: number;
   /** token-only spot strategy (meridian mode); absent = SOL-only ladder or classic */
   tokenSpot?: boolean;
+  tokenSpotReached?: boolean;
 }
 
 export interface PersistedState {

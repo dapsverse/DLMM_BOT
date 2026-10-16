@@ -68,6 +68,8 @@ export interface PoolContext {
   ladderBins?: number;
   /** token-only spot strategy: 100% token deposited as a spot distribution ABOVE the price (ladderBins = its width); absent = SOL-only bid-ask ladder */
   tokenSpot?: boolean;
+  /** token_spot only: price has been inside (or above) the range at least once, which switches the OOR wait from the first-reach timeout to the after-reach one */
+  tokenSpotReached?: boolean;
   /** epoch ms the position was opened (ladder entries) */
   openedAtMs?: number;
   /** AI screener's stated thesis for this entry */

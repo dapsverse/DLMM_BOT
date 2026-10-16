@@ -524,7 +524,8 @@ export const env = {
   // token_spot strategy (ours): spot starts N bins above the price so the ~1% entry friction is covered once price enters the range;
   // shorter OOR wait (also acts as the "price must reach the range" timeout); the AI must be this convinced of a bounce from a local bottom.
   TOKEN_SPOT_START_OFFSET_BINS: num('TOKEN_SPOT_START_OFFSET_BINS', 1),
-  MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN', 15),
+  MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN', 15), // before price first reaches the range
+  MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN', 30), // after it has been in range (bounces are jagged: moonbot/spotbounce.mjs)
   TOKEN_SPOT_MIN_CONVICTION: num('TOKEN_SPOT_MIN_CONVICTION', 8),
   TOKEN_SPOT_MIN_BINS: num('TOKEN_SPOT_MIN_BINS', 20),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),

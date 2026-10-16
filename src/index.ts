@@ -42,7 +42,7 @@ import { auditRejectReason } from './logic/tokenAudit.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
-import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct } from './logic/meridianExit.js';
+import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, oorWaitMinutes } from './logic/meridianExit.js';
 import { ladderBounds } from './logic/ladderRange.js';
 import { closeKindFromReason, cooldownHoursAfterClose, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
@@ -461,6 +461,8 @@ async function tick(): Promise<void> {
     getBinRangeStatus(ctx),
   ]);
   updateOutOfRangeTracking(ctx, binStatus.isOutOfRange);
+  // token_spot: out of range BELOW = still all token (not reached); inside, or above (sold out into SOL), counts as reached
+  if (ctx.tokenSpot && !ctx.tokenSpotReached && (!binStatus.isOutOfRange || !binStatus.tokenBelowRange)) ctx.tokenSpotReached = true;
 
   // Option A (VOLUME_BASELINE_REFRESH_MS, default 0/disabled) — reuses the
   // volume1hNowUsd already fetched above, no extra API call. See env.ts
@@ -552,7 +554,7 @@ async function tick(): Promise<void> {
         trailingTriggerPct: env.MERIDIAN_TRAILING_TRIGGER_PCT,
         trailingDropPct: env.MERIDIAN_TRAILING_DROP_PCT,
         outOfRangeBinsToClose: env.MERIDIAN_OOR_BINS_TO_CLOSE,
-        outOfRangeWaitMinutes: ctx.tokenSpot ? env.MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN : env.MERIDIAN_OOR_WAIT_MIN,
+        outOfRangeWaitMinutes: oorWaitMinutes(!!ctx.tokenSpot, !!ctx.tokenSpotReached, { standard: env.MERIDIAN_OOR_WAIT_MIN, spotFirst: env.MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN, spotAfterReach: env.MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN }),
         minFeePerTvl24hPct: env.MERIDIAN_MIN_FEE_TVL_24H_PCT,
         minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
       },
