@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentEnv, compactCandidates, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
+import { agentEnv, compactCandidates, parseNarrative, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
 
 const allowed = new Set(['POOL_A']);
 const V = (a: Parameters<typeof validateSubmit>[0]) => validateSubmit(a, allowed, 35, 69, 7);
@@ -23,4 +23,9 @@ assert.deepEqual(cc.fields, ['pool', 'tvlUsd', 'feeTvl24hPct', 'priorOutcomes'])
 assert.deepEqual(cc.rows[0], ['A', 123500, null, ['x']]); // 4 significant digits, null kept
 assert.equal(cc.rows[1]![1], 0.0001235);
 assert.deepEqual(compactCandidates([]), { fields: [], rows: [] });
+assert.equal(parseNarrative({ narrative: 'Narrative is being generated', status: 'generating' }), null);
+assert.equal(parseNarrative({ narrative: '  A  dog\n meme  ', status: 'ready' }), 'A dog meme');
+assert.equal(parseNarrative({ narrative: 'x'.repeat(900) })?.length, 500);
+assert.equal(parseNarrative({}), null);
+assert.equal(parseNarrative(null), null);
 console.log('checkAiReact ok');

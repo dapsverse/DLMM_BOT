@@ -169,7 +169,7 @@ export function buildManagerPrompt(p: AiPositionSnapshot, _rules: AiRules, recen
 export function buildReactScreenerPrompt(capitalSol: number, memory: string, recentDecisions: string[]): string {
   return [
     screenerCore(capitalSol, memory, recentDecisions),
-    'Candidates are pre-loaded: call get_candidates. get_pool_detail, get_token_info, get_price_action (5m price structure) and check_smart_wallets_on_pool give more detail. FINISH by calling submit_decision exactly once: action "deploy" (pool, strategy, bins_below, conviction 1-10, reason) or action "skip" (reason, conviction).',
+    'Candidates are pre-loaded: call get_candidates. get_pool_detail, get_token_info, get_token_narrative (the story behind the token), get_price_action (5m price structure) and check_smart_wallets_on_pool give more detail. FINISH by calling submit_decision exactly once: action "deploy" (pool, strategy, bins_below, conviction 1-10, reason) or action "skip" (reason, conviction).',
   ].join('\n\n');
 }
 
