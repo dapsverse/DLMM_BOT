@@ -10,7 +10,14 @@ import { loadOutcomes } from './aiOutcomes.js';
 import { checkSmartWalletsOnPool } from './smartWallets.js';
 import { logger } from '../utils/logger.js';
 
-const text = (o: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(o).slice(0, 6000) }] });
+const text = (o: unknown, maxChars = 6000) => ({ content: [{ type: 'text' as const, text: JSON.stringify(o).slice(0, maxChars) }] });
+
+/** Columnar form of the candidate list: field names once, then one array per pool, numbers at 4 significant digits (about half the tokens of an array of objects). */
+export function compactCandidates(cs: AiCandidate[]): { fields: string[]; rows: unknown[][] } {
+  const fields = Object.keys(cs[0] ?? {});
+  const v = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? Number(x.toPrecision(4)) : x);
+  return { fields, rows: cs.map((c) => fields.map((f) => v((c as unknown as Record<string, unknown>)[f]))) };
+}
 
 /** Subprocess env without wallet/RPC/Telegram secrets (the agent has no shell, but never hand it secrets anyway). */
 export function agentEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
@@ -127,9 +134,9 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
   let submitted: ScreenerDecision | null = null;
   const note = (n: string, a: unknown) => toolCalls.push(`${n} ${JSON.stringify(a)}`.slice(0, 160));
 
-  const getCandidates = tool('get_candidates', 'All pools that passed the hard numeric filters right now, with their metrics, audit data and our own prior outcomes. Call this first.', {}, async () => {
+  const getCandidates = tool('get_candidates', 'All pools that passed the hard numeric filters right now, with their metrics, audit data and our own prior outcomes. Returned as {fields, rows}: each row is one pool, values in the order of fields. Call this first.', {}, async () => {
     note('get_candidates', {});
-    return text(candidates);
+    return text(compactCandidates(candidates), 60_000);
   });
   const getPoolDetail = tool('get_pool_detail', 'Meteora pool detail plus hourly price closes of the last 24h summarised (range %, distance from the 24h high). Finalists only.', { pool: z.string() }, async ({ pool }) => {
     note('get_pool_detail', { pool });

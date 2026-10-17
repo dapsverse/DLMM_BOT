@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentEnv, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
+import { agentEnv, compactCandidates, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
 
 const allowed = new Set(['POOL_A']);
 const V = (a: Parameters<typeof validateSubmit>[0]) => validateSubmit(a, allowed, 35, 69, 7);
@@ -18,4 +18,9 @@ assert.deepEqual(Object.keys(e).sort(), ['HOME', 'PATH']); // secrets never reac
 assert.equal(validateManagerSubmit({ action: 'close', reason: 'dead' }).action, 'close');
 assert.equal(validateManagerSubmit({ action: 'hold', reason: 'ok' }).action, 'hold');
 assert.equal(validateManagerSubmit({ action: 'sell_all' as never, reason: 'x' }).action, 'hold'); // anything unknown = hold
+const cc = compactCandidates([{ pool: 'A', tvlUsd: 123456.789, feeTvl24hPct: null, priorOutcomes: ['x'] }, { pool: 'B', tvlUsd: 0.000123456, feeTvl24hPct: 7.5, priorOutcomes: [] }] as never);
+assert.deepEqual(cc.fields, ['pool', 'tvlUsd', 'feeTvl24hPct', 'priorOutcomes']);
+assert.deepEqual(cc.rows[0], ['A', 123500, null, ['x']]); // 4 significant digits, null kept
+assert.equal(cc.rows[1]![1], 0.0001235);
+assert.deepEqual(compactCandidates([]), { fields: [], rows: [] });
 console.log('checkAiReact ok');
