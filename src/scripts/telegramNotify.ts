@@ -374,13 +374,34 @@ async function askClaude(prompt: string, web = false): Promise<string> {
   return out.trim() || 'no answer';
 }
 
+interface PnlPosition { lowerBinId: number; upperBinId: number; poolActiveBinId: number; unrealizedPnl: { balancesSol: number; balanceTokenX: { amountSol: number; usd: number }; balanceTokenY: { amountSol: number; usd: number } } }
+
+/** Token share of an open position (non-SOL side as % of position value) plus its bin range, from Meteora's per-pool position PnL endpoint; null if unreachable. */
+async function tokenShareLine(wallet: string, pool: string, solMint = 'So11111111111111111111111111111111111111112'): Promise<string | null> {
+  try {
+    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/positions/${pool}/pnl?user=${wallet}&status=open`)).json()) as { tokenX?: string; positions?: PnlPosition[] };
+    const pos = j.positions?.[0];
+    if (!pos) return null;
+    const u = pos.unrealizedPnl;
+    const [tok, sol] = j.tokenX === solMint ? [u.balanceTokenY, u.balanceTokenX] : [u.balanceTokenX, u.balanceTokenY];
+    const tokSol = Number(tok.amountSol), solSol = Number(sol.amountSol), total = tokSol + solSol; // the API returns numbers as strings
+    const pct = total > 0 ? (tokSol / total) * 100 : 0;
+    return `token share now: ${pct.toFixed(1)}% (token ${tokSol.toFixed(4)} SOL = $${Number(tok.usd).toFixed(2)}, SOL ${solSol.toFixed(4)}); active bin ${pos.poolActiveBinId}, ladder ${pos.lowerBinId}..${pos.upperBinId}`;
+  } catch {
+    return null;
+  }
+}
+
 /** /aireport: the facts (status, position detail, peak, last events, last AI decisions) handed to Claude, which writes the same kind of status read-out the user normally asks for in chat. */
 async function aiReportText(): Promise<string> {
   const [status, pos] = await Promise.all([statusText(), posText()]);
   const wallet = readState()?.wallet;
   const pf = wallet ? await portfolio(wallet) : null;
   const names = new Map((pf?.pools ?? []).map((p) => [p.poolAddress, `${p.tokenX}-${p.tokenY}`]));
-  const poolsBlock = (pf?.pools ?? []).map((p) => `${p.tokenX}-${p.tokenY} | address ${p.poolAddress} | https://app.meteora.ag/dlmm/${p.poolAddress}`).join('\n') || 'none';
+  const poolsBlock = (await Promise.all((pf?.pools ?? []).map(async (p) => {
+    const ts = wallet ? await tokenShareLine(wallet, p.poolAddress) : null;
+    return `${p.tokenX}-${p.tokenY} | address ${p.poolAddress} | https://app.meteora.ag/dlmm/${p.poolAddress}${ts ? '\n' + ts : ''}`;
+  }))).join('\n') || 'none';
   let peak = 'n/a';
   try {
     const p = (JSON.parse(readFileSync('state/live-state.json', 'utf8')) as { position?: { peakProfitPct?: number } | null }).position;
@@ -400,7 +421,7 @@ async function aiReportText(): Promise<string> {
   // ponytail: thresholds below are the code defaults (env.ts MERIDIAN_*, STOP_LOSS_PCT); update here if .env.live overrides them
   const prompt = [
     'You report the live state of a Meteora DLMM LP bot (real money) to its owner, in Bahasa Indonesia, terse, no markdown tables, no secrets. Use ONLY the facts below; do not invent numbers.',
-    'Cover: bot up/down; the position (pool, value, fees in SOL and $, PnL incl. fees, in/out of range); how close it is to each exit rule; what happens next; anything notable or worrying in the recent events/decisions. If there is no position, say what the bot is doing instead. Keep it under 1500 characters. ALWAYS name a pool by its token pair (for example FTR-SOL, never only an address) and print its FULL address plus the Meteora link on its own line, copied exactly from OPEN POOLS; never abbreviate or truncate an address.',
+    'Cover: bot up/down; the position (pool, value, fees in SOL and $, PnL incl. fees, in/out of range, CURRENT token share from OPEN POOLS); how close it is to each exit rule; what happens next; anything notable or worrying in the recent events/decisions. If there is no position, say what the bot is doing instead. Keep it under 1500 characters. ALWAYS name a pool by its token pair (for example FTR-SOL, never only an address) and print its FULL address plus the Meteora link on its own line, copied exactly from OPEN POOLS; never abbreviate or truncate an address.',
     'Exit rules (defaults): take profit PnL >= 5%; trailing TP arms at peak PnL >= 3% and closes when PnL drops 1.5 points below the peak; stop loss -25%; out of range >= 30 min (token_spot: 15 min until first reach); price > 10 bins above the ladder; low yield (pool fee/TVL 24h < 7% after 60 min). PnL = value + unclaimed fees vs deposit. The AI manager may also close at any time.',
     `Now (UTC): ${new Date().toISOString().slice(0, 16)}`,
     `OPEN POOLS (name | full address | link):\n${poolsBlock}`,
