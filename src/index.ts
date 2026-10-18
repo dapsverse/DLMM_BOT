@@ -562,7 +562,7 @@ async function tick(): Promise<void> {
         feePerTvl24hPct: ageMinutes !== null && ageMinutes >= env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN ? await getPoolFeeTvl24hPct(ctx.poolAddress) : null,
         ageMinutes,
       },
-      ctx.flipPhase ? flipExitConfig(exitCfg, env.FLIP_TRAILING_TRIGGER_PCT) : exitCfg,
+      ctx.flipPhase ? flipExitConfig(exitCfg, env.FLIP_TRAILING_TRIGGER_PCT, binStatus.tokenBelowRange) : exitCfg,
     );
     if (signal) logger.info('[index] meridian rule signal', { pool: ctx.poolAddress, signal });
     if (meridianConfirmer.hit(signal, env.MERIDIAN_CONFIRM_TICKS)) {
@@ -604,7 +604,7 @@ async function tick(): Promise<void> {
       if (flipConfirmer.hit(want ? 'flip' : null, env.MERIDIAN_CONFIRM_TICKS)) {
         logger.warn('[index] flip confirmed — closing the ladder and redepositing the token above the price', { pool: ctx.poolAddress, tokenSharePct: +sharePct.toFixed(1) });
         try {
-          currentPool = await guarded(() => executeFlip(ctx));
+          currentPool = await guarded(() => executeFlip(ctx, persist));
         } catch (err) {
           logger.error('[index] executeFlip threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
           currentPool = await reconcilePoolStateAfterFailure(ctx);

@@ -392,7 +392,7 @@ export async function openTokenSpotEntry(
  * stays in the wallet as `ctx.bankedSol` and is counted in the cycle PnL. `initialDepositSol` and `peakProfitPct` are untouched.
  * If the redeposit fails after the close, the token is swapped back to SOL and the error rethrown (caller reconciles state).
  */
-export async function executeFlip(ctx: PoolContext): Promise<PoolContext> {
+export async function executeFlip(ctx: PoolContext, onState?: () => void): Promise<PoolContext> {
   if (ctx.ladderBins === undefined || ctx.tokenSpot || ctx.flipPhase) throw new Error('[rebalanceEngine] executeFlip: not a SOL ladder position');
   const [position] = await getUserPositions(ctx.pool);
   if (!position) throw new Error('[rebalanceEngine] executeFlip: no open position on chain');
@@ -401,39 +401,70 @@ export async function executeFlip(ctx: PoolContext): Promise<PoolContext> {
   const expectedOther = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(new BN(ctx.xIsSol ? feeY : feeX));
   if (!expectedOther.gtn(0)) throw new Error('[rebalanceEngine] executeFlip: position holds no token to flip');
   const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+  const depositIsX = !ctx.xIsSol; // the deposited token is X when the memecoin is X (SOL is Y)
+  const bankedSol = Number(solRaw.toString()) / LAMPORTS_PER_SOL;
   logger.warn('[rebalanceEngine] FLIP: closing the SOL ladder to redeposit its token above the price', {
     pool: ctx.poolAddress,
-    bankedSol: Number(solRaw.toString()) / LAMPORTS_PER_SOL,
+    bankedSol,
     expectedTokenRaw: expectedOther.toString(),
   });
-  await closePositionFull(ctx.pool, position);
+  try {
+    await closePositionFull(ctx.pool, position);
+  } catch (err) {
+    // the close may have landed although its confirmation threw: trust the chain, not the exception
+    const [still] = await getUserPositions(ctx.pool);
+    if (still) throw err;
+    logger.warn('[rebalanceEngine] FLIP: close reported an error but the position is gone on chain, continuing', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+  }
+  // From here the SOL is banked. Record it BEFORE the redeposit and persist, so a crash or a redeposit that lands but throws never loses it
+  // (otherwise the cycle PnL misses ~20% of the value and the stop loss fires falsely).
+  ctx.flipPhase = true;
+  ctx.bankedSol = bankedSol;
+  onState?.();
   let result;
   try {
-    const tokenAmount = await waitForTokenBalance(otherMint, expectedOther.muln(95).divn(100));
-    // deposited token is X when the memecoin is X (SOL is Y): the flag of openLadderPosition means "deposited side is X"
-    result = await openLadderPosition(ctx.pool, !ctx.xIsSol, tokenAmount, ctx.ladderBins, StrategyType.BidAsk, env.TOKEN_SPOT_START_OFFSET_BINS);
+    const held = await waitForTokenBalance(otherMint, expectedOther.muln(95).divn(100));
+    // never redeposit more than the close returned: older dust of the same mint would inflate the position above its basis
+    result = await openLadderPosition(ctx.pool, depositIsX, BN.min(held, expectedOther), ctx.ladderBins, StrategyType.BidAsk, env.TOKEN_SPOT_START_OFFSET_BINS);
   } catch (err) {
+    const [landed] = await getUserPositions(ctx.pool);
+    if (landed) {
+      // the deposit landed although the call threw: adopt the position that exists on chain
+      ctx.centerBinId = flipCenterFromBounds(landed.positionData.lowerBinId, landed.positionData.upperBinId, depositIsX);
+      ctx.outOfRangeSinceMs = null;
+      ctx.inRangeSinceMs = null;
+      logger.warn('[rebalanceEngine] FLIP: redeposit threw but the position exists on chain, adopting it', { pool: ctx.poolAddress, centerBinId: ctx.centerBinId, error: err instanceof Error ? err.message : String(err) });
+      return ctx;
+    }
+    ctx.flipPhase = false;
+    ctx.bankedSol = undefined;
     logger.error('[rebalanceEngine] FLIP redeposit failed after the close — swapping the token back to SOL', {
       pool: ctx.poolAddress,
       otherMint,
       error: err instanceof Error ? err.message : String(err),
     });
-    const stuck = await getTokenBalance(otherMint);
+    let stuck = await getTokenBalance(otherMint);
+    if (!stuck.gtn(0)) {
+      // a stale read (same race as the BATON incident): wait for the real balance, else record the expected amount as pending
+      try {
+        stuck = await waitForTokenBalance(otherMint, expectedOther.muln(95).divn(100));
+      } catch {
+        pendingSwapBack = { mint: otherMint, amount: expectedOther.toString() };
+      }
+    }
     if (stuck.gtn(0)) await swapBackOrPend(otherMint, stuck, 'flip redeposit rollback');
     throw err;
   }
   ctx.centerBinId = result.centerBinId;
-  ctx.flipPhase = true;
-  ctx.bankedSol = Number(solRaw.toString()) / LAMPORTS_PER_SOL;
   ctx.outOfRangeSinceMs = null;
   ctx.inRangeSinceMs = null;
-  logger.warn('[rebalanceEngine] FLIP complete: token-only bid-ask is live above the price', { pool: ctx.poolAddress, centerBinId: result.centerBinId, bankedSol: ctx.bankedSol });
+  logger.warn('[rebalanceEngine] FLIP complete: token-only bid-ask is live above the price', { pool: ctx.poolAddress, centerBinId: result.centerBinId, bankedSol });
   return ctx;
 }
 
 export { estimateCycleGasCostSol } from './costEstimate.js';
 import { estimateBinRentSol } from './costEstimate.js';
-import { isTokenSide } from './flip.js';
+import { isTokenSide, flipCenterFromBounds } from './flip.js';
 
 // claimFeesOnly (fee-threshold REBALANCE while still in-range) removed
 // 2026-09-26 — see riskManager.ts's removal note. Fees are now only ever

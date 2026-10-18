@@ -1,7 +1,8 @@
 import { getWalletPubkey } from '../services/solana.js';
-import { openPool, getAllPositionPoolAddresses } from '../services/meteoraDLMM.js';
+import { openPool, getAllPositionPoolAddresses, getUserPositions } from '../services/meteoraDLMM.js';
 import { getVolume1hUsd } from '../services/meteoraScanner.js';
 import { applyStaleTimers, loadState, reconcileBoot, type BootPlan, type PersistedState } from '../services/stateStore.js';
+import { flipCenterFromBounds } from './flip.js';
 import { contextFromPersisted, rebuildContextFromChain, type PoolContext } from './rebalanceEngine.js';
 
 export interface BootRecovery {
@@ -27,7 +28,13 @@ export async function recoverOnBoot(nowMs = Date.now()): Promise<BootRecovery> {
   const pool = await openPool(plan.poolAddress);
   if (plan.fromState && state?.position) {
     const pos = applyStaleTimers(state.position, state.savedAtMs, nowMs);
-    return { plan, state, ctx: contextFromPersisted(pos, pool), source: 'state' };
+    const ctx = contextFromPersisted(pos, pool);
+    if (ctx.flipPhase) {
+      // a flip persisted before its redeposit landed may hold a stale anchor: re-derive it from the position on chain
+      const [onChain] = await getUserPositions(pool);
+      if (onChain) ctx.centerBinId = flipCenterFromBounds(onChain.positionData.lowerBinId, onChain.positionData.upperBinId, !ctx.xIsSol);
+    }
+    return { plan, state, ctx, source: 'state' };
   }
   const ctx = await rebuildContextFromChain(pool, plan.poolAddress);
   const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;

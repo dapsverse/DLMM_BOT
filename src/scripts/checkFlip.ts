@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig, flipPromptInfo } from '../logic/flip.js';
+import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig, flipPromptInfo, flipCenterFromBounds } from '../logic/flip.js';
+import { ladderBounds } from '../logic/ladderRange.js';
 import { buildReactScreenerPrompt, buildReactManagerPrompt } from '../logic/aiPrompts.js';
 import { meridianExitSignal, type MeridianExitConfig, type MeridianExitInput } from '../logic/meridianExit.js';
 import { parseState, STATE_VERSION } from '../services/stateStore.js';
@@ -32,7 +33,7 @@ near(pnlBasisSol(0.8, 0.02, 0, true), 0.82);
 
 // flip exit rules
 const base: MeridianExitConfig = { takeProfitPct: 5, trailingTriggerPct: 3, trailingDropPct: 1.5, outOfRangeBinsToClose: 10, outOfRangeWaitMinutes: 30, minFeePerTvl24hPct: 7, minAgeBeforeYieldCheckMin: 60 };
-const flipCfg = flipExitConfig(base, 5);
+const flipCfg = flipExitConfig(base, 5, true);
 assert.equal(flipCfg.trailingDropPct, 1.5);
 assert.equal(flipCfg.outOfRangeBinsToClose, 10);
 const inp: MeridianExitInput = { pnlPct: 0, peakPnlPct: 0, binsAbove: 0, isOutOfRange: false, minutesOutOfRange: null, feePerTvl24hPct: 20, ageMinutes: 120 };
@@ -44,8 +45,19 @@ assert.equal(sig({ pnlPct: 3.6, peakPnlPct: 5 }), null); // armed, dropped only 
 assert.match(sig({ pnlPct: 3.4, peakPnlPct: 5.1 })!, /^trailing TP/); // armed, dropped 1.7
 assert.match(sig({ binsAbove: 11 })!, /^pumped far above/);
 assert.match(sig({ feePerTvl24hPct: 6 })!, /^low yield/);
+// above the range (token sold, all SOL, earning nothing) the standard OOR timer still applies; only the wait-for-bounce side has none
+const above = flipExitConfig(base, 5, false);
+assert.equal(meridianExitSignal({ ...inp, isOutOfRange: true, minutesOutOfRange: 29 }, above), null);
+assert.match(meridianExitSignal({ ...inp, isOutOfRange: true, minutesOutOfRange: 30 }, above)!, /^out of range/);
+assert.equal(above.takeProfitPct, Infinity);
 // normal config is untouched
 assert.match(meridianExitSignal({ ...inp, pnlPct: 5 }, base)!, /^take profit/);
+
+// center of a flip position re-derived from its on-chain bin range (inverse of ladderBounds), both token sides
+for (const depositIsX of [true, false]) {
+  const b = ladderBounds(-373, 60, depositIsX);
+  assert.equal(flipCenterFromBounds(b.lo, b.hi, depositIsX), -373);
+}
 
 // state files with and without the flip fields both parse
 const wallet = 'W';

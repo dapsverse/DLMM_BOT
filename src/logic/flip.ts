@@ -38,10 +38,16 @@ export function pnlBasisSol(valueSol: number, feesSol: number, bankedSol: number
 
 /**
  * Exit rules of the flip phase: no fixed TP (the final TP is the "pumped far above range" close), trailing arms at
- * `trailingTriggerPct`, no OOR timer (wait for the bounce; SL is handled by the caller). Everything else is meridian's.
+ * `trailingTriggerPct`, no OOR timer while the price is BELOW the range (`waitForBounce`: wait for the bounce; SL is handled by
+ * the caller). Above the range (token sold out, all SOL, earning nothing) the standard OOR wait still applies. Everything else is meridian's.
  */
-export function flipExitConfig(base: MeridianExitConfig, trailingTriggerPct: number): MeridianExitConfig {
-  return { ...base, takeProfitPct: Infinity, trailingTriggerPct, outOfRangeWaitMinutes: Infinity };
+export function flipExitConfig(base: MeridianExitConfig, trailingTriggerPct: number, waitForBounce: boolean): MeridianExitConfig {
+  return { ...base, takeProfitPct: Infinity, trailingTriggerPct, outOfRangeWaitMinutes: waitForBounce ? Infinity : base.outOfRangeWaitMinutes };
+}
+
+/** Inverse of ladderBounds: the anchor edge (`centerBinId`) of a token-only position from its on-chain bin range. depositIsX = the deposited token is X. */
+export function flipCenterFromBounds(lowerBinId: number, upperBinId: number, depositIsX: boolean): number {
+  return depositIsX ? lowerBinId : upperBinId;
 }
 
 /** What the AI prompts need to describe the flip; null when the flip is off (never describe behaviour that is disabled). */
