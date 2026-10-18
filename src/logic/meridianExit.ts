@@ -40,6 +40,15 @@ export function meridianExitSignal(i: MeridianExitInput, c: MeridianExitConfig):
   return null;
 }
 
+/**
+ * A confirmed trailing TP is NOT carried out when the PnL is already below `floorPct` (user decision 2026-10-18): the 2-tick confirmation
+ * lets a fast dump overshoot the trailing distance (mucron-SOL: peak 4.64% -> 1.81% -> -3.97% in 15 s), and closing there only realises
+ * a loss. The caller keeps the position (peak reset) so the ladder can keep filling and, at 80% token, flip. Meridian itself has no floor.
+ */
+export function trailingBlockedByFloor(signal: string | null, pnlPct: number, floorPct: number): boolean {
+  return signal !== null && signal.startsWith('trailing TP') && pnlPct < floorPct;
+}
+
 /** OOR wait: token_spot is closed fast if price never reaches the range, with more patience once it has been in range. */
 export function oorWaitMinutes(tokenSpot: boolean, reachedRange: boolean, c: { standard: number; spotFirst: number; spotAfterReach: number }): number {
   if (!tokenSpot) return c.standard;

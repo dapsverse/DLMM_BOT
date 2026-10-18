@@ -44,7 +44,7 @@ import { auditRejectReason } from './logic/tokenAudit.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
-import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, oorWaitMinutes } from './logic/meridianExit.js';
+import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
 import { ladderBounds } from './logic/ladderRange.js';
 import { closeKindFromReason, cooldownHoursAfterClose, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
@@ -574,6 +574,12 @@ async function tick(): Promise<void> {
     );
     if (signal) logger.info('[index] meridian rule signal', { pool: ctx.poolAddress, signal });
     if (meridianConfirmer.hit(signal, env.MERIDIAN_CONFIRM_TICKS)) {
+      if (trailingBlockedByFloor(signal, currentProfitPct, env.TRAILING_MIN_PNL_PCT)) {
+        // overshoot: the dump outran the 2-tick confirmation, so closing now would only realise a loss. Keep the position and re-arm from here.
+        ctx.peakProfitPct = currentProfitPct;
+        logger.warn('[index] trailing TP confirmed below the PnL floor: NOT closing, peak reset to current PnL', { pool: ctx.poolAddress, signal, pnlPct: +currentProfitPct.toFixed(2), floorPct: env.TRAILING_MIN_PNL_PCT });
+        return;
+      }
       logger.warn('[index] meridian close rule confirmed — closing', { pool: ctx.poolAddress, signal });
       try {
         noteExit(ctx, `MERIDIAN: ${signal!.slice(0, 120)}`);

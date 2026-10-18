@@ -516,6 +516,8 @@ export const env = {
   MERIDIAN_TAKE_PROFIT_PCT: num('MERIDIAN_TAKE_PROFIT_PCT', 5),
   MERIDIAN_TRAILING_TRIGGER_PCT: num('MERIDIAN_TRAILING_TRIGGER_PCT', 3),
   MERIDIAN_TRAILING_DROP_PCT: num('MERIDIAN_TRAILING_DROP_PCT', 1.5),
+  // A confirmed trailing TP below this PnL % is not closed (peak reset, position kept; user decision 2026-10-18). Meridian has no floor. 0 = never close a trailing TP at a loss.
+  TRAILING_MIN_PNL_PCT: num('TRAILING_MIN_PNL_PCT', 0),
   MERIDIAN_OOR_BINS_TO_CLOSE: num('MERIDIAN_OOR_BINS_TO_CLOSE', 10),
   MERIDIAN_OOR_WAIT_MIN: num('MERIDIAN_OOR_WAIT_MIN', 30),
   MERIDIAN_MIN_FEE_TVL_24H_PCT: num('MERIDIAN_MIN_FEE_TVL_24H_PCT', 7),

@@ -25,9 +25,19 @@ assert.equal(k.hit('take profit: a', 2), false);
 assert.equal(k.hit(null, 2), false);
 assert.equal(k.hit('take profit: a', 2), false);
 assert.equal(k.hit('low yield: x', 2), false);
-import { oorWaitMinutes } from '../logic/meridianExit.js';
+import { oorWaitMinutes, trailingBlockedByFloor } from '../logic/meridianExit.js';
 const w = { standard: 30, spotFirst: 15, spotAfterReach: 30 };
 assert.equal(oorWaitMinutes(false, false, w), 30);
 assert.equal(oorWaitMinutes(true, false, w), 15);
 assert.equal(oorWaitMinutes(true, true, w), 30);
+// trailing TP is not carried out below the PnL floor (an overshoot: closing would only realise a loss); every other signal is untouched
+const tr = 'trailing TP: peak 4.64% -> -3.97% (dropped >= 1.5%)';
+assert.equal(trailingBlockedByFloor(tr, -3.97, 0), true); // the mucron-SOL case
+assert.equal(trailingBlockedByFloor(tr, 0.93, 0), false); // still in profit: lock it
+assert.equal(trailingBlockedByFloor(tr, 0, 0), false); // exactly at the floor is not below it
+assert.equal(trailingBlockedByFloor(tr, 0.93, 1), true); // a +1% floor would hold this one too
+assert.equal(trailingBlockedByFloor('take profit: PnL 5.2% >= 5%', -5, 0), false);
+assert.equal(trailingBlockedByFloor('stop loss: STOP_LOSS_PCT', -30, 0), false);
+assert.equal(trailingBlockedByFloor('out of range 31m >= 30m', -5, 0), false);
+assert.equal(trailingBlockedByFloor(null, -5, 0), false);
 console.log('checkMeridianExit ok');
