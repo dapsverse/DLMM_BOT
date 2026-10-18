@@ -32,7 +32,9 @@ assert.equal(parseNarrative(null), null);
 // narrative / smart-wallet rule: a real consideration that moves conviction (not a skip rule, not a footnote); an empty narrative feed is filled by one web search first
 for (const p of [buildReactScreenerPrompt(0.3, '', [], null), buildScreenerPrompt([], 0.3, [], '', null)]) {
   assert.match(p, /real consideration/);
-  assert.doesNotMatch(p, /weak/i); // a full factor, neither a veto nor a footnote
+  assert.doesNotMatch(p, /weak negative/);
+  const rule = p.split('\n').find((l) => l.startsWith('- narrative and smart wallets'))!;
+  assert.ok(rule && !/weak/i.test(rule)); // a full factor, neither a veto nor a footnote (meridian's own text elsewhere still says "weak narrative")
   assert.doesNotMatch(p, /no narrative \+ no smart wallets → skip/);
   assert.match(p, /WebSearch/);
   assert.match(p, /conviction/);
