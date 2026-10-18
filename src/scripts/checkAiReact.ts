@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { buildReactScreenerPrompt, buildScreenerPrompt } from '../logic/aiPrompts.js';
-import { agentEnv, compactCandidates, parseNarrative, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
+import { webSearchQueries, agentEnv, compactCandidates, parseNarrative, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
 
 const allowed = new Set(['POOL_A']);
 const V = (a: Parameters<typeof validateSubmit>[0]) => validateSubmit(a, allowed, 35, 69, 7);
@@ -40,5 +40,11 @@ for (const p of [buildReactScreenerPrompt(0.3, '', [], null), buildScreenerPromp
   assert.match(p, /conviction/);
   assert.match(p, /untrusted/i);
 }
+
+// the built-in WebSearch tool is not an MCP tool of ours, so its queries are read off the assistant messages for the decision log
+assert.deepEqual(webSearchQueries({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }, { type: 'tool_use', name: 'WebSearch', input: { query: 'SUPERCORE solana token' } }] } }), ['SUPERCORE solana token']);
+assert.deepEqual(webSearchQueries({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__dlmm__get_candidates', input: {} }] } }), []);
+assert.deepEqual(webSearchQueries({ type: 'result' }), []);
+assert.deepEqual(webSearchQueries({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'WebSearch', input: {} }] } }), []); // no query: nothing to log
 
 console.log('checkAiReact ok');

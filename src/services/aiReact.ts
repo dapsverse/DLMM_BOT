@@ -140,6 +140,17 @@ function sdkOptions(server: ReturnType<typeof createSdkMcpServer>, toolNames: st
   };
 }
 
+/** Pure: queries of the built-in WebSearch tool in one SDK message (not an MCP tool of ours, so the handlers' note() never sees it). */
+export function webSearchQueries(m: unknown): string[] {
+  const msg = m as { type?: string; message?: { content?: unknown } };
+  if (msg?.type !== 'assistant' || !Array.isArray(msg.message?.content)) return [];
+  const out: string[] = [];
+  for (const b of msg.message.content as { type?: string; name?: string; input?: { query?: unknown } }[]) {
+    if (b?.type === 'tool_use' && b.name === 'WebSearch' && typeof b.input?.query === 'string') out.push(b.input.query);
+  }
+  return out;
+}
+
 export interface ReactResult {
   decision: ScreenerDecision;
   toolCalls: string[];
@@ -211,6 +222,7 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
   try {
     for await (const m of q) {
       if (m.type === 'assistant') turns++;
+      for (const query of webSearchQueries(m)) note('WebSearch', { query });
       if (m.type === 'result') costUsd = typeof m.total_cost_usd === 'number' ? m.total_cost_usd : null;
     }
   } catch (err) {
