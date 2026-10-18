@@ -18,7 +18,7 @@
 - Commit messages end with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 - `FLIP_ENABLED` defaults to `false`. Do NOT turn it on in `.env.live` and do NOT restart the bot: the user decides both.
 - Flip trigger: token share (`otherPrincipalSol / currentValueSol * 100`) >= `FLIP_TOKEN_SHARE_PCT` = 80, confirmed over `MERIDIAN_CONFIRM_TICKS` (2) ticks, only for ladder positions that are not `token_spot` and not already in flip phase.
-- Flip phase: SL = existing `STOP_LOSS_PCT` on the ORIGINAL `initialDepositSol` basis; no fixed TP; trailing arms at `FLIP_TRAILING_TRIGGER_PCT` = 5, drop stays `MERIDIAN_TRAILING_DROP_PCT` = 1.5; no OOR-time exit; "price above range by > `MERIDIAN_OOR_BINS_TO_CLOSE`" stays; low-yield rule and AI manager stay on; one position may flip any number of times is NOT a feature (a flip position never flips again; it waits).
+- Flip phase: SL = existing `STOP_LOSS_PCT` on the ORIGINAL `initialDepositSol` basis; no fixed TP; trailing arms at `FLIP_TRAILING_TRIGGER_PCT` = 5, drop stays `MERIDIAN_TRAILING_DROP_PCT` = 1.5; no OOR-time exit; "price above range by > `MERIDIAN_OOR_BINS_TO_CLOSE`" stays; low-yield rule and AI manager stay on; a flip position never flips again and never recenters (it waits for the bounce).
 - PnL basis in flip phase: `value + unclaimed fees + bankedSol` vs `initialDepositSol`. `bankedSol` = SOL principal + SOL fees read from the position right before the flip close; it stays in the wallet.
 - No Jupiter swap in the flip. If the redeposit fails after the close, the token is swapped back to SOL through the existing `swapBackOrPend`.
 
@@ -81,9 +81,10 @@ assert.equal(shouldFlip({ ...on, sharePct: 95, tokenSpot: true }), false);
 assert.equal(shouldFlip({ ...on, sharePct: 95, flipPhase: true }), false);
 
 // PnL basis: banked SOL counts, fees only when asked
-assert.equal(pnlBasisSol(0.8, 0.02, 0.2, true), 1.02);
-assert.equal(pnlBasisSol(0.8, 0.02, 0.2, false), 1.0);
-assert.equal(pnlBasisSol(0.8, 0.02, 0, true), 0.82);
+const near = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`);
+near(pnlBasisSol(0.8, 0.02, 0.2, true), 1.02);
+near(pnlBasisSol(0.8, 0.02, 0.2, false), 1.0);
+near(pnlBasisSol(0.8, 0.02, 0, true), 0.82);
 
 // flip exit rules
 const base: MeridianExitConfig = { takeProfitPct: 5, trailingTriggerPct: 3, trailingDropPct: 1.5, outOfRangeBinsToClose: 10, outOfRangeWaitMinutes: 30, minFeePerTvl24hPct: 7, minAgeBeforeYieldCheckMin: 60 };
@@ -95,8 +96,8 @@ const sig = (o: Partial<MeridianExitInput>) => meridianExitSignal({ ...inp, ...o
 assert.equal(sig({ pnlPct: 9, peakPnlPct: 9 }), null); // no fixed TP
 assert.equal(sig({ isOutOfRange: true, minutesOutOfRange: 600 }), null); // no OOR timer
 assert.equal(sig({ pnlPct: 4, peakPnlPct: 4.9 }), null); // trailing not armed below 5
-assert.equal(sig({ pnlPct: 3.4, peakPnlPct: 5 }), null);
-assert.match(sig({ pnlPct: 3.4, peakPnlPct: 5 + 0.0 + 0.1 })!, /^trailing TP/); // armed, dropped 1.7
+assert.equal(sig({ pnlPct: 3.6, peakPnlPct: 5 }), null); // armed, dropped only 1.4
+assert.match(sig({ pnlPct: 3.4, peakPnlPct: 5.1 })!, /^trailing TP/); // armed, dropped 1.7
 assert.match(sig({ binsAbove: 11 })!, /^pumped far above/);
 assert.match(sig({ feePerTvl24hPct: 6 })!, /^low yield/);
 // normal config is untouched
