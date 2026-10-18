@@ -17,6 +17,7 @@ import {
   walletCapitalSol,
   openLadderEntry,
   openTokenSpotEntry,
+  executeFlip,
   retryPendingSwapBack,
   getPendingSwapBack,
   restorePendingSwapBack,
@@ -49,9 +50,10 @@ import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
-import { isTokenSide, strategyLabel } from './logic/flip.js';
+import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig } from './logic/flip.js';
 
 const meridianConfirmer = new ExitConfirmer();
+const flipConfirmer = new ExitConfirmer();
 // per-pool close history for meridian's cooldowns; in memory only (lost on restart)
 const closeHistory = new Map<string, CloseRec[]>();
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
@@ -475,10 +477,11 @@ async function tick(): Promise<void> {
 
   // Meridian's PnL (Meteora's own) includes unclaimed fees: value excludes them, so add them back in meridian mode (TP/trailing/SL all read this).
   const meridianRules = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
-  const pnlValueSol = meridianRules ? currentValueSol + unclaimedFeesSol : currentValueSol;
+  // flip phase: the SOL banked at the flip sits in the wallet; the cycle PnL (SL, trailing, peak) must count it
+  const pnlValueSol = pnlBasisSol(currentValueSol, unclaimedFeesSol, ctx.bankedSol ?? 0, meridianRules);
   const currentProfitPct = ctx.initialDepositSol > 0 ? ((pnlValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
   ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
-  lastSnap = { valueSol: currentValueSol, profitPct: currentProfitPct, peakPct: ctx.peakProfitPct, feesSol: unclaimedFeesSol };
+  lastSnap = { valueSol: currentValueSol + (ctx.bankedSol ?? 0), profitPct: currentProfitPct, peakPct: ctx.peakProfitPct, feesSol: unclaimedFeesSol };
 
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
   const evald = evaluatePosition({
@@ -540,6 +543,15 @@ async function tick(): Promise<void> {
     }
     const ageMinutes = ctx.openedAtMs !== undefined ? (now - ctx.openedAtMs) / 60_000 : null;
     const slReason = slHit ? evald.reasons.find((r) => r.includes('STOP_LOSS_PCT')) : undefined;
+    const exitCfg = {
+      takeProfitPct: env.MERIDIAN_TAKE_PROFIT_PCT,
+      trailingTriggerPct: env.MERIDIAN_TRAILING_TRIGGER_PCT,
+      trailingDropPct: env.MERIDIAN_TRAILING_DROP_PCT,
+      outOfRangeBinsToClose: env.MERIDIAN_OOR_BINS_TO_CLOSE,
+      outOfRangeWaitMinutes: oorWaitMinutes(!!ctx.tokenSpot, !!ctx.tokenSpotReached, { standard: env.MERIDIAN_OOR_WAIT_MIN, spotFirst: env.MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN, spotAfterReach: env.MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN }),
+      minFeePerTvl24hPct: env.MERIDIAN_MIN_FEE_TVL_24H_PCT,
+      minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
+    };
     const signal = slReason !== undefined ? `stop loss: ${slReason}` : meridianExitSignal(
       {
         pnlPct: currentProfitPct,
@@ -550,15 +562,7 @@ async function tick(): Promise<void> {
         feePerTvl24hPct: ageMinutes !== null && ageMinutes >= env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN ? await getPoolFeeTvl24hPct(ctx.poolAddress) : null,
         ageMinutes,
       },
-      {
-        takeProfitPct: env.MERIDIAN_TAKE_PROFIT_PCT,
-        trailingTriggerPct: env.MERIDIAN_TRAILING_TRIGGER_PCT,
-        trailingDropPct: env.MERIDIAN_TRAILING_DROP_PCT,
-        outOfRangeBinsToClose: env.MERIDIAN_OOR_BINS_TO_CLOSE,
-        outOfRangeWaitMinutes: oorWaitMinutes(!!ctx.tokenSpot, !!ctx.tokenSpotReached, { standard: env.MERIDIAN_OOR_WAIT_MIN, spotFirst: env.MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN, spotAfterReach: env.MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN }),
-        minFeePerTvl24hPct: env.MERIDIAN_MIN_FEE_TVL_24H_PCT,
-        minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
-      },
+      ctx.flipPhase ? flipExitConfig(exitCfg, env.FLIP_TRAILING_TRIGGER_PCT) : exitCfg,
     );
     if (signal) logger.info('[index] meridian rule signal', { pool: ctx.poolAddress, signal });
     if (meridianConfirmer.hit(signal, env.MERIDIAN_CONFIRM_TICKS)) {
@@ -584,6 +588,31 @@ async function tick(): Promise<void> {
         }
       }
       return;
+    }
+
+    // Bid-ask flip: the SOL ladder has turned into the token. Only when no exit signal is pending (exits win), confirmed over N ticks.
+    if (!signal && env.FLIP_ENABLED) {
+      const sharePct = currentValueSol > 0 ? (otherPrincipalSol / currentValueSol) * 100 : 0;
+      const want = shouldFlip({
+        enabled: true,
+        sharePct,
+        thresholdPct: env.FLIP_TOKEN_SHARE_PCT,
+        isLadder: ctx.ladderBins !== undefined,
+        tokenSpot: !!ctx.tokenSpot,
+        flipPhase: !!ctx.flipPhase,
+      });
+      if (flipConfirmer.hit(want ? 'flip' : null, env.MERIDIAN_CONFIRM_TICKS)) {
+        logger.warn('[index] flip confirmed — closing the ladder and redepositing the token above the price', { pool: ctx.poolAddress, tokenSharePct: +sharePct.toFixed(1) });
+        try {
+          currentPool = await guarded(() => executeFlip(ctx));
+        } catch (err) {
+          logger.error('[index] executeFlip threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+          currentPool = await reconcilePoolStateAfterFailure(ctx);
+        }
+        return;
+      }
+    } else {
+      flipConfirmer.hit(null, env.MERIDIAN_CONFIRM_TICKS);
     }
   }
 
