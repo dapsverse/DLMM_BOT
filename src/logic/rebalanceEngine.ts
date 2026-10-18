@@ -386,6 +386,51 @@ export async function openTokenSpotEntry(
   };
 }
 
+/**
+ * Bid-ask flip (meridian strategy 1): close the SOL ladder (claims fees), wait for the token to land in the wallet, then redeposit ALL
+ * of it token-only as a bid-ask above the price in ONE tx (no Jupiter swap). The SOL that came out of the close (principal + SOL fees)
+ * stays in the wallet as `ctx.bankedSol` and is counted in the cycle PnL. `initialDepositSol` and `peakProfitPct` are untouched.
+ * If the redeposit fails after the close, the token is swapped back to SOL and the error rethrown (caller reconciles state).
+ */
+export async function executeFlip(ctx: PoolContext): Promise<PoolContext> {
+  if (ctx.ladderBins === undefined || ctx.tokenSpot || ctx.flipPhase) throw new Error('[rebalanceEngine] executeFlip: not a SOL ladder position');
+  const [position] = await getUserPositions(ctx.pool);
+  if (!position) throw new Error('[rebalanceEngine] executeFlip: no open position on chain');
+  const { feeX, feeY, totalXAmount, totalYAmount } = position.positionData;
+  const solRaw = new BN(ctx.xIsSol ? totalXAmount : totalYAmount).add(new BN(ctx.xIsSol ? feeX : feeY));
+  const expectedOther = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(new BN(ctx.xIsSol ? feeY : feeX));
+  if (!expectedOther.gtn(0)) throw new Error('[rebalanceEngine] executeFlip: position holds no token to flip');
+  const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+  logger.warn('[rebalanceEngine] FLIP: closing the SOL ladder to redeposit its token above the price', {
+    pool: ctx.poolAddress,
+    bankedSol: Number(solRaw.toString()) / LAMPORTS_PER_SOL,
+    expectedTokenRaw: expectedOther.toString(),
+  });
+  await closePositionFull(ctx.pool, position);
+  let result;
+  try {
+    const tokenAmount = await waitForTokenBalance(otherMint, expectedOther.muln(95).divn(100));
+    // deposited token is X when the memecoin is X (SOL is Y): the flag of openLadderPosition means "deposited side is X"
+    result = await openLadderPosition(ctx.pool, !ctx.xIsSol, tokenAmount, ctx.ladderBins, StrategyType.BidAsk, env.TOKEN_SPOT_START_OFFSET_BINS);
+  } catch (err) {
+    logger.error('[rebalanceEngine] FLIP redeposit failed after the close — swapping the token back to SOL', {
+      pool: ctx.poolAddress,
+      otherMint,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    const stuck = await getTokenBalance(otherMint);
+    if (stuck.gtn(0)) await swapBackOrPend(otherMint, stuck, 'flip redeposit rollback');
+    throw err;
+  }
+  ctx.centerBinId = result.centerBinId;
+  ctx.flipPhase = true;
+  ctx.bankedSol = Number(solRaw.toString()) / LAMPORTS_PER_SOL;
+  ctx.outOfRangeSinceMs = null;
+  ctx.inRangeSinceMs = null;
+  logger.warn('[rebalanceEngine] FLIP complete: token-only bid-ask is live above the price', { pool: ctx.poolAddress, centerBinId: result.centerBinId, bankedSol: ctx.bankedSol });
+  return ctx;
+}
+
 export { estimateCycleGasCostSol } from './costEstimate.js';
 import { estimateBinRentSol } from './costEstimate.js';
 import { isTokenSide } from './flip.js';
