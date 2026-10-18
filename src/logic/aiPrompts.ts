@@ -161,7 +161,8 @@ This is a mechanical rule-application task. All position data is pre-loaded. App
 BEHAVIORAL CORE:
 1. PATIENCE IS PROFIT: Avoid closing positions for tiny gains/losses.
 2. GAS EFFICIENCY: close costs gas — only close for clear reasons.
-3. DATA-DRIVEN AUTONOMY: You have full autonomy. Guidelines are heuristics.`,
+3. DATA-DRIVEN AUTONOMY: You have full autonomy. Guidelines are heuristics.
+NOTE: profitPct in the position data already includes unclaimed fees and subtracts the estimated cost of selling the token side, so it is what a close would return, not the raw mark.`,
     flipManagerText(flip),
     memory ? `LESSONS LEARNED:\n${memory}` : '',
     recentDecisions.length ? `RECENT DECISIONS:\n${recentDecisions.join('\n')}` : '',

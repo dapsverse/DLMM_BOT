@@ -74,6 +74,8 @@ export interface PoolContext {
   flipPhase?: boolean;
   /** SOL taken out at the flip, left in the wallet and counted in the cycle PnL (see logic/flip.ts pnlBasisSol) */
   bankedSol?: number;
+  /** wallet SOL spent by the entry (deposit + rent + gas, measured across the entry tx); absent when not measured reliably (see logic/realizedPnl.ts) */
+  openSpentSol?: number;
   /** epoch ms the position was opened (ladder entries) */
   openedAtMs?: number;
   /** AI screener's stated thesis for this entry */
@@ -300,6 +302,7 @@ export async function openLadderEntry(
   const otherMintDecimals = await getMintDecimals(otherMint);
   logger.info('[rebalanceEngine] opening SOL-only ladder', { poolAddress, capitalSol: effectiveCapitalSol, bins, otherMintDecimals });
   const result = await openLadderPosition(pool, xIsSol, new BN(Math.round(effectiveCapitalSol * LAMPORTS_PER_SOL)), bins);
+  const openSpentSol = sanitizeSpent(walletSol - (await getWalletSolBalance()), effectiveCapitalSol);
   return {
     poolAddress,
     pool,
@@ -320,6 +323,7 @@ export async function openLadderEntry(
     reserveSolAccount,
     ladderBins: bins,
     openedAtMs: Date.now(),
+    openSpentSol,
   };
 }
 
@@ -362,6 +366,7 @@ export async function openTokenSpotEntry(
     if (stuck.gtn(0)) await swapBackOrPend(otherMint, stuck, 'token-spot entry rollback');
     throw err;
   }
+  const openSpentSol = sanitizeSpent(walletSol - (await getWalletSolBalance()), effectiveCapitalSol);
   return {
     poolAddress,
     pool,
@@ -383,6 +388,7 @@ export async function openTokenSpotEntry(
     ladderBins: bins,
     tokenSpot: true,
     openedAtMs: Date.now(),
+    openSpentSol,
   };
 }
 
@@ -465,6 +471,7 @@ export async function executeFlip(ctx: PoolContext, onState?: () => void): Promi
 export { estimateCycleGasCostSol } from './costEstimate.js';
 import { estimateBinRentSol } from './costEstimate.js';
 import { isTokenSide, flipCenterFromBounds } from './flip.js';
+import { sanitizeSpent } from './realizedPnl.js';
 
 // claimFeesOnly (fee-threshold REBALANCE while still in-range) removed
 // 2026-09-26 — see riskManager.ts's removal note. Fees are now only ever
@@ -1063,6 +1070,12 @@ export async function retryPendingSwapBack(): Promise<void> {
   logger.info('[rebalanceEngine] pending swap-back settled');
 }
 
+/** Proceeds of the most recent exit (see closeAndConvertToSol); read by index.ts when it records the outcome. */
+let lastClose: { pool: string; receivedSol: number | null } | null = null;
+export function getLastClose(): { pool: string; receivedSol: number | null } | null {
+  return lastClose;
+}
+
 /**
  * Closes the current position (claim fees + reclaim rent) and converts
  * everything to SOL. Shared by executeHardExit (adds a blacklist after)
@@ -1073,6 +1086,7 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
   const [position] = await getUserPositions(ctx.pool);
   let feeOtherRaw = new BN(0);
   let expectedOtherAmount = new BN(0);
+  let solBeforeClose: number | null = null;
   if (position) {
     // Read BEFORE closing. feeOtherRaw: see splitFeeFromOtherBalance's doc
     // comment. expectedOtherAmount (principal+fee, the OTHER side's full
@@ -1090,6 +1104,7 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
     feeOtherRaw = sellAll ? new BN(0) : realFeeOther;
     expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(realFeeOther);
     logger.warn(`[rebalanceEngine] ${logPrefix}: closing position`, { pool: ctx.poolAddress });
+    solBeforeClose = await getWalletSolBalance();
     await closePositionFull(ctx.pool, position);
   }
 
@@ -1146,6 +1161,8 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
 
   const solBalance = await getWalletSolBalance();
   const nextCapital = walletCapitalSol(solBalance);
+  // proceeds of this exit (close + token swap), measured over seconds; incomplete (null) when a swap-back is still pending or the close was not run here
+  lastClose = { pool: ctx.poolAddress, receivedSol: solBeforeClose !== null && !pendingSwapBack ? solBalance - solBeforeClose : null };
   logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital });
   return nextCapital;
 }

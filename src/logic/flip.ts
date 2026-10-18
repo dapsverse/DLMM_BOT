@@ -31,9 +31,9 @@ export function shouldFlip(i: ShouldFlipInput): boolean {
   return i.enabled && i.isLadder && !i.tokenSpot && !i.flipPhase && Number.isFinite(i.sharePct) && i.sharePct >= i.thresholdPct;
 }
 
-/** SOL value the PnL is measured on: position value (+ unclaimed fees in meridian mode) + the SOL banked at the flip. */
-export function pnlBasisSol(valueSol: number, feesSol: number, bankedSol: number, includeFees: boolean): number {
-  return valueSol + (includeFees ? feesSol : 0) + bankedSol;
+/** SOL value the PnL is measured on: position value (+ unclaimed fees in meridian mode) + the SOL banked at the flip - the estimated cost of selling the token side. */
+export function pnlBasisSol(valueSol: number, feesSol: number, bankedSol: number, includeFees: boolean, exitCostSol = 0): number {
+  return valueSol + (includeFees ? feesSol : 0) + bankedSol - exitCostSol;
 }
 
 /**

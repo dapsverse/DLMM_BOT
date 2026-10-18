@@ -18,6 +18,7 @@ import {
   openLadderEntry,
   openTokenSpotEntry,
   executeFlip,
+  getLastClose,
   retryPendingSwapBack,
   getPendingSwapBack,
   restorePendingSwapBack,
@@ -51,6 +52,7 @@ import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
 import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig } from './logic/flip.js';
+import { estimateExitCostSol, realizedPnl } from './logic/realizedPnl.js';
 
 const meridianConfirmer = new ExitConfirmer();
 const flipConfirmer = new ExitConfirmer();
@@ -98,6 +100,9 @@ function flushOutcome(now: number): void {
       addToBlacklist(blacklistPools, ctx.xIsSol ? ctx.mintY : ctx.mintX, now, hours * 3_600_000);
     }
   }
+  const lc = getLastClose();
+  const real = lc && lc.pool === ctx.poolAddress ? realizedPnl(ctx.openSpentSol, lc.receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol) : null;
+  logger.info('[index] outcome', { pool: ctx.poolAddress, snapshotPnlPct: +snap.profitPct.toFixed(2), realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null, realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null, spentSol: ctx.openSpentSol ?? null, receivedSol: lc && lc.pool === ctx.poolAddress ? lc.receivedSol : null });
   recordOutcome({
     at: new Date(now).toISOString(),
     pool: ctx.poolAddress,
@@ -107,6 +112,7 @@ function flushOutcome(now: number): void {
     depositSol: ctx.initialDepositSol,
     lastValueSol: snap.valueSol,
     pnlPct: +snap.profitPct.toFixed(2),
+    ...(real ? { realizedPnlPct: +real.pnlPct.toFixed(2), realizedPnlSol: +real.pnlSol.toFixed(5) } : {}),
     peakPct: +snap.peakPct.toFixed(2),
     exitReason: reason,
     entryConviction: ctx.aiEntryConviction ?? null,
@@ -478,7 +484,9 @@ async function tick(): Promise<void> {
   // Meridian's PnL (Meteora's own) includes unclaimed fees: value excludes them, so add them back in meridian mode (TP/trailing/SL all read this).
   const meridianRules = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
   // flip phase: the SOL banked at the flip sits in the wallet; the cycle PnL (SL, trailing, peak) must count it
-  const pnlValueSol = pnlBasisSol(currentValueSol, unclaimedFeesSol, ctx.bankedSol ?? 0, meridianRules);
+  // meridian mode: net of the estimated cost of selling the token side (user decision 2026-10-18), so TP/trailing/SL see what the exit would really return
+  const exitCostSol = meridianRules ? estimateExitCostSol(otherPrincipalSol, env.EXIT_COST_PCT, env.EXIT_COST_GAS_SOL) : 0;
+  const pnlValueSol = pnlBasisSol(currentValueSol, unclaimedFeesSol, ctx.bankedSol ?? 0, meridianRules, exitCostSol);
   const currentProfitPct = ctx.initialDepositSol > 0 ? ((pnlValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
   ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
   lastSnap = { valueSol: currentValueSol + (ctx.bankedSol ?? 0), profitPct: currentProfitPct, peakPct: ctx.peakProfitPct, feesSol: unclaimedFeesSol };

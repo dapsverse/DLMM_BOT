@@ -532,6 +532,9 @@ export const env = {
   FLIP_ENABLED: bool('FLIP_ENABLED', false),
   FLIP_TOKEN_SHARE_PCT: num('FLIP_TOKEN_SHARE_PCT', 80),
   FLIP_TRAILING_TRIGGER_PCT: num('FLIP_TRAILING_TRIGGER_PCT', 5),
+  // Decision PnL (meridian mode: SL, TP, trailing, peak) is net of the estimated cost of selling the token side (user decision 2026-10-18). Jupiter fee + impact is about 1% per leg (friction accounting 2026-10-11).
+  EXIT_COST_PCT: num('EXIT_COST_PCT', 1),
+  EXIT_COST_GAS_SOL: num('EXIT_COST_GAS_SOL', 0.0005),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.
