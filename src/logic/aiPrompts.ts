@@ -1,4 +1,5 @@
 /** Prompts for the Claude agent (meridian-style screener + manager). Pure string builders. */
+import type { FlipPromptInfo } from './flip.js';
 
 export interface AiCandidate {
   pool: string;
@@ -55,6 +56,8 @@ export interface AiPositionSnapshot {
   volumeVsBaselinePct: number | null;
   dollarFlowBuyRatio: number | null;
   entryReason: string | null;
+  /** SOL taken out at the flip, held in the wallet and counted in profitPct; absent before a flip */
+  bankedSol?: number;
 }
 
 export interface AiRules {
@@ -85,7 +88,25 @@ The same pool will show much smaller numbers on 5m vs 24h. Adjust your expectati
 
 IMPORTANT: fee/TVL ratio values are ALREADY in percentage form. 0.29 = 0.29%. Do NOT multiply by 100. A value of 1.0 = 1.0%, a value of 22 = 22%. Never convert.`;
 
-function screenerCore(capitalSol: number, memory: string, recentDecisions: string[]): string {
+function flipScreenerText(f: FlipPromptInfo | null): string {
+  if (!f) return '';
+  return `BID-ASK FLIP (our strategy; it is what happens to EVERY sol_ladder you deploy after entry — the bot runs it, you only choose the entry):
+1. DCA-in: the SOL-only bid-ask sits below the price. As price falls through the bins the SOL turns into the token and earns fees on the way.
+2. Flip: when about ${f.tokenSharePct}% of the position value is the token, the bot withdraws it and redeposits the token ALONE as a bid-ask ABOVE the price (DCA-out). The SOL taken out stays in the wallet and counts in the PnL.
+3. DCA-out: it then WAITS for a bounce (no out-of-range timer, no recenter). Floor: stop loss ${f.stopLossPct}% of the original deposit. Take profit: a trailing stop that arms at +${f.trailingTriggerPct}% PnL and closes ${f.trailingDropPct} points under the peak; the position also closes when price runs far above the range (the token has sold back into SOL).
+What this means for your pick: a sol_ladder entry is a plan to buy the dip AND hold the token until it bounces. A token with real volume and holders that can bounce fits; a token whose volume and buyers are disappearing (dump, rug, dead narrative) never bounces and the loss runs to the stop loss. The numbers above are the bot's defaults, not rules for you: judge with all the data, and skip when the bounce case is weak.`;
+}
+
+function flipManagerText(f: FlipPromptInfo | null): string {
+  if (!f) return '';
+  return `STRATEGY CONTEXT (bid-ask flip, ours). The position is in one of these phases (snapshot field "strategy"):
+- sol_ladder: DCA-in. SOL-only bid-ask below the price; the SOL turns into the token as price falls. The bot flips it automatically at about ${f.tokenSharePct}% token share.
+- bid_ask_flip: DCA-out. The token was redeposited alone as a bid-ask above the price and the bot WAITS for a bounce on purpose: being out of range below the position is expected, not a problem by itself. profitPct is the WHOLE cycle versus the original deposit and already includes bankedSol (SOL taken out at the flip, held in the wallet); valueSol is only what is still in the pool. Automatic exits: stop loss ${f.stopLossPct}%, a trailing stop that arms at +${f.trailingTriggerPct}% and closes ${f.trailingDropPct} points under the peak, and a close when price runs far above the range (the final take profit).
+- token_spot: a token-only spot bounce trade, unrelated to the flip.
+These numbers are defaults, not rules for you. Close earlier when the data says the bounce is not coming (volume dead, sustained dump, rug or holder signals), hold longer when it still looks alive. Closing a flip position early realises the cycle loss, so give a concrete reason.`;
+}
+
+function screenerCore(capitalSol: number, memory: string, recentDecisions: string[], flip: FlipPromptInfo | null): string {
   return [
     `You are an autonomous DLMM LP agent on Meteora, Solana. Role: SCREENER
 
@@ -122,6 +143,7 @@ STRATEGY — choose ONE per deploy ("strategy" field), whichever fits the data b
 - sol_ladder (default): the DEPLOY RULES above. SOL only (amount_y), bid-ask below the price, bins_above=0. As price drops through the bins the SOL buys the token; fits volatile/degen tokens where big swings are expected.
 - token_spot: a bounce trade (meridian's custom_ratio_spot at 100% token). The whole deploy amount is swapped into the token and deposited as a spot (flat) distribution starting ONE bin above the price (amount_x only), so the ~1% entry cost is covered as soon as price trades into the range. bins_below is then the number of bins above that (20-69). The token sells into SOL as price rises. It earns nothing and loses value if the price keeps falling, and the position is closed if price has not reached the range within 15 minutes; once it has been in range, it is closed after 30 minutes out of range.
   Only choose token_spot when you judge the token is AT A LOCAL BOTTOM and a bounce is likely, with conviction >= 8. Call get_price_action (5m candles, last 3h) on the finalist and judge from it: selling exhausted (falling pace slowing, long lower wicks, RSI oversold and turning up), price stopped making lower lows (higher low forming), volume fading on the way down and returning on green candles, and not a fresh dump still in progress. A token that is merely falling, or already extended after a pump, is not a local bottom. Anything less than a high-conviction bounce: choose sol_ladder or skip.`,
+    flipScreenerText(flip),
     TIMEFRAME_SCALING,
     memory ? `LESSONS LEARNED:\n${memory}` : '',
     recentDecisions.length ? `RECENT DECISIONS:\n${recentDecisions.join('\n')}` : '',
@@ -130,7 +152,7 @@ STRATEGY — choose ONE per deploy ("strategy" field), whichever fits the data b
     .join('\n\n');
 }
 
-function managerCore(memory: string, recentDecisions: string[]): string {
+function managerCore(memory: string, recentDecisions: string[], flip: FlipPromptInfo | null): string {
   return [
     `You are an autonomous DLMM LP agent on Meteora, Solana. Role: MANAGER
 
@@ -140,6 +162,7 @@ BEHAVIORAL CORE:
 1. PATIENCE IS PROFIT: Avoid closing positions for tiny gains/losses.
 2. GAS EFFICIENCY: close costs gas — only close for clear reasons.
 3. DATA-DRIVEN AUTONOMY: You have full autonomy. Guidelines are heuristics.`,
+    flipManagerText(flip),
     memory ? `LESSONS LEARNED:\n${memory}` : '',
     recentDecisions.length ? `RECENT DECISIONS:\n${recentDecisions.join('\n')}` : '',
   ]
@@ -147,18 +170,18 @@ BEHAVIORAL CORE:
     .join('\n\n');
 }
 
-export function buildScreenerPrompt(candidates: AiCandidate[], capitalSol: number, recentDecisions: string[], memory = ''): string {
+export function buildScreenerPrompt(candidates: AiCandidate[], capitalSol: number, recentDecisions: string[], memory = '', flip: FlipPromptInfo | null = null): string {
   return [
-    screenerCore(capitalSol, memory, recentDecisions),
+    screenerCore(capitalSol, memory, recentDecisions, flip),
     `CANDIDATES (JSON):\n${JSON.stringify(candidates, null, 1)}`,
     `OUTPUT: reply with ONLY one JSON object, no prose, no code fence:
 {"action":"deploy"|"skip","pool":"<exact pool address from the list, required for deploy>","strategy":"sol_ladder"|"token_spot","bins_below":<35-69>,"conviction":<1-10>,"reason":"<=400 chars"}`,
   ].join('\n\n');
 }
 
-export function buildManagerPrompt(p: AiPositionSnapshot, _rules: AiRules, recentDecisions: string[], memory = ''): string {
+export function buildManagerPrompt(p: AiPositionSnapshot, _rules: AiRules, recentDecisions: string[], memory = '', flip: FlipPromptInfo | null = null): string {
   return [
-    managerCore(memory, recentDecisions),
+    managerCore(memory, recentDecisions, flip),
     `POSITION (JSON):\n${JSON.stringify(p, null, 1)}`,
     `OUTPUT: reply with ONLY one JSON object, no prose, no code fence:
 {"action":"hold"|"close","reason":"<=300 chars"}`,
@@ -166,17 +189,17 @@ export function buildManagerPrompt(p: AiPositionSnapshot, _rules: AiRules, recen
 }
 
 /** ReAct screener (tool-calling): candidates come from get_candidates; the agent ends by calling submit_decision. */
-export function buildReactScreenerPrompt(capitalSol: number, memory: string, recentDecisions: string[]): string {
+export function buildReactScreenerPrompt(capitalSol: number, memory: string, recentDecisions: string[], flip: FlipPromptInfo | null = null): string {
   return [
-    screenerCore(capitalSol, memory, recentDecisions),
+    screenerCore(capitalSol, memory, recentDecisions, flip),
     'Candidates are pre-loaded: call get_candidates. get_pool_detail, get_token_info, get_token_narrative (the story behind the token), get_price_action (5m price structure) and check_smart_wallets_on_pool give more detail. FINISH by calling submit_decision exactly once: action "deploy" (pool, strategy, bins_below, conviction 1-10, reason) or action "skip" (reason, conviction).',
   ].join('\n\n');
 }
 
 /** ReAct manager (tool-calling): reads the live position with get_position and ends by calling submit_decision (hold | close). */
-export function buildReactManagerPrompt(_rules: AiRules, memory: string, recentDecisions: string[]): string {
+export function buildReactManagerPrompt(_rules: AiRules, memory: string, recentDecisions: string[], flip: FlipPromptInfo | null = null): string {
   return [
-    managerCore(memory, recentDecisions),
+    managerCore(memory, recentDecisions, flip),
     'Position data: call get_position. FINISH by calling submit_decision exactly once with action "hold" or "close" and a short reason.',
   ].join('\n\n');
 }

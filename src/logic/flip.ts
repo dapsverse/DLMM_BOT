@@ -43,3 +43,16 @@ export function pnlBasisSol(valueSol: number, feesSol: number, bankedSol: number
 export function flipExitConfig(base: MeridianExitConfig, trailingTriggerPct: number): MeridianExitConfig {
   return { ...base, takeProfitPct: Infinity, trailingTriggerPct, outOfRangeWaitMinutes: Infinity };
 }
+
+/** What the AI prompts need to describe the flip; null when the flip is off (never describe behaviour that is disabled). */
+export interface FlipPromptInfo {
+  tokenSharePct: number;
+  trailingTriggerPct: number;
+  trailingDropPct: number;
+  stopLossPct: number;
+}
+
+export function flipPromptInfo(e: { FLIP_ENABLED: boolean; FLIP_TOKEN_SHARE_PCT: number; FLIP_TRAILING_TRIGGER_PCT: number; MERIDIAN_TRAILING_DROP_PCT: number; STOP_LOSS_PCT: number }): FlipPromptInfo | null {
+  if (!e.FLIP_ENABLED) return null;
+  return { tokenSharePct: e.FLIP_TOKEN_SHARE_PCT, trailingTriggerPct: e.FLIP_TRAILING_TRIGGER_PCT, trailingDropPct: e.MERIDIAN_TRAILING_DROP_PCT, stopLossPct: e.STOP_LOSS_PCT };
+}

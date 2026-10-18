@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { memoryBlock } from '../logic/aiMemory.js';
+import { flipPromptInfo } from '../logic/flip.js';
 import { buildReactManagerPrompt, buildReactScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
 import { type ManagerDecision, type ScreenerDecision, type SpotRules, parseStrategy } from '../logic/aiDecision.js';
 import { summarizePriceAction, type Candle } from '../logic/priceAction.js';
@@ -201,7 +202,7 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
   const server = createSdkMcpServer({ name: 'dlmm', tools: [getCandidates, getPoolDetail, getTokenInfo, getTokenNarrative, getPriceAction, checkSmartWallets, submitDecision] });
 
   const q = query({
-    prompt: buildReactScreenerPrompt(capitalSol, memoryBlock(loadOutcomes()), recentDecisions),
+    prompt: buildReactScreenerPrompt(capitalSol, memoryBlock(loadOutcomes()), recentDecisions, flipPromptInfo(env)),
     options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'get_token_narrative', 'get_price_action', 'check_smart_wallets_on_pool', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
   });
   let costUsd: number | null = null;
@@ -260,7 +261,7 @@ export async function reactManage(snapshot: AiPositionSnapshot, rules: AiRules, 
   const server = createSdkMcpServer({ name: 'dlmm', tools: [getPosition, getPoolDetail, getTokenInfo, submitDecision] });
 
   const q = query({
-    prompt: buildReactManagerPrompt(rules, memoryBlock(loadOutcomes(), 5), recentDecisions),
+    prompt: buildReactManagerPrompt(rules, memoryBlock(loadOutcomes(), 5), recentDecisions, flipPromptInfo(env)),
     options: sdkOptions(server, ['get_position', 'get_pool_detail', 'get_token_info', 'submit_decision'], 'You are an autonomous DLMM LP position manager agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
   });
   let costUsd: number | null = null;

@@ -756,6 +756,7 @@ async function tick(): Promise<void> {
           minutesOutOfRange: ctx.outOfRangeSinceMs ? Math.round((now - ctx.outOfRangeSinceMs) / 60_000) : null,
           priceVsLadder,
           strategy: strategyLabel(ctx),
+          bankedSol: ctx.bankedSol,
           ladderBins: ctx.ladderBins,
           volume1hNowUsd,
           volume1hBaselineUsd: ctx.volume1hBaselineUsd,

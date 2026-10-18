@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig } from '../logic/flip.js';
+import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig, flipPromptInfo } from '../logic/flip.js';
+import { buildReactScreenerPrompt, buildReactManagerPrompt } from '../logic/aiPrompts.js';
 import { meridianExitSignal, type MeridianExitConfig, type MeridianExitInput } from '../logic/meridianExit.js';
 import { parseState, STATE_VERSION } from '../services/stateStore.js';
 
@@ -52,5 +53,21 @@ const pos = { poolAddress: 'p', mintX: 'x', mintY: 'y', reserveSolAccount: 'r', 
 const st = (p: object) => JSON.stringify({ version: STATE_VERSION, savedAtMs: 1, wallet, position: p, inFlight: false, currentCapitalSol: 1, lastOtherMint: null, lastSwitchAtMs: null, blacklist: [], chaseGuard: [], dollarFlowBreach: { pool: '', count: 0 } });
 assert.ok(parseState(st(pos), wallet));
 assert.ok(parseState(st({ ...pos, flipPhase: true, bankedSol: 0.2 }), wallet));
+
+// AI prompts describe the lifecycle only while the flip is enabled
+const envOn = { FLIP_ENABLED: true, FLIP_TOKEN_SHARE_PCT: 80, FLIP_TRAILING_TRIGGER_PCT: 5, MERIDIAN_TRAILING_DROP_PCT: 1.5, STOP_LOSS_PCT: 25 };
+assert.equal(flipPromptInfo({ ...envOn, FLIP_ENABLED: false }), null);
+const info = flipPromptInfo(envOn)!;
+assert.equal(info.tokenSharePct, 80);
+const rules = { stopLossPct: 25, ladderOorExitMin: 30, idleOutOfRangeMin: 60, volumeDropExitPct: 60 };
+const scrOn = buildReactScreenerPrompt(0.3, '', [], info);
+const scrOff = buildReactScreenerPrompt(0.3, '', [], null);
+assert.match(scrOn, /BID-ASK FLIP/);
+assert.match(scrOn, /80%/);
+assert.doesNotMatch(scrOff, /BID-ASK FLIP/);
+const manOn = buildReactManagerPrompt(rules, '', [], info);
+assert.match(manOn, /bid_ask_flip/);
+assert.match(manOn, /not rules|defaults/i); // numbers are defaults, the AI stays free
+assert.doesNotMatch(buildReactManagerPrompt(rules, '', [], null), /bid_ask_flip/);
 
 console.log('checkFlip ok');
