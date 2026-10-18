@@ -64,3 +64,31 @@ export function summarizePriceAction(candles: Candle[], nowSec: number): Record<
     last12Closes5m: cs.slice(-12).map((c) => c.close),
   };
 }
+
+/** Longer context (up to 24h of 5m candles) for judging a falling knife: how many violent drops, how big the run-up was, how far below the high. Pure; the AI interprets. */
+export function summarizeHistory(candles: Candle[], nowSec: number): Record<string, unknown> | null {
+  const cs = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  if (cs.length < 36) return null;
+  const last = cs[cs.length - 1]!;
+  const high = cs.reduce((m, c) => (c.high > m.high ? c : m), cs[0]!);
+  const low = cs.reduce((m, c) => (c.low < m.low ? c : m), cs[0]!);
+  const drops = cs.map((c) => pct(c.close, c.open) ?? 0);
+  let minLow = Infinity;
+  let maxRunUp = 1;
+  for (const c of cs) {
+    minLow = Math.min(minLow, c.low);
+    if (minLow > 0) maxRunUp = Math.max(maxRunUp, c.high / minLow);
+  }
+  return {
+    windowHours: +(((last.timestamp - cs[0]!.timestamp) / 3600) + 5 / 60).toFixed(1),
+    high24h: high.high,
+    low24h: low.low,
+    pctBelow24hHigh: pct(last.close, high.high),
+    minutesSinceHigh24h: Math.max(0, Math.round((nowSec - high.timestamp) / 60)),
+    minutesSinceLow24h: Math.max(0, Math.round((nowSec - low.timestamp) / 60)),
+    maxRunUpX: +maxRunUp.toFixed(2),
+    drops10pct: drops.filter((d) => d <= -10).length,
+    drops20pct: drops.filter((d) => d <= -20).length,
+    biggest5mDropPct: Math.min(...drops),
+  };
+}

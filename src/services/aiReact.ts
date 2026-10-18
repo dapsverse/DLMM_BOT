@@ -6,7 +6,7 @@ import { memoryBlock } from '../logic/aiMemory.js';
 import { flipPromptInfo } from '../logic/flip.js';
 import { buildReactManagerPrompt, buildReactScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
 import { type ManagerDecision, type ScreenerDecision, type SpotRules, parseStrategy } from '../logic/aiDecision.js';
-import { summarizePriceAction, type Candle } from '../logic/priceAction.js';
+import { summarizePriceAction, summarizeHistory, type Candle } from '../logic/priceAction.js';
 import { loadOutcomes } from './aiOutcomes.js';
 import { checkSmartWalletsOnPool } from './smartWallets.js';
 import { logger } from '../utils/logger.js';
@@ -51,12 +51,25 @@ export function validateSubmit(
 }
 
 
-/** Last ~3h of 5m candles for the pool, summarised (see priceAction.ts); null if unavailable. */
+/** Last ~3h of 5m candles summarised (see priceAction.ts) plus a 24h history block (drops, run-up, distance from the high); null/error fields when unavailable. */
 export async function fetchPriceAction(pool: string): Promise<unknown> {
   try {
     const end = Math.floor(Date.now() / 1000);
-    const o = (await getJson(`https://dlmm.datapi.meteora.ag/pools/${pool}/ohlcv?timeframe=5m&start_time=${end - 3 * 3600}&end_time=${end}`)) as { data?: Candle[] };
-    return summarizePriceAction((o.data ?? []).map((c) => ({ open: +c.open, high: +c.high, low: +c.low, close: +c.close, volume: +c.volume, timestamp: +c.timestamp })), end) ?? { error: 'not enough 5m candles' };
+    // Meteora 5m OHLCV allows ~97 candles per request: three 8h chunks cover 24h
+    const chunks = await Promise.all([0, 1, 2].map(async (i) => {
+      try {
+        const o = (await getJson(`https://dlmm.datapi.meteora.ag/pools/${pool}/ohlcv?timeframe=5m&start_time=${end - (i + 1) * 28_800}&end_time=${end - i * 28_800}`)) as { data?: Candle[] };
+        return o.data ?? [];
+      } catch {
+        return [];
+      }
+    }));
+    const all = new Map<number, Candle>();
+    for (const c of chunks.flat()) all.set(+c.timestamp, { open: +c.open, high: +c.high, low: +c.low, close: +c.close, volume: +c.volume, timestamp: +c.timestamp });
+    const candles = [...all.values()];
+    const recent = summarizePriceAction(candles.filter((c) => c.timestamp >= end - 3 * 3600), end);
+    if (!recent) return { error: 'not enough 5m candles' };
+    return { ...recent, history24h: summarizeHistory(candles, end) ?? 'not enough history' };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }
@@ -187,7 +200,7 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
     if (!candidates.some((c) => c.tokenMint === mint)) return text({ error: 'not an eligible candidate token' });
     return text(await fetchTokenInfo(mint));
   });
-  const getPriceAction = tool('get_price_action', 'Short-term price structure of a pool from 5m candles (last ~3h): distance from the low/high, minutes since the low, 15m/30m/1h change, RSI14, green candles, higher-low flag, volume trend, last closes. Use it to judge a local bottom before choosing token_spot. Finalists only.', { pool: z.string() }, async ({ pool }) => {
+  const getPriceAction = tool('get_price_action', 'Short-term price structure of a pool from 5m candles (last ~3h): distance from the low/high, minutes since the low, 15m/30m/1h change, RSI14, green candles, higher-low flag, volume trend, last closes; plus history24h (24h high/low, run-up multiple, 5m candles of -10%/-20% or worse, biggest 5m drop, distance below the 24h high). Use it to judge a local bottom (token_spot) and to spot a falling knife before any sol_ladder. Finalists only.', { pool: z.string() }, async ({ pool }) => {
     note('get_price_action', { pool });
     if (!allowed.has(pool)) return text({ error: 'not an eligible candidate' });
     return text(await fetchPriceAction(pool));
