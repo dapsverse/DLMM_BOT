@@ -123,7 +123,7 @@ HARD RULE (no exceptions):
 RISK SIGNALS (guidelines — use judgment):
 - top10 > 60% → concentrated, risky
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
-- no narrative + no smart wallets → skip
+- no narrative + no smart wallets → weak negative only, NOT a reason to skip by itself: our narrative and smart-wallet data are mostly empty (narrative often unavailable, only a short wallet list), so absence says little. Decide on the pool and token data; a present narrative or smart wallet is a plus.
 
 NARRATIVE QUALITY (your main judgment call):
 - GOOD: specific origin — real event, viral moment, named entity, active community
