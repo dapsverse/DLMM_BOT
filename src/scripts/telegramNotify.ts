@@ -39,6 +39,20 @@ const scrub = (s: string) =>
     .replace(/api-key=[^&\s"']+/gi, 'api-key=***')
     .replace(/\b[1-9A-HJ-NP-Za-km-z]{80,90}\b/g, '***'); // base58 secret-key-length strings (tx signatures are filtered by the same rule on purpose)
 
+/** Packs lines into messages of at most `max` chars, never cutting a line (a line longer than max is its own message, cut by send()). */
+function batchLines(lines: string[], max: number): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (const l of lines) {
+    if (cur && cur.length + 1 + l.length > max) {
+      out.push(cur);
+      cur = l;
+    } else cur = cur ? cur + '\n' + l : l;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 async function send(text: string): Promise<void> {
   try {
     await fetch(`${API}/sendMessage`, {
@@ -729,8 +743,10 @@ async function main(): Promise<void> {
       if (logPath) {
         const chunk = readFrom(logPath, offset);
         offset += Buffer.byteLength(chunk);
-        const hits = chunk.split('\n').filter((l) => EVENT_RE.test(l)).map((l) => scrub(l).slice(0, 300));
-        if (hits.length) await send(hits.slice(0, 8).join('\n') + (hits.length > 8 ? `\n…+${hits.length - 8} more` : ''));
+        // AI decision lines carry a long reason: keep up to 1500 chars per line and split into several messages (Telegram caps one at 4096)
+        const hits = chunk.split('\n').filter((l) => EVENT_RE.test(l)).map((l) => scrub(l).slice(0, 1500));
+        for (const msg of batchLines(hits.slice(0, 8), 3800)) await send(msg);
+        if (hits.length > 8) await send(`…+${hits.length - 8} more`);
       }
       const alive = botAlive();
       if (alive !== wasAlive) await send(alive ? 'bot STARTED' : 'bot STOPPED');
