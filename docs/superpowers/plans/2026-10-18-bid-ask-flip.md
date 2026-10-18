@@ -20,6 +20,7 @@
 - Flip trigger: token share (`otherPrincipalSol / currentValueSol * 100`) >= `FLIP_TOKEN_SHARE_PCT` = 80, confirmed over `MERIDIAN_CONFIRM_TICKS` (2) ticks, only for ladder positions that are not `token_spot` and not already in flip phase.
 - Flip phase: SL = existing `STOP_LOSS_PCT` on the ORIGINAL `initialDepositSol` basis; no fixed TP; trailing arms at `FLIP_TRAILING_TRIGGER_PCT` = 5, drop stays `MERIDIAN_TRAILING_DROP_PCT` = 1.5; no OOR-time exit; "price above range by > `MERIDIAN_OOR_BINS_TO_CLOSE`" stays; low-yield rule and AI manager stay on; a flip position never flips again and never recenters (it waits for the bounce).
 - PnL basis in flip phase: `value + unclaimed fees + bankedSol` vs `initialDepositSol`. `bankedSol` = SOL principal + SOL fees read from the position right before the flip close; it stays in the wallet.
+- AI screener and manager must know the whole lifecycle (what the bot does automatically and why) but stay free: the numbers are defaults, never rules for the AI. The flip text is only added to prompts when `FLIP_ENABLED` is true (never describe behaviour that is off).
 - No Jupiter swap in the flip. If the redeposit fails after the close, the token is swapped back to SOL through the existing `swapBackOrPend`.
 
 ## Review Focus
@@ -29,7 +30,8 @@
 - Right after a flip 20% of the value sits in the wallet: PnL must include `bankedSol` or SL fires falsely. Pinned in Task 1 test (`pnlBasisSol`).
 - Flip phase must never fire the fixed TP or the OOR timer, but must still fire on "pumped far above", trailing from 5, and low-yield. Pinned in Task 1 test.
 - Old state files (no flip fields) and new ones with the fields must both parse. Pinned in Task 1 test (`parseState`).
-- Close succeeded but the redeposit throws: token must not stay stranded. Covered by code review in Task 3 and the manual checklist in Task 5 (not unit-testable without a chain).
+- Close succeeded but the redeposit throws: token must not stay stranded. Covered by code review in Task 3 and the manual checklist in Task 6 (not unit-testable without a chain).
+- A flip position sits in `bid_ask_flip` with profit measured on the whole cycle: the manager must be told so, or it reads the banked-SOL-adjusted loss as a fresh position and closes it on a bounce that has not happened yet. Pinned in Task 5 test (prompt contains the lifecycle only when enabled).
 
 ---
 
@@ -471,7 +473,120 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: Chain-shape check, docs, push (flip stays OFF)
+### Task 5: AI screener and manager know the strategy
+
+**Files:**
+- Modify: `src/logic/flip.ts` (add `FlipPromptInfo` + `flipPromptInfo`)
+- Modify: `src/logic/aiPrompts.ts` (strategy text, new optional `flip` params, snapshot field)
+- Modify: `src/services/aiReact.ts:204` and `:263`, `src/services/aiAgent.ts:77` and `:105` (pass `flipPromptInfo(env)`)
+- Modify: `src/index.ts` AI manager snapshot (~line 728): add `bankedSol`
+- Modify: `src/scripts/checkFlip.ts` (append prompt assertions)
+
+**Interfaces:**
+- Consumes: `env.FLIP_ENABLED`, `env.FLIP_TOKEN_SHARE_PCT`, `env.FLIP_TRAILING_TRIGGER_PCT`, `env.MERIDIAN_TRAILING_DROP_PCT`, `env.STOP_LOSS_PCT`.
+- Produces: `FlipPromptInfo = { tokenSharePct: number; trailingTriggerPct: number; trailingDropPct: number; stopLossPct: number }`; `flipPromptInfo(e): FlipPromptInfo | null` (null when disabled); optional trailing `flip: FlipPromptInfo | null = null` parameter on `buildScreenerPrompt`, `buildReactScreenerPrompt`, `buildManagerPrompt`, `buildReactManagerPrompt`; `AiPositionSnapshot.bankedSol?: number`.
+
+- [ ] **Step 1: Append failing assertions to `src/scripts/checkFlip.ts`** (before the final `console.log`)
+
+```ts
+import { flipPromptInfo } from '../logic/flip.js';
+import { buildReactScreenerPrompt, buildReactManagerPrompt } from '../logic/aiPrompts.js';
+const envOn = { FLIP_ENABLED: true, FLIP_TOKEN_SHARE_PCT: 80, FLIP_TRAILING_TRIGGER_PCT: 5, MERIDIAN_TRAILING_DROP_PCT: 1.5, STOP_LOSS_PCT: 25 };
+assert.equal(flipPromptInfo({ ...envOn, FLIP_ENABLED: false }), null);
+const info = flipPromptInfo(envOn)!;
+assert.equal(info.tokenSharePct, 80);
+const rules = { stopLossPct: 25, ladderOorExitMin: 30, idleOutOfRangeMin: 60, volumeDropExitPct: 60 };
+const scrOn = buildReactScreenerPrompt(0.3, '', [], info);
+const scrOff = buildReactScreenerPrompt(0.3, '', [], null);
+assert.match(scrOn, /BID-ASK FLIP/);
+assert.match(scrOn, /80%/);
+assert.doesNotMatch(scrOff, /BID-ASK FLIP/);
+const manOn = buildReactManagerPrompt(rules, '', [], info);
+assert.match(manOn, /bid_ask_flip/);
+assert.match(manOn, /not rules|defaults/i); // numbers are defaults, the AI stays free
+assert.doesNotMatch(buildReactManagerPrompt(rules, '', [], null), /bid_ask_flip/);
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npx tsx src/scripts/checkFlip.ts`
+Expected: FAIL (`flipPromptInfo` is not exported).
+
+- [ ] **Step 3: Add the info type to `src/logic/flip.ts`**
+
+```ts
+/** What the AI prompts need to describe the flip; null when the flip is off (never describe behaviour that is disabled). */
+export interface FlipPromptInfo {
+  tokenSharePct: number;
+  trailingTriggerPct: number;
+  trailingDropPct: number;
+  stopLossPct: number;
+}
+
+export function flipPromptInfo(e: { FLIP_ENABLED: boolean; FLIP_TOKEN_SHARE_PCT: number; FLIP_TRAILING_TRIGGER_PCT: number; MERIDIAN_TRAILING_DROP_PCT: number; STOP_LOSS_PCT: number }): FlipPromptInfo | null {
+  if (!e.FLIP_ENABLED) return null;
+  return { tokenSharePct: e.FLIP_TOKEN_SHARE_PCT, trailingTriggerPct: e.FLIP_TRAILING_TRIGGER_PCT, trailingDropPct: e.MERIDIAN_TRAILING_DROP_PCT, stopLossPct: e.STOP_LOSS_PCT };
+}
+```
+
+- [ ] **Step 4: Prompt text in `src/logic/aiPrompts.ts`**
+
+Add `import type { FlipPromptInfo } from './flip.js';` at the top and `bankedSol?: number;` to `AiPositionSnapshot` (comment: `/** SOL taken out at the flip, held in the wallet and counted in profitPct; absent before a flip */`). Add these two functions above `screenerCore`:
+
+```ts
+function flipScreenerText(f: FlipPromptInfo | null): string {
+  if (!f) return '';
+  return `BID-ASK FLIP (our strategy; it is what happens to EVERY sol_ladder you deploy after entry — the bot runs it, you only choose the entry):
+1. DCA-in: the SOL-only bid-ask sits below the price. As price falls through the bins the SOL turns into the token and earns fees on the way.
+2. Flip: when about ${f.tokenSharePct}% of the position value is the token, the bot withdraws it and redeposits the token ALONE as a bid-ask ABOVE the price (DCA-out). The SOL taken out stays in the wallet and counts in the PnL.
+3. DCA-out: it then WAITS for a bounce (no out-of-range timer, no recenter). Floor: stop loss ${f.stopLossPct}% of the original deposit. Take profit: a trailing stop that arms at +${f.trailingTriggerPct}% PnL and closes ${f.trailingDropPct} points under the peak; the position also closes when price runs far above the range (the token has sold back into SOL).
+What this means for your pick: a sol_ladder entry is a plan to buy the dip AND hold the token until it bounces. A token with real volume and holders that can bounce fits; a token whose volume and buyers are disappearing (dump, rug, dead narrative) never bounces and the loss runs to the stop loss. The numbers above are the bot's defaults, not rules for you: judge with all the data, and skip when the bounce case is weak.`;
+}
+
+function flipManagerText(f: FlipPromptInfo | null): string {
+  if (!f) return '';
+  return `STRATEGY CONTEXT (bid-ask flip, ours). The position is in one of these phases (snapshot field "strategy"):
+- sol_ladder: DCA-in. SOL-only bid-ask below the price; the SOL turns into the token as price falls. The bot flips it automatically at about ${f.tokenSharePct}% token share.
+- bid_ask_flip: DCA-out. The token was redeposited alone as a bid-ask above the price and the bot WAITS for a bounce on purpose: being out of range below the position is expected, not a problem by itself. profitPct is the WHOLE cycle versus the original deposit and already includes bankedSol (SOL taken out at the flip, held in the wallet); valueSol is only what is still in the pool. Automatic exits: stop loss ${f.stopLossPct}%, a trailing stop that arms at +${f.trailingTriggerPct}% and closes ${f.trailingDropPct} points under the peak, and a close when price runs far above the range (the final take profit).
+- token_spot: a token-only spot bounce trade, unrelated to the flip.
+These numbers are defaults, not rules for you. Close earlier when the data says the bounce is not coming (volume dead, sustained dump, rug or holder signals), hold longer when it still looks alive. Closing a flip position early realises the cycle loss, so give a concrete reason.`;
+}
+```
+
+Wire them in (keep everything else as is):
+- `screenerCore(capitalSol, memory, recentDecisions, flip)`: add `flipScreenerText(flip),` to the joined array right after the `STRATEGY — choose ONE ...` template string block (before `TIMEFRAME_SCALING`).
+- `managerCore(memory, recentDecisions, flip)`: add `flipManagerText(flip),` right after the `BEHAVIORAL CORE` template string.
+- `buildScreenerPrompt(candidates, capitalSol, recentDecisions, memory = '', flip: FlipPromptInfo | null = null)` passes `flip` to `screenerCore`; `buildReactScreenerPrompt(capitalSol, memory, recentDecisions, flip: FlipPromptInfo | null = null)` likewise.
+- `buildManagerPrompt(p, _rules, recentDecisions, memory = '', flip: FlipPromptInfo | null = null)` and `buildReactManagerPrompt(_rules, memory, recentDecisions, flip: FlipPromptInfo | null = null)` pass `flip` to `managerCore`.
+- Also change the ReAct manager instruction line to mention it: no change needed.
+
+- [ ] **Step 5: Pass the info at the four call sites**
+
+In each of `src/services/aiReact.ts` and `src/services/aiAgent.ts`: `import { flipPromptInfo } from '../logic/flip.js';` (and `env` if that file does not import it yet), then:
+- `aiAgent.ts:77`: `buildScreenerPrompt(candidates, capitalSol, recentLines('screen', 5), memoryBlock(loadOutcomes()), flipPromptInfo(env))`
+- `aiAgent.ts:105`: `buildManagerPrompt(snapshot, rules, recentLines('manage', 5), memoryBlock(loadOutcomes(), 5), flipPromptInfo(env))`
+- `aiReact.ts:204`: `buildReactScreenerPrompt(capitalSol, memoryBlock(loadOutcomes()), recentDecisions, flipPromptInfo(env))`
+- `aiReact.ts:263`: `buildReactManagerPrompt(rules, memoryBlock(loadOutcomes(), 5), recentDecisions, flipPromptInfo(env))`
+
+In `src/index.ts` AI manager snapshot object (the one with `strategy: strategyLabel(ctx),`) add `bankedSol: ctx.bankedSol,` right after `strategy`.
+
+- [ ] **Step 6: Run checks**
+
+Run: `npx tsx src/scripts/checkFlip.ts && npx tsx src/scripts/checkAiReact.ts && npx tsx src/scripts/checkAiDecision.ts && npx tsx src/scripts/checkAiTriggers.ts && npx tsc --noEmit`
+Expected: `checkFlip ok` and the other checks print their ok lines, tsc exits 0. (The AI cannot be made to "understand" in a unit test; this pins that the lifecycle text is present when the flip is on, absent when off. A real read happens on the first live screen/manage call: check `logs/ai-decisions.jsonl` for reasons that mention the flip phases.)
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/logic/flip.ts src/logic/aiPrompts.ts src/services/aiReact.ts src/services/aiAgent.ts src/index.ts src/scripts/checkFlip.ts
+git commit -m "feat(flip): AI screener and manager prompts describe the flip lifecycle (only when enabled)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: Chain-shape check, docs, push (flip stays OFF)
 
 **Files:**
 - Create: `scratchpad/flipbuild.mjs` (scratchpad dir of this session, NOT committed)
@@ -498,7 +613,7 @@ Expected: one line; `min` = `active + 1`, `max` = `active + 60`, no thrown error
 Add this bullet at the end of the "2026-10-16 session" section group (after the `/aireport token share` bullet):
 
 ```markdown
-- **Bid-ask flip** (2026-10-18, spec `docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md`, plan `docs/superpowers/plans/2026-10-18-bid-ask-flip.md`; `FLIP_ENABLED=false` by default, NOT enabled in `.env.live`, NOT proven live): meridian strategy 1. A `sol_ladder` whose token share (`otherPrincipalSol / currentValueSol`) reaches `FLIP_TOKEN_SHARE_PCT` (80, 2-tick confirm, only when no exit signal is pending) is closed (`executeFlip`, `rebalanceEngine.ts`) and its token redeposited token-only as a bid-ask above the price (`openLadderPosition(..., StrategyType.BidAsk, TOKEN_SPOT_START_OFFSET_BINS)`, no Jupiter swap). SOL that came out of the close stays in the wallet as `ctx.bankedSol` and is added to the cycle PnL (`pnlBasisSol`), basis stays `initialDepositSol`, peak not reset. Flip phase exits (`logic/flip.ts`): SL 25% unchanged, no fixed TP, trailing arms at `FLIP_TRAILING_TRIGGER_PCT` (5) with the usual 1.5 drop, no OOR timer (wait for the bounce), "pumped far above range" close stays (that is the final TP), low-yield and the AI manager stay on. Flip positions never flip again and never recenter. A cycle can exit at a small loss when the bounce recovers only part of the DCA-in loss. Redeposit failure after the close swaps the token back to SOL (`swapBackOrPend`). Boot recovery rebuilt from chain (no state) cannot know a flip (same limitation as token_spot). Telegram `/status` reads Meteora and does not include `bankedSol`. Self-check `checkFlip.ts`. Enable only with the user's go (set `FLIP_ENABLED=true` via a non-printing script, then restart when flat or when the user says so).
+- **Bid-ask flip** (2026-10-18, spec `docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md`, plan `docs/superpowers/plans/2026-10-18-bid-ask-flip.md`; `FLIP_ENABLED=false` by default, NOT enabled in `.env.live`, NOT proven live): meridian strategy 1. A `sol_ladder` whose token share (`otherPrincipalSol / currentValueSol`) reaches `FLIP_TOKEN_SHARE_PCT` (80, 2-tick confirm, only when no exit signal is pending) is closed (`executeFlip`, `rebalanceEngine.ts`) and its token redeposited token-only as a bid-ask above the price (`openLadderPosition(..., StrategyType.BidAsk, TOKEN_SPOT_START_OFFSET_BINS)`, no Jupiter swap). SOL that came out of the close stays in the wallet as `ctx.bankedSol` and is added to the cycle PnL (`pnlBasisSol`), basis stays `initialDepositSol`, peak not reset. Flip phase exits (`logic/flip.ts`): SL 25% unchanged, no fixed TP, trailing arms at `FLIP_TRAILING_TRIGGER_PCT` (5) with the usual 1.5 drop, no OOR timer (wait for the bounce), "pumped far above range" close stays (that is the final TP), low-yield and the AI manager stay on. Flip positions never flip again and never recenter. A cycle can exit at a small loss when the bounce recovers only part of the DCA-in loss. Redeposit failure after the close swaps the token back to SOL (`swapBackOrPend`). Boot recovery rebuilt from chain (no state) cannot know a flip (same limitation as token_spot). Telegram `/status` reads Meteora and does not include `bankedSol`. AI prompts (`aiPrompts.ts`, `flipPromptInfo`) describe the lifecycle to the screener and manager only while `FLIP_ENABLED` is true; numbers are given as defaults, the AI stays free; snapshot `strategy` can be `bid_ask_flip` and carries `bankedSol`. The manager trigger \"holding token at a loss\" will keep firing in flip phase (cooldown 10 min limits the cost). Self-check `checkFlip.ts`. Enable only with the user's go (set `FLIP_ENABLED=true` via a non-printing script, then restart when flat or when the user says so).
 ```
 
 - [ ] **Step 3: Final verification and commit, push**
