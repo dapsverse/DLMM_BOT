@@ -528,6 +528,10 @@ export const env = {
   MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN', 30), // after it has been in range (bounces are jagged: moonbot/spotbounce.mjs)
   TOKEN_SPOT_MIN_CONVICTION: num('TOKEN_SPOT_MIN_CONVICTION', 8),
   TOKEN_SPOT_MIN_BINS: num('TOKEN_SPOT_MIN_BINS', 20),
+  // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.
+  FLIP_ENABLED: bool('FLIP_ENABLED', false),
+  FLIP_TOKEN_SHARE_PCT: num('FLIP_TOKEN_SHARE_PCT', 80),
+  FLIP_TRAILING_TRIGGER_PCT: num('FLIP_TRAILING_TRIGGER_PCT', 5),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.

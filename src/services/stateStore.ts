@@ -36,6 +36,10 @@ export interface PersistedPosition {
   /** token-only spot strategy (meridian mode); absent = SOL-only ladder or classic */
   tokenSpot?: boolean;
   tokenSpotReached?: boolean;
+  /** bid-ask flip (meridian mode): the position was flipped to a token-only bid-ask above the price */
+  flipPhase?: boolean;
+  /** SOL taken out at the flip, left in the wallet and counted in the cycle PnL */
+  bankedSol?: number;
 }
 
 export interface PersistedState {
