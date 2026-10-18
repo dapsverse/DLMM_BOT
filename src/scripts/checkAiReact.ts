@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { buildReactScreenerPrompt, buildScreenerPrompt } from '../logic/aiPrompts.js';
 import { agentEnv, compactCandidates, parseNarrative, validateManagerSubmit, validateSubmit } from '../services/aiReact.js';
 
 const allowed = new Set(['POOL_A']);
@@ -28,4 +29,12 @@ assert.equal(parseNarrative({ narrative: '  A  dog\n meme  ', status: 'ready' })
 assert.equal(parseNarrative({ narrative: 'x'.repeat(900) })?.length, 500);
 assert.equal(parseNarrative({}), null);
 assert.equal(parseNarrative(null), null);
+// narrative rule: meridian's skip rule is back, but an empty narrative feed is filled by one web search first
+for (const p of [buildReactScreenerPrompt(0.3, '', [], null), buildScreenerPrompt([], 0.3, [], '', null)]) {
+  assert.match(p, /no narrative \+ no smart wallets → skip/);
+  assert.match(p, /WebSearch/);
+  assert.doesNotMatch(p, /weak negative only/);
+  assert.match(p, /untrusted/i);
+}
+
 console.log('checkAiReact ok');
