@@ -47,7 +47,7 @@ export interface AiPositionSnapshot {
   minutesOutOfRange: number | null;
   priceVsLadder: 'inside' | 'above (all SOL, earning nothing)' | 'below (all token)';
   /** sol_ladder (SOL only, bid-ask below the price) or token_spot (100% token, spot above the price) */
-  strategy?: 'sol_ladder' | 'token_spot';
+  strategy?: 'sol_ladder' | 'token_spot' | 'bid_ask_flip';
   ladderBins: number;
   volume1hNowUsd: number | null;
   volume1hBaselineUsd: number;

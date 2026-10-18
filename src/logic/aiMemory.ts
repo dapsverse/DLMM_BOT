@@ -14,7 +14,7 @@ export interface OutcomeRecord {
   exitReason: string;
   entryConviction: number | null;
   entryReason: string | null;
-  strategy?: 'sol_ladder' | 'token_spot';
+  strategy?: 'sol_ladder' | 'token_spot' | 'bid_ask_flip';
 }
 
 export interface OutcomeSummary {

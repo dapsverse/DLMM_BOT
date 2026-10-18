@@ -49,6 +49,7 @@ import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
+import { isTokenSide, strategyLabel } from './logic/flip.js';
 
 const meridianConfirmer = new ExitConfirmer();
 // per-pool close history for meridian's cooldowns; in memory only (lost on restart)
@@ -108,7 +109,7 @@ function flushOutcome(now: number): void {
     exitReason: reason,
     entryConviction: ctx.aiEntryConviction ?? null,
     entryReason: ctx.aiEntryReason ?? null,
-    strategy: ctx.tokenSpot ? 'token_spot' : 'sol_ladder',
+    strategy: strategyLabel(ctx),
   });
 }
 let aiManagerBusy = false;
@@ -534,7 +535,7 @@ async function tick(): Promise<void> {
   if (meridianRules && decision === 'HOLD') {
     let binsAbove = 0;
     if (ctx.centerBinId !== null && ctx.ladderBins !== undefined) {
-      const { lo, hi } = ladderBounds(ctx.centerBinId, ctx.ladderBins, ctx.tokenSpot ? !ctx.xIsSol : ctx.xIsSol);
+      const { lo, hi } = ladderBounds(ctx.centerBinId, ctx.ladderBins, isTokenSide(ctx) ? !ctx.xIsSol : ctx.xIsSol);
       binsAbove = ctx.xIsSol ? lo - binStatus.currentBinId : binStatus.currentBinId - hi;
     }
     const ageMinutes = ctx.openedAtMs !== undefined ? (now - ctx.openedAtMs) / 60_000 : null;
@@ -567,7 +568,7 @@ async function tick(): Promise<void> {
         currentCapitalSol = await guarded(() =>
           signal!.startsWith('stop loss')
             ? executeCleanExit(ctx, 'STOP_LOSS', chaseGuardPools, false)
-            : env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange && !ctx.tokenSpot
+            : env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange && !isTokenSide(ctx)
               ? executeDownBreakExit(ctx)
               : executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false),
         );
@@ -725,7 +726,7 @@ async function tick(): Promise<void> {
           isOutOfRange: binStatus.isOutOfRange,
           minutesOutOfRange: ctx.outOfRangeSinceMs ? Math.round((now - ctx.outOfRangeSinceMs) / 60_000) : null,
           priceVsLadder,
-          strategy: ctx.tokenSpot ? 'token_spot' : 'sol_ladder',
+          strategy: strategyLabel(ctx),
           ladderBins: ctx.ladderBins,
           volume1hNowUsd,
           volume1hBaselineUsd: ctx.volume1hBaselineUsd,

@@ -70,6 +70,10 @@ export interface PoolContext {
   tokenSpot?: boolean;
   /** token_spot only: price has been inside (or above) the range at least once, which switches the OOR wait from the first-reach timeout to the after-reach one */
   tokenSpotReached?: boolean;
+  /** bid-ask flip (meridian mode): the SOL ladder was closed and its token redeposited as a token-only bid-ask above the price */
+  flipPhase?: boolean;
+  /** SOL taken out at the flip, left in the wallet and counted in the cycle PnL (see logic/flip.ts pnlBasisSol) */
+  bankedSol?: number;
   /** epoch ms the position was opened (ladder entries) */
   openedAtMs?: number;
   /** AI screener's stated thesis for this entry */
@@ -165,7 +169,7 @@ export interface BinRangeStatus {
  */
 export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatus> {
   const activeBin = await getActiveBin(ctx.pool);
-  if (ctx.ladderBins !== undefined && ctx.tokenSpot) {
+  if (ctx.ladderBins !== undefined && isTokenSide(ctx)) {
     // deposited side is the memecoin; price rising through the range sells it into SOL (fellThrough). Out of range the OTHER way = still all token.
     const st = ladderRangeStatus(activeBin.binId, ctx.centerBinId, ctx.ladderBins, !ctx.xIsSol);
     return { currentBinId: activeBin.binId, isOutOfRange: st.isOutOfRange, tokenBelowRange: st.isOutOfRange && !st.tokenBelowRange };
@@ -384,6 +388,7 @@ export async function openTokenSpotEntry(
 
 export { estimateCycleGasCostSol } from './costEstimate.js';
 import { estimateBinRentSol } from './costEstimate.js';
+import { isTokenSide } from './flip.js';
 
 // claimFeesOnly (fee-threshold REBALANCE while still in-range) removed
 // 2026-09-26 — see riskManager.ts's removal note. Fees are now only ever
