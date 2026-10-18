@@ -29,9 +29,10 @@ assert.equal(parseNarrative({ narrative: '  A  dog\n meme  ', status: 'ready' })
 assert.equal(parseNarrative({ narrative: 'x'.repeat(900) })?.length, 500);
 assert.equal(parseNarrative({}), null);
 assert.equal(parseNarrative(null), null);
-// narrative / smart-wallet rule: a consideration that moves conviction (not a skip rule); an empty narrative feed is filled by one web search first
+// narrative / smart-wallet rule: a real consideration that moves conviction (not a skip rule, not a footnote); an empty narrative feed is filled by one web search first
 for (const p of [buildReactScreenerPrompt(0.3, '', [], null), buildScreenerPrompt([], 0.3, [], '', null)]) {
-  assert.match(p, /weak negative/);
+  assert.match(p, /real consideration/);
+  assert.doesNotMatch(p, /weak/i); // a full factor, neither a veto nor a footnote
   assert.doesNotMatch(p, /no narrative \+ no smart wallets → skip/);
   assert.match(p, /WebSearch/);
   assert.match(p, /conviction/);
