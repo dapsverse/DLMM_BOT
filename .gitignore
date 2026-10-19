@@ -15,3 +15,5 @@ moonbot/databc/
 .env.telegram
 smart-wallets.json
 .superpowers/
+smart-wallets.json.bak*
+*.bak*
