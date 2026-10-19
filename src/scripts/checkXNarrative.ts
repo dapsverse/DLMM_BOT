@@ -5,6 +5,13 @@ const NOW = Date.parse('2026-10-19T12:00:00Z');
 // twitter241-like nested shape and twitter-api45-like flat shape in one blob
 const nested = { result: { timeline: { instructions: [{ entries: [{ content: { tweet: { legacy: { full_text: 'gm $MUC is the one', favorite_count: 5, retweet_count: 2, reply_count: 1, created_at: '2026-10-19T11:30:00Z', screen_name: 'alice' } } } }] }] } } };
 const flat = { timeline: [{ text: 'MUC mint 3A3q... lfg', favorites: 10, retweets: 3, replies: 0, created_at: '2026-10-19T09:00:00Z', screen_name: 'bob' }, { text: 'gm $MUC is the one', favorites: 5, retweets: 2, screen_name: 'alice' }] };
+// "Tweet API" v3 /v3/search shape: data[] with likeCount/createdAt/author.username and an embedded quotedTweet (must not be counted)
+const v3 = { data: [{ text: 'v3 post about $MUC', likeCount: 4, retweetCount: 1, replyCount: 2, quoteCount: 0, viewCount: 900, createdAt: '2026-10-19T11:00:00.000Z', author: { username: 'carol', name: 'C' }, quotedTweet: { text: 'someone elses old post', likeCount: 99, createdAt: '2026-09-01T00:00:00.000Z', author: { username: 'dave' } } }], pagination: { nextCursor: 'x' } };
+const p3 = extractPosts(v3, NOW);
+assert.equal(p3.length, 1);
+assert.equal(p3[0]!.author, 'carol');
+assert.equal(p3[0]!.engagement, 7); // viewCount not counted
+assert.equal(p3[0]!.ageMin, 60);
 const pn = extractPosts(nested, NOW);
 assert.equal(pn.length, 1);
 assert.equal(pn[0]!.engagement, 8);

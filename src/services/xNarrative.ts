@@ -4,7 +4,9 @@ import { logger } from '../utils/logger.js';
 export interface XPost { text: string; author: string | null; engagement: number; ageMin: number | null }
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-const ENG_KEYS = ['favorite_count', 'favorites', 'like_count', 'retweet_count', 'retweets', 'reply_count', 'replies', 'quote_count', 'quotes'];
+const ENG_KEYS = ['favorite_count', 'favorites', 'like_count', 'retweet_count', 'retweets', 'reply_count', 'replies', 'quote_count', 'quotes', 'likeCount', 'retweetCount', 'replyCount', 'quoteCount'];
+/** Embedded posts (quoted/retweeted/replied-to) are other people's text, not a post about the token: never counted. */
+const EMBEDDED = new Set(['quotedTweet', 'retweetedTweet', 'replyTo', 'quoted_status', 'retweeted_status']);
 
 /** Pure: collect post-like objects from ANY RapidAPI Twitter response shape (nested or flat); never throws. */
 export function extractPosts(raw: unknown, nowMs: number): XPost[] {
@@ -14,14 +16,15 @@ export function extractPosts(raw: unknown, nowMs: number): XPost[] {
     if (Array.isArray(o)) return o.forEach((x) => walk(x, depth + 1));
     const r = o as Record<string, unknown>;
     const text = typeof r.full_text === 'string' ? r.full_text : typeof r.text === 'string' ? r.text : '';
-    if (text && (ENG_KEYS.some((k) => k in r) || 'created_at' in r)) {
+    if (text && (ENG_KEYS.some((k) => k in r) || 'created_at' in r || 'createdAt' in r)) {
       const t = text.replace(/\s+/g, ' ').trim();
       const u = (r.user ?? r.author ?? r.user_info) as Record<string, unknown> | undefined;
       const a = r.screen_name ?? u?.screen_name ?? u?.username;
-      const ts = typeof r.created_at === 'string' ? Date.parse(r.created_at) : NaN;
+      const ca = r.created_at ?? r.createdAt;
+      const ts = typeof ca === 'string' ? Date.parse(ca) : NaN;
       if (t && !out.has(t)) out.set(t, { text: t, author: typeof a === 'string' ? a : null, engagement: ENG_KEYS.reduce((s, k) => s + num(r[k]), 0), ageMin: Number.isFinite(ts) ? Math.max(0, Math.round((nowMs - ts) / 60_000)) : null });
     }
-    for (const v of Object.values(r)) walk(v, depth + 1);
+    for (const [k, v] of Object.entries(r)) if (!EMBEDDED.has(k)) walk(v, depth + 1);
   };
   walk(raw, 0);
   return [...out.values()];
@@ -56,7 +59,7 @@ async function rapidFetch(query: string): Promise<unknown> {
   const qs = new URLSearchParams(env.RAPIDAPI_TWITTER_EXTRA);
   qs.set(env.RAPIDAPI_TWITTER_QUERY_PARAM, query);
   const res = await fetch(`https://${env.RAPIDAPI_TWITTER_HOST}${env.RAPIDAPI_TWITTER_PATH}?${qs}`, {
-    headers: { 'x-rapidapi-key': env.RAPIDAPI_KEY, 'x-rapidapi-host': env.RAPIDAPI_TWITTER_HOST },
+    headers: { 'x-rapidapi-key': env.RAPIDAPI_KEY, 'x-rapidapi-host': env.RAPIDAPI_TWITTER_HOST, 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw Object.assign(new Error(`rapidapi ${res.status}`), { status: res.status });

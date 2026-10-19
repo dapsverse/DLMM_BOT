@@ -509,12 +509,12 @@ export const env = {
   AI_REACT_MANAGER: bool('AI_REACT_MANAGER', false),
   AI_REACT_MAX_TURNS: num('AI_REACT_MAX_TURNS', 14),
   AI_REACT_MAX_BUDGET_USD: num('AI_REACT_MAX_BUDGET_USD', 0.6),
-  // X (Twitter) posts for the narrative feed via RapidAPI; empty key = feature off. Host/path/params are provider-specific (defaults follow twitter241, UNVERIFIED: set them to the subscribed API).
+  // X (Twitter) posts for the narrative feed via RapidAPI; empty key = feature off. Host/path/params are provider-specific (defaults = "Tweet API" by Ryan v3, verified live 2026-10-19).
   RAPIDAPI_KEY: optionalStr('RAPIDAPI_KEY', ''),
-  RAPIDAPI_TWITTER_HOST: optionalStr('RAPIDAPI_TWITTER_HOST', 'twitter241.p.rapidapi.com'),
-  RAPIDAPI_TWITTER_PATH: optionalStr('RAPIDAPI_TWITTER_PATH', '/search-v2'),
+  RAPIDAPI_TWITTER_HOST: optionalStr('RAPIDAPI_TWITTER_HOST', 'twitter-api47.p.rapidapi.com'),
+  RAPIDAPI_TWITTER_PATH: optionalStr('RAPIDAPI_TWITTER_PATH', '/v3/search'),
   RAPIDAPI_TWITTER_QUERY_PARAM: optionalStr('RAPIDAPI_TWITTER_QUERY_PARAM', 'query'),
-  RAPIDAPI_TWITTER_EXTRA: optionalStr('RAPIDAPI_TWITTER_EXTRA', 'type=Latest&count=20'),
+  RAPIDAPI_TWITTER_EXTRA: optionalStr('RAPIDAPI_TWITTER_EXTRA', 'type=Latest'),
   /** minutes the price may stay above the ladder (all SOL, earning nothing) before the position is closed */
   LADDER_OOR_EXIT_MIN: num('LADDER_OOR_EXIT_MIN', 30),
   // Meridian's close rules (config.js defaults); apply to ladder positions in meridian mode, replacing our own exit heuristics. Stop loss stays STOP_LOSS_PCT.
