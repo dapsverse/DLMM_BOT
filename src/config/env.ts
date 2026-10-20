@@ -510,6 +510,7 @@ export const env = {
   AI_REACT_MAX_TURNS: num('AI_REACT_MAX_TURNS', 14),
   AI_REACT_MAX_BUDGET_USD: num('AI_REACT_MAX_BUDGET_USD', 0.6),
   // X (Twitter) posts for the narrative feed via RapidAPI; empty key = feature off. Host/path/params are provider-specific (defaults = "Tweet API" by Ryan v3, verified live 2026-10-19).
+  MADEONSOL_API_KEY: optionalStr('MADEONSOL_API_KEY', ''),
   RAPIDAPI_KEY: optionalStr('RAPIDAPI_KEY', ''),
   RAPIDAPI_TWITTER_HOST: optionalStr('RAPIDAPI_TWITTER_HOST', 'twitter-api47.p.rapidapi.com'),
   RAPIDAPI_TWITTER_PATH: optionalStr('RAPIDAPI_TWITTER_PATH', '/v3/search'),
