@@ -6,6 +6,7 @@ import {
   getUserPositions,
   openPosition,
   openLadderPosition,
+  StrategyType,
   closePositionFull,
   getActiveBin,
   getFreshActiveBinId,
@@ -65,6 +66,16 @@ export interface PoolContext {
   reserveSolAccount: string;
   /** Set for a SOL-only ladder position (meridian mode): number of bins below the open price. Absent = classic 50:50 position. */
   ladderBins?: number;
+  /** token-only spot strategy: 100% token deposited as a spot distribution ABOVE the price (ladderBins = its width); absent = SOL-only bid-ask ladder */
+  tokenSpot?: boolean;
+  /** token_spot only: price has been inside (or above) the range at least once, which switches the OOR wait from the first-reach timeout to the after-reach one */
+  tokenSpotReached?: boolean;
+  /** bid-ask flip (meridian mode): the SOL ladder was closed and its token redeposited as a token-only bid-ask above the price */
+  flipPhase?: boolean;
+  /** SOL taken out at the flip, left in the wallet and counted in the cycle PnL (see logic/flip.ts pnlBasisSol) */
+  bankedSol?: number;
+  /** wallet SOL spent by the entry (deposit + rent + gas, measured across the entry tx); absent when not measured reliably (see logic/realizedPnl.ts) */
+  openSpentSol?: number;
   /** epoch ms the position was opened (ladder entries) */
   openedAtMs?: number;
   /** AI screener's stated thesis for this entry */
@@ -160,6 +171,11 @@ export interface BinRangeStatus {
  */
 export async function getBinRangeStatus(ctx: PoolContext): Promise<BinRangeStatus> {
   const activeBin = await getActiveBin(ctx.pool);
+  if (ctx.ladderBins !== undefined && isTokenSide(ctx)) {
+    // deposited side is the memecoin; price rising through the range sells it into SOL (fellThrough). Out of range the OTHER way = still all token.
+    const st = ladderRangeStatus(activeBin.binId, ctx.centerBinId, ctx.ladderBins, !ctx.xIsSol);
+    return { currentBinId: activeBin.binId, isOutOfRange: st.isOutOfRange, tokenBelowRange: st.isOutOfRange && !st.tokenBelowRange };
+  }
   if (ctx.ladderBins !== undefined) return { currentBinId: activeBin.binId, ...ladderRangeStatus(activeBin.binId, ctx.centerBinId, ctx.ladderBins, ctx.xIsSol) };
   const radius = computeBinRadius(ctx.binStep);
   const isOutOfRange = ctx.centerBinId === null || Math.abs(activeBin.binId - ctx.centerBinId) > radius;
@@ -286,6 +302,7 @@ export async function openLadderEntry(
   const otherMintDecimals = await getMintDecimals(otherMint);
   logger.info('[rebalanceEngine] opening SOL-only ladder', { poolAddress, capitalSol: effectiveCapitalSol, bins, otherMintDecimals });
   const result = await openLadderPosition(pool, xIsSol, new BN(Math.round(effectiveCapitalSol * LAMPORTS_PER_SOL)), bins);
+  const openSpentSol = sanitizeSpent(walletSol - (await getWalletSolBalance()), effectiveCapitalSol);
   return {
     poolAddress,
     pool,
@@ -306,11 +323,155 @@ export async function openLadderEntry(
     reserveSolAccount,
     ladderBins: bins,
     openedAtMs: Date.now(),
+    openSpentSol,
   };
+}
+
+/**
+ * meridian mode, strategy `token_spot`: swap 100% of the capital into the token, then deposit it ALL as a flat (spot) distribution
+ * ABOVE the price in ONE tx (mirror of the SOL-only ladder). Sells into a rise, loses if the price falls. Same pre-flight as the
+ * ladder entry; if the deposit fails after the swap the token is swapped straight back to SOL.
+ */
+export async function openTokenSpotEntry(
+  pool: DlmmPool,
+  poolAddress: string,
+  mintX: string,
+  mintY: string,
+  xIsSol: boolean,
+  capitalSol: number,
+  binStep: number,
+  reserveSolAccount: string,
+  bins: number = env.LADDER_BINS,
+): Promise<PoolContext> {
+  const otherMint = xIsSol ? mintY : mintX;
+  const walletSol = await getWalletSolBalance();
+  const maxFundableSol = walletSol - computeGasReserveSol(walletSol) - POSITION_RENT_BUFFER_SOL;
+  if (isCapitalUnderfunded(capitalSol, maxFundableSol)) {
+    throw new Error(`[rebalanceEngine] requested capital ${capitalSol} SOL is under ${MIN_CAPITAL_FUND_RATIO * 100}% of the ${maxFundableSol.toFixed(4)} SOL the wallet can fund — refusing token-spot entry`);
+  }
+  const effectiveCapitalSol = Math.min(capitalSol, maxFundableSol);
+  if (effectiveCapitalSol <= 0) throw new Error(`[rebalanceEngine] wallet ${walletSol} SOL cannot fund a token-spot entry after gas reserve + rent`);
+  const otherMintDecimals = await getMintDecimals(otherMint);
+  logger.info('[rebalanceEngine] opening token-only spot (100% token above the price)', { poolAddress, capitalSol: effectiveCapitalSol, bins, otherMintDecimals });
+  const swapOut = new BN((await swapExactIn(WSOL_MINT, otherMint, new BN(Math.round(effectiveCapitalSol * LAMPORTS_PER_SOL)))).outAmount);
+  let result;
+  try {
+    await waitForTokenBalance(otherMint, swapOut.muln(95).divn(100));
+    const tokenAmount = await getTokenBalance(otherMint);
+    // deposited token is X when the memecoin is X (i.e. SOL is Y): buildLadderTx's flag means "deposited side is X"
+    result = await openLadderPosition(pool, !xIsSol, tokenAmount, bins, StrategyType.Spot, env.TOKEN_SPOT_START_OFFSET_BINS);
+  } catch (err) {
+    logger.error('[rebalanceEngine] token-spot deposit failed after swap — swapping the token back to SOL', { poolAddress, otherMint, error: err instanceof Error ? err.message : String(err) });
+    const stuck = await getTokenBalance(otherMint);
+    if (stuck.gtn(0)) await swapBackOrPend(otherMint, stuck, 'token-spot entry rollback');
+    throw err;
+  }
+  const openSpentSol = sanitizeSpent(walletSol - (await getWalletSolBalance()), effectiveCapitalSol);
+  return {
+    poolAddress,
+    pool,
+    mintX,
+    mintY,
+    xIsSol,
+    initialDepositSol: effectiveCapitalSol,
+    rebalanceTimestamps: [],
+    lastRebalanceAt: 0,
+    volume1hBaselineUsd: 0,
+    volume1hBaselineSetAtMs: 0,
+    binStep,
+    centerBinId: result.centerBinId,
+    outOfRangeSinceMs: null,
+    inRangeSinceMs: null,
+    peakProfitPct: 0,
+    otherMintDecimals,
+    reserveSolAccount,
+    ladderBins: bins,
+    tokenSpot: true,
+    openedAtMs: Date.now(),
+    openSpentSol,
+  };
+}
+
+/**
+ * Bid-ask flip (meridian strategy 1): close the SOL ladder (claims fees), wait for the token to land in the wallet, then redeposit ALL
+ * of it token-only as a bid-ask above the price in ONE tx (no Jupiter swap). The SOL that came out of the close (principal + SOL fees)
+ * stays in the wallet as `ctx.bankedSol` and is counted in the cycle PnL. `initialDepositSol` and `peakProfitPct` are untouched.
+ * If the redeposit fails after the close, the token is swapped back to SOL and the error rethrown (caller reconciles state).
+ */
+export async function executeFlip(ctx: PoolContext, onState?: () => void): Promise<PoolContext> {
+  if (ctx.ladderBins === undefined || ctx.tokenSpot || ctx.flipPhase) throw new Error('[rebalanceEngine] executeFlip: not a SOL ladder position');
+  const [position] = await getUserPositions(ctx.pool);
+  if (!position) throw new Error('[rebalanceEngine] executeFlip: no open position on chain');
+  const { feeX, feeY, totalXAmount, totalYAmount } = position.positionData;
+  const solRaw = new BN(ctx.xIsSol ? totalXAmount : totalYAmount).add(new BN(ctx.xIsSol ? feeX : feeY));
+  const expectedOther = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(new BN(ctx.xIsSol ? feeY : feeX));
+  if (!expectedOther.gtn(0)) throw new Error('[rebalanceEngine] executeFlip: position holds no token to flip');
+  const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+  const depositIsX = !ctx.xIsSol; // the deposited token is X when the memecoin is X (SOL is Y)
+  const bankedSol = Number(solRaw.toString()) / LAMPORTS_PER_SOL;
+  logger.warn('[rebalanceEngine] FLIP: closing the SOL ladder to redeposit its token above the price', {
+    pool: ctx.poolAddress,
+    bankedSol,
+    expectedTokenRaw: expectedOther.toString(),
+  });
+  try {
+    await closePositionFull(ctx.pool, position);
+  } catch (err) {
+    // the close may have landed although its confirmation threw: trust the chain, not the exception
+    const [still] = await getUserPositions(ctx.pool);
+    if (still) throw err;
+    logger.warn('[rebalanceEngine] FLIP: close reported an error but the position is gone on chain, continuing', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+  }
+  // From here the SOL is banked. Record it BEFORE the redeposit and persist, so a crash or a redeposit that lands but throws never loses it
+  // (otherwise the cycle PnL misses ~20% of the value and the stop loss fires falsely).
+  ctx.flipPhase = true;
+  ctx.bankedSol = bankedSol;
+  onState?.();
+  let result;
+  try {
+    const held = await waitForTokenBalance(otherMint, expectedOther.muln(95).divn(100));
+    // never redeposit more than the close returned: older dust of the same mint would inflate the position above its basis
+    result = await openLadderPosition(ctx.pool, depositIsX, BN.min(held, expectedOther), ctx.ladderBins, StrategyType.BidAsk, env.TOKEN_SPOT_START_OFFSET_BINS);
+  } catch (err) {
+    const [landed] = await getUserPositions(ctx.pool);
+    if (landed) {
+      // the deposit landed although the call threw: adopt the position that exists on chain
+      ctx.centerBinId = flipCenterFromBounds(landed.positionData.lowerBinId, landed.positionData.upperBinId, depositIsX);
+      ctx.outOfRangeSinceMs = null;
+      ctx.inRangeSinceMs = null;
+      logger.warn('[rebalanceEngine] FLIP: redeposit threw but the position exists on chain, adopting it', { pool: ctx.poolAddress, centerBinId: ctx.centerBinId, error: err instanceof Error ? err.message : String(err) });
+      return ctx;
+    }
+    ctx.flipPhase = false;
+    ctx.bankedSol = undefined;
+    logger.error('[rebalanceEngine] FLIP redeposit failed after the close — swapping the token back to SOL', {
+      pool: ctx.poolAddress,
+      otherMint,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    let stuck = await getTokenBalance(otherMint);
+    if (!stuck.gtn(0)) {
+      // a stale read (same race as the BATON incident): wait for the real balance, else record the expected amount as pending
+      try {
+        stuck = await waitForTokenBalance(otherMint, expectedOther.muln(95).divn(100));
+      } catch {
+        pendingSwapBack = { mint: otherMint, amount: expectedOther.toString() };
+      }
+    }
+    if (stuck.gtn(0)) await swapBackOrPend(otherMint, stuck, 'flip redeposit rollback');
+    throw err;
+  }
+  ctx.centerBinId = result.centerBinId;
+  ctx.outOfRangeSinceMs = null;
+  ctx.inRangeSinceMs = null;
+  logger.warn('[rebalanceEngine] FLIP complete: token-only bid-ask is live above the price', { pool: ctx.poolAddress, centerBinId: result.centerBinId, bankedSol });
+  return ctx;
 }
 
 export { estimateCycleGasCostSol } from './costEstimate.js';
 import { estimateBinRentSol } from './costEstimate.js';
+import { isTokenSide, flipCenterFromBounds } from './flip.js';
+import { sanitizeSpent } from './realizedPnl.js';
 
 // claimFeesOnly (fee-threshold REBALANCE while still in-range) removed
 // 2026-09-26 — see riskManager.ts's removal note. Fees are now only ever
@@ -909,6 +1070,12 @@ export async function retryPendingSwapBack(): Promise<void> {
   logger.info('[rebalanceEngine] pending swap-back settled');
 }
 
+/** Proceeds of the most recent exit (see closeAndConvertToSol); read by index.ts when it records the outcome. */
+let lastClose: { pool: string; receivedSol: number | null } | null = null;
+export function getLastClose(): { pool: string; receivedSol: number | null } | null {
+  return lastClose;
+}
+
 /**
  * Closes the current position (claim fees + reclaim rent) and converts
  * everything to SOL. Shared by executeHardExit (adds a blacklist after)
@@ -919,6 +1086,7 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
   const [position] = await getUserPositions(ctx.pool);
   let feeOtherRaw = new BN(0);
   let expectedOtherAmount = new BN(0);
+  let solBeforeClose: number | null = null;
   if (position) {
     // Read BEFORE closing. feeOtherRaw: see splitFeeFromOtherBalance's doc
     // comment. expectedOtherAmount (principal+fee, the OTHER side's full
@@ -930,9 +1098,13 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
     // balance, leaving thousands of dollars of tokens un-swapped and
     // un-tracked.
     const { feeX, feeY, totalXAmount, totalYAmount } = position.positionData;
-    feeOtherRaw = new BN(ctx.xIsSol ? feeY : feeX);
-    expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(feeOtherRaw);
+    // meridian mode sells the whole token side (no fee-sized portion kept)
+    const sellAll = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
+    const realFeeOther = new BN(ctx.xIsSol ? feeY : feeX);
+    feeOtherRaw = sellAll ? new BN(0) : realFeeOther;
+    expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(realFeeOther);
     logger.warn(`[rebalanceEngine] ${logPrefix}: closing position`, { pool: ctx.poolAddress });
+    solBeforeClose = await getWalletSolBalance();
     await closePositionFull(ctx.pool, position);
   }
 
@@ -989,6 +1161,8 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
 
   const solBalance = await getWalletSolBalance();
   const nextCapital = walletCapitalSol(solBalance);
+  // proceeds of this exit (close + token swap), measured over seconds; incomplete (null) when a swap-back is still pending or the close was not run here
+  lastClose = { pool: ctx.poolAddress, receivedSol: solBeforeClose !== null && !pendingSwapBack ? solBalance - solBeforeClose : null };
   logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital });
   return nextCapital;
 }
@@ -1018,7 +1192,7 @@ export async function executeHardExit(ctx: PoolContext, blacklistPools: Map<stri
  * in gains). Neither is a risk violation, so the pool stays a fully valid
  * candidate for the very next scan.
  */
-export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT' | 'FLOW_EXIT' | 'AI_EXIT', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
+export async function executeCleanExit(ctx: PoolContext, reason: 'SWITCH' | 'TAKE_PROFIT' | 'FLOW_EXIT' | 'AI_EXIT' | 'STOP_LOSS', chaseGuardPools: Map<string, number>, armChaseGuard = true): Promise<number> {
   if (armChaseGuard) await recordExitForChaseGuard(ctx, chaseGuardPools);
   return closeAndConvertToSol(ctx, reason);
 }

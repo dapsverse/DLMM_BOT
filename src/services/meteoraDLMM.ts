@@ -79,6 +79,8 @@ export interface LbPosition {
 }
 
 export interface DlmmPool {
+  /** Pool address (SDK instance field). */
+  pubkey?: PublicKey;
   /** Raw on-chain pair state (mints, reserve accounts, bin step) — used to rebuild a PoolContext on boot. */
   lbPair: { tokenXMint: PublicKey; tokenYMint: PublicKey; reserveX: PublicKey; reserveY: PublicKey; binStep: number };
   refetchStates(): Promise<void>;
@@ -226,6 +228,16 @@ async function sendTx(tx: Transaction, extraSigners: Keypair[] = [], label = 'tx
   );
 }
 
+/** Pools the user manages by hand (PROTECTED_POOLS, comma-separated): the bot must never enter, close or recover them. */
+export function isProtectedPool(addr: string): boolean {
+  return (process.env.PROTECTED_POOLS ?? '').split(',').some((a) => a.trim() === addr);
+}
+
+function assertNotProtected(pool: DlmmPool): void {
+  const addr = pool.pubkey?.toBase58();
+  if (addr && isProtectedPool(addr)) throw new Error(`pool ${addr} is protected (PROTECTED_POOLS): bot must not touch it`);
+}
+
 export async function openPool(poolAddress: string): Promise<DlmmPool> {
   return DLMM.create(connection, new PublicKey(poolAddress));
 }
@@ -233,6 +245,12 @@ export async function openPool(poolAddress: string): Promise<DlmmPool> {
 /** Addresses of every pool where this wallet holds an open position (one program-account scan; boot-time only). */
 export async function getAllPositionPoolAddresses(): Promise<string[]> {
   const map = await withRetry(() => DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey), { maxRetries: 3, baseDelayMs: 2_000, label: 'getAllLbPairPositionsByUser' });
+  return [...map.keys()].filter((a) => !isProtectedPool(a));
+}
+
+/** Pool addresses where an arbitrary wallet (not ours) holds open positions. Read-only. */
+export async function getWalletPoolAddresses(walletAddress: string): Promise<string[]> {
+  const map = await withRetry(() => DLMM.getAllLbPairPositionsByUser(connection, new PublicKey(walletAddress)), { maxRetries: 2, baseDelayMs: 2_000, label: 'getWalletPoolAddresses' });
   return [...map.keys()];
 }
 
@@ -248,6 +266,7 @@ export async function getFreshActiveBinId(pool: DlmmPool): Promise<number> {
 
 /** All open positions this wallet holds on the given pool. */
 export async function getUserPositions(pool: DlmmPool): Promise<LbPosition[]> {
+  if (pool.pubkey && isProtectedPool(pool.pubkey.toBase58())) return [];
   const { userPositions } = await pool.getPositionsByUserAndLbPair(wallet.publicKey);
   return userPositions;
 }
@@ -282,6 +301,7 @@ export async function getUserPositions(pool: DlmmPool): Promise<LbPosition[]> {
  */
 export async function openPosition(params: OpenPositionParams): Promise<OpenPositionResult> {
   const { pool, totalXAmount, totalYAmount, binRadius } = params;
+  assertNotProtected(pool);
 
   return withRetry(
     async () => {
@@ -333,18 +353,20 @@ export interface LadderTx {
  * price falling = bin id rising there). No token side, so no entry swap. SDK emits create + add as two txs; their
  * instructions are merged (verified by simulateTransaction: 1116 bytes, 681k CU for 69 bins). Refetches pool state first.
  */
-export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, user: PublicKey = wallet.publicKey): Promise<LadderTx> {
+export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, user: PublicKey = wallet.publicKey, strategyType: StrategyType = StrategyType.BidAsk, offsetBins = 0): Promise<LadderTx> {
+  // `xIsSol` here means "the single deposited token is X": SOL for the SOL-only ladder, the memecoin for the token-only spot position.
   await pool.refetchStates();
   const activeBinId = (await getActiveBin(pool)).binId;
-  const minBinId = xIsSol ? activeBinId : activeBinId - (bins - 1);
-  const maxBinId = xIsSol ? activeBinId + (bins - 1) : activeBinId;
+  // offsetBins > 0 starts the range that many bins away from the active bin, on the deposited side (token_spot: just above the price)
+  const minBinId = xIsSol ? activeBinId + offsetBins : activeBinId - offsetBins - (bins - 1);
+  const maxBinId = xIsSol ? activeBinId + offsetBins + (bins - 1) : activeBinId - offsetBins;
   const positionKeypair = Keypair.generate();
   const create = await pool.createExtendedEmptyPosition(minBinId, maxBinId, positionKeypair.publicKey, user);
   const adds = await pool.addLiquidityByStrategyChunkable({
     positionPubKey: positionKeypair.publicKey,
     totalXAmount: xIsSol ? solLamports : new BN(0),
     totalYAmount: xIsSol ? new BN(0) : solLamports,
-    strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk, singleSidedX: xIsSol },
+    strategy: { minBinId, maxBinId, strategyType, singleSidedX: xIsSol },
     user,
     slippage: 1,
   });
@@ -355,14 +377,16 @@ export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports
 }
 
 /** Opens the SOL-only ladder (see buildLadderTx), rebuilding from a fresh active bin on every retry. */
-export async function openLadderPosition(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number): Promise<OpenPositionResult> {
+export async function openLadderPosition(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, strategyType: StrategyType = StrategyType.BidAsk, offsetBins = 0): Promise<OpenPositionResult> {
+  assertNotProtected(pool);
   return withRetry(
     async () => {
-      const { tx, positionKeypair, minBinId, maxBinId, activeBinId } = await buildLadderTx(pool, xIsSol, solLamports, bins);
+      const { tx, positionKeypair, minBinId, maxBinId, activeBinId } = await buildLadderTx(pool, xIsSol, solLamports, bins, wallet.publicKey, strategyType, offsetBins);
       await withPriorityFee(tx, [wallet.publicKey, positionKeypair.publicKey], LADDER_COMPUTE_UNIT_LIMIT);
       const signature = await sendTx(tx, [positionKeypair], 'openLadder');
       logger.info('[dlmm] ladder position opened', { position: positionKeypair.publicKey.toBase58(), signature, minBinId, maxBinId, activeBinId });
-      return { positionPubkey: positionKeypair.publicKey, signature, centerBinId: activeBinId };
+      // centerBinId is the range's anchor edge (== active bin when offsetBins is 0), see ladderBounds
+      return { positionPubkey: positionKeypair.publicKey, signature, centerBinId: xIsSol ? minBinId : maxBinId };
     },
     { maxRetries: 3, baseDelayMs: 1_000, label: 'openLadderFreshBin' },
   );
@@ -387,6 +411,7 @@ export async function claimFees(pool: DlmmPool, position: LbPosition): Promise<s
  * reclaim — the SDK has no separate "close account" instruction).
  */
 export async function closePositionFull(pool: DlmmPool, position: LbPosition): Promise<string[]> {
+  assertNotProtected(pool);
   const { lowerBinId, upperBinId } = position.positionData;
 
   const txs = await pool.removeLiquidity({
@@ -400,7 +425,8 @@ export async function closePositionFull(pool: DlmmPool, position: LbPosition): P
 
   const signatures: string[] = [];
   for (const tx of txs) {
-    await withPriorityFee(tx, [wallet.publicKey]);
+    // 69-bin ladders with fees need far more than the default limit: ClaimFee2 ran out of CUs (live 2026-10-16, 388 failed simulations)
+    await withPriorityFee(tx, [wallet.publicKey], LADDER_COMPUTE_UNIT_LIMIT);
     signatures.push(await sendTx(tx, [], 'closePosition'));
   }
   logger.info('[dlmm] position fully closed + rent reclaimed', {

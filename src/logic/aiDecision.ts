@@ -2,7 +2,16 @@
 
 export type ScreenerDecision =
   | { action: 'skip'; reason: string; conviction?: number }
-  | { action: 'deploy'; pool: string; bins: number; conviction: number; reason: string };
+  | { action: 'deploy'; pool: string; bins: number; conviction: number; reason: string; strategy: Strategy };
+
+/** sol_ladder: SOL-only bid-ask below the price (default). token_spot: 100% token, spot distribution above the price. */
+export type Strategy = 'sol_ladder' | 'token_spot';
+/** token_spot needs a high bounce conviction and may use a narrower range; anything below that is a skip (fail closed). */
+export interface SpotRules {
+  minConviction: number;
+  minBins: number;
+}
+export const parseStrategy = (v: unknown): Strategy => (v === 'token_spot' ? 'token_spot' : 'sol_ladder');
 
 export type ManagerDecision = { action: 'hold' | 'close'; reason: string };
 
@@ -34,7 +43,7 @@ export function extractJson(text: string): Record<string, unknown> | null {
 
 const reasonOf = (o: Record<string, unknown>): string => (typeof o.reason === 'string' ? o.reason.slice(0, 600) : '(no reason given)');
 
-export function parseScreenerDecision(text: string, allowedPools: ReadonlySet<string>, minBins: number, maxBins: number, minConviction: number): ScreenerDecision {
+export function parseScreenerDecision(text: string, allowedPools: ReadonlySet<string>, minBins: number, maxBins: number, minConviction: number, spot?: SpotRules): ScreenerDecision {
   const o = extractJson(text);
   if (!o) return { action: 'skip', reason: 'invalid answer: no JSON object' };
   const rawConv = Number(o.conviction);
@@ -46,8 +55,10 @@ export function parseScreenerDecision(text: string, allowedPools: ReadonlySet<st
   if (!Number.isFinite(conviction) || conviction < minConviction) return { action: 'skip', reason: `conviction ${String(o.conviction)} below ${minConviction}: ${reasonOf(o)}`, ...convOpt };
   const binsRaw = Number(o.bins_below);
   if (!Number.isFinite(binsRaw)) return { action: 'skip', reason: 'invalid answer: bins_below missing' };
-  const bins = Math.min(maxBins, Math.max(minBins, Math.round(binsRaw)));
-  return { action: 'deploy', pool: o.pool, bins, conviction, reason: reasonOf(o) };
+  const strategy = parseStrategy(o.strategy);
+  if (strategy === 'token_spot' && spot && conviction < spot.minConviction) return { action: 'skip', reason: `token_spot needs conviction >= ${spot.minConviction}, got ${conviction}: ${reasonOf(o)}`, ...convOpt };
+  const bins = Math.min(maxBins, Math.max(strategy === 'token_spot' && spot ? spot.minBins : minBins, Math.round(binsRaw)));
+  return { action: 'deploy', pool: o.pool, bins, conviction, reason: reasonOf(o), strategy };
 }
 
 export function parseManagerDecision(text: string): ManagerDecision {

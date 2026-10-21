@@ -33,6 +33,15 @@ export interface PersistedPosition {
   reserveSolAccount: string;
   /** SOL-only ladder width (meridian mode); absent for classic positions and files written before 2026-10-15 */
   ladderBins?: number;
+  /** token-only spot strategy (meridian mode); absent = SOL-only ladder or classic */
+  tokenSpot?: boolean;
+  tokenSpotReached?: boolean;
+  /** bid-ask flip (meridian mode): the position was flipped to a token-only bid-ask above the price */
+  flipPhase?: boolean;
+  /** SOL taken out at the flip, left in the wallet and counted in the cycle PnL */
+  bankedSol?: number;
+  /** wallet SOL spent by the entry (deposit + rent + gas, measured across the entry tx); absent when not measured reliably */
+  openSpentSol?: number;
 }
 
 export interface PersistedState {

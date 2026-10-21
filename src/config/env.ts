@@ -489,7 +489,7 @@ export const env = {
   LADDER_BINS: num('LADDER_BINS', 69),
   // AI agent (meridian-style): `claude -p` screens candidates and manages the open position. Off by default.
   AI_AGENT: bool('AI_AGENT', false),
-  AI_MIN_CONVICTION: num('AI_MIN_CONVICTION', 7),
+  AI_MIN_CONVICTION: num('AI_MIN_CONVICTION', 0),
   AI_MIN_BINS: num('AI_MIN_BINS', 35),
   AI_MAX_BINS: num('AI_MAX_BINS', 69),
   /** slow periodic manager health check (meridian: 10-60 min); event triggers are in logic/aiTriggers.ts */
@@ -509,8 +509,41 @@ export const env = {
   AI_REACT_MANAGER: bool('AI_REACT_MANAGER', false),
   AI_REACT_MAX_TURNS: num('AI_REACT_MAX_TURNS', 14),
   AI_REACT_MAX_BUDGET_USD: num('AI_REACT_MAX_BUDGET_USD', 0.6),
+  // X (Twitter) posts for the narrative feed via RapidAPI; empty key = feature off. Host/path/params are provider-specific (defaults = "Tweet API" by Ryan v3, verified live 2026-10-19).
+  MADEONSOL_API_KEY: optionalStr('MADEONSOL_API_KEY', ''),
+  RAPIDAPI_KEY: optionalStr('RAPIDAPI_KEY', ''),
+  RAPIDAPI_TWITTER_HOST: optionalStr('RAPIDAPI_TWITTER_HOST', 'twitter-api47.p.rapidapi.com'),
+  RAPIDAPI_TWITTER_PATH: optionalStr('RAPIDAPI_TWITTER_PATH', '/v3/search'),
+  RAPIDAPI_TWITTER_QUERY_PARAM: optionalStr('RAPIDAPI_TWITTER_QUERY_PARAM', 'query'),
+  RAPIDAPI_TWITTER_EXTRA: optionalStr('RAPIDAPI_TWITTER_EXTRA', 'type=Latest'),
   /** minutes the price may stay above the ladder (all SOL, earning nothing) before the position is closed */
   LADDER_OOR_EXIT_MIN: num('LADDER_OOR_EXIT_MIN', 30),
+  // Meridian's close rules (config.js defaults); apply to ladder positions in meridian mode, replacing our own exit heuristics. Stop loss stays STOP_LOSS_PCT.
+  MERIDIAN_RULES: bool('MERIDIAN_RULES', true),
+  MERIDIAN_TAKE_PROFIT_PCT: num('MERIDIAN_TAKE_PROFIT_PCT', 5),
+  MERIDIAN_TRAILING_TRIGGER_PCT: num('MERIDIAN_TRAILING_TRIGGER_PCT', 3),
+  MERIDIAN_TRAILING_DROP_PCT: num('MERIDIAN_TRAILING_DROP_PCT', 1.5),
+  // A confirmed trailing TP below this PnL % is not closed (peak reset, position kept; user decision 2026-10-18). Meridian has no floor. 0 = never close a trailing TP at a loss.
+  TRAILING_MIN_PNL_PCT: num('TRAILING_MIN_PNL_PCT', 0),
+  MERIDIAN_OOR_BINS_TO_CLOSE: num('MERIDIAN_OOR_BINS_TO_CLOSE', 10),
+  MERIDIAN_OOR_WAIT_MIN: num('MERIDIAN_OOR_WAIT_MIN', 30),
+  MERIDIAN_MIN_FEE_TVL_24H_PCT: num('MERIDIAN_MIN_FEE_TVL_24H_PCT', 7),
+  MERIDIAN_MIN_AGE_YIELD_CHECK_MIN: num('MERIDIAN_MIN_AGE_YIELD_CHECK_MIN', 60),
+  MERIDIAN_CONFIRM_TICKS: num('MERIDIAN_CONFIRM_TICKS', 2),
+  // token_spot strategy (ours): spot starts N bins above the price so the ~1% entry friction is covered once price enters the range;
+  // shorter OOR wait (also acts as the "price must reach the range" timeout); the AI must be this convinced of a bounce from a local bottom.
+  TOKEN_SPOT_START_OFFSET_BINS: num('TOKEN_SPOT_START_OFFSET_BINS', 1),
+  MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN', 15), // before price first reaches the range
+  MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN', 30), // after it has been in range (bounces are jagged: moonbot/spotbounce.mjs)
+  TOKEN_SPOT_MIN_CONVICTION: num('TOKEN_SPOT_MIN_CONVICTION', 8),
+  TOKEN_SPOT_MIN_BINS: num('TOKEN_SPOT_MIN_BINS', 20),
+  // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.
+  FLIP_ENABLED: bool('FLIP_ENABLED', false),
+  FLIP_TOKEN_SHARE_PCT: num('FLIP_TOKEN_SHARE_PCT', 80),
+  FLIP_TRAILING_TRIGGER_PCT: num('FLIP_TRAILING_TRIGGER_PCT', 5),
+  // Decision PnL (meridian mode: SL, TP, trailing, peak) is net of the estimated cost of selling the token side (user decision 2026-10-18). Jupiter fee + impact is about 1% per leg (friction accounting 2026-10-11).
+  EXIT_COST_PCT: num('EXIT_COST_PCT', 1),
+  EXIT_COST_GAS_SOL: num('EXIT_COST_GAS_SOL', 0.0005),
   ENTRY_LIMIT_WAIT_MIN: num('ENTRY_LIMIT_WAIT_MIN', 30),
   // Exit after the price left the range DOWNWARD and stayed out MAX_IDLE_OUT_OF_RANGE_MINUTES: close, sell the token as an ask this % above the price, wait DOWNBREAK_ASK_WAIT_MIN, then Jupiter for the rest.
   // moonbot/limitlegs.mjs (390 events): +5% ask, 24h wait: mean +1.2% vs -0.55% market dump (6h wait: +0.95%), heavier left tail, survivorship-biased sample.

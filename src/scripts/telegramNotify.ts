@@ -39,6 +39,20 @@ const scrub = (s: string) =>
     .replace(/api-key=[^&\s"']+/gi, 'api-key=***')
     .replace(/\b[1-9A-HJ-NP-Za-km-z]{80,90}\b/g, '***'); // base58 secret-key-length strings (tx signatures are filtered by the same rule on purpose)
 
+/** Packs lines into messages of at most `max` chars, never cutting a line (a line longer than max is its own message, cut by send()). */
+function batchLines(lines: string[], max: number): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (const l of lines) {
+    if (cur && cur.length + 1 + l.length > max) {
+      out.push(cur);
+      cur = l;
+    } else cur = cur ? cur + '\n' + l : l;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 async function send(text: string): Promise<void> {
   try {
     await fetch(`${API}/sendMessage`, {
@@ -119,7 +133,7 @@ async function tokenHoldings(wallet: string): Promise<{ mint: string; symbol: st
         } catch {
           /* unpriced */
         }
-        if (sol === null || sol >= 0.0005) out.push({ mint, symbol, ui, sol });
+        if (sol === null || sol >= 0.005) out.push({ mint, symbol, ui, sol });
       }
     } catch {
       /* ignore */
@@ -164,6 +178,38 @@ function readState(): { wallet: string | null; pool: string | null; outSince: nu
 const hhmm = (iso: string) => iso.slice(11, 16) + ' UTC';
 const ageMin = (iso: string) => Math.round((Date.now() - Date.parse(iso)) / 60_000);
 
+interface PortfolioPool { poolAddress: string; tokenX: string; tokenY: string; binStep: number; baseFee: number; balancesSol: string; balances: string; unclaimedFees: string; unclaimedFeesSol: string; pnlSol: string; pnlSolPctChange: string; totalDepositSol: string; feePerTvl24h: string; outOfRange: boolean }
+interface Portfolio { solPrice: number; pools: PortfolioPool[] }
+
+/** Meteora portfolio API: per-pool value, fees, PnL (PnL includes unclaimed fees); null if unreachable. */
+async function portfolio(wallet: string): Promise<Portfolio | null> {
+  try {
+    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`)).json()) as { solPrice?: string; pools?: PortfolioPool[] };
+    return { solPrice: Number(j.solPrice ?? 0), pools: j.pools ?? [] };
+  } catch {
+    return null;
+  }
+}
+const sg = (n: number, d = 4) => (n >= 0 ? '+' : '') + n.toFixed(d);
+
+function poolLines(p: PortfolioPool, solPrice: number, detail: boolean): string[] {
+  const val = Number(p.balancesSol), fee = Number(p.unclaimedFeesSol), dep = Number(p.totalDepositSol), pnl = Number(p.pnlSol), pct = Number(p.pnlSolPctChange);
+  const usd = (sol: number) => (solPrice > 0 ? ` ($${(sol * solPrice).toFixed(2)})` : '');
+  const out = [`${p.tokenX}-${p.tokenY}: value ${val.toFixed(4)} SOL${usd(val)}, fees ${fee.toFixed(4)} SOL${usd(fee)}, PnL ${sg(pnl)} SOL${usd(pnl)} (${sg(pct, 2)}%)`];
+  if (detail) {
+    out.push(
+      `deposit: ${dep.toFixed(4)} SOL${usd(dep)}`,
+      `fees generated (unclaimed): ${fee.toFixed(4)} SOL = $${Number(p.unclaimedFees).toFixed(2)}`,
+      `position value now: ${val.toFixed(4)} SOL = $${Number(p.balances).toFixed(2)}`,
+      `PnL incl. fees: ${sg(pnl)} SOL = ${sg(pnl * solPrice, 2).replace(/^([+-])/, '$1$')} (${sg(pct, 2)}%)`,
+      `pool fee/TVL 24h: ${Number(p.feePerTvl24h).toFixed(2)}%, bin step ${p.binStep}, base fee ${p.baseFee}%`,
+      `range: ${p.outOfRange ? 'OUT OF RANGE' : 'in range'}`,
+      `SOL price: $${solPrice.toFixed(2)}`,
+    );
+  }
+  return out;
+}
+
 async function statusText(): Promise<string> {
   const st = readState();
   const lines: string[] = [`bot: ${botAlive() ? 'RUNNING' : 'STOPPED'}`];
@@ -175,7 +221,9 @@ async function statusText(): Promise<string> {
   if (sol !== null) lines.push(`wallet SOL: ${sol.toFixed(4)}`);
   for (const h of holds) lines.push(`holding: ${fmtHold(h)}`);
   if (existsSync('state/manual-orders.json') && readFileSync('state/manual-orders.json', 'utf8').trim() !== '[]') lines.push('manual orders:\n' + (await ops(['orders'], 90_000)));
-  const h = count ? lastHealth() : null;
+  const pf = count ? await portfolio(st.wallet) : null;
+  if (pf?.pools.length) for (const p of pf.pools) lines.push(...poolLines(p, pf.solPrice, false));
+  const h = count && !pf?.pools.length ? lastHealth() : null;
   if (h) lines.push(`pos ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (${hhmm(h.ts)}, ${ageMin(h.ts)}m ago)`);
   return lines.join('\n');
 }
@@ -206,6 +254,15 @@ async function posText(): Promise<string> {
   const count = await onChainPositionCount(st.wallet);
   if (count === 0) return 'no open position on-chain' + (st.pool ? ' (state file still lists one: stale, bot not running or not yet reconciled)' : '');
   if (!st.pool) return count === null ? 'no position in state; on-chain check unavailable' : `${count} position(s) on-chain but none in state`;
+  const pf = await portfolio(st.wallet);
+  if (pf?.pools.length) {
+    const out: string[] = [];
+    for (const p of pf.pools) out.push(`pool ${p.poolAddress}`, ...poolLines(p, pf.solPrice, true), '');
+    const hh = lastHealth();
+    if (hh) out.push(`bot health: bin ${hh.currentBinId}, as of ${hhmm(hh.ts)} (${ageMin(hh.ts)}m ago)`);
+    if (st.outSince) out.push(`out of range since ${hhmm(new Date(st.outSince).toISOString())}`);
+    return out.join('\n').trim();
+  }
   const h = lastHealth();
   const lines = [`pool ${st.pool}`];
   if (h) {
@@ -329,6 +386,66 @@ async function askClaude(prompt: string, web = false): Promise<string> {
     child.on('close', (code) => (code === 0 ? resolve(buf) : reject(new Error(`claude exited ${code}`))));
   });
   return out.trim() || 'no answer';
+}
+
+interface PnlPosition { lowerBinId: number; upperBinId: number; poolActiveBinId: number; unrealizedPnl: { balancesSol: number; balanceTokenX: { amountSol: number; usd: number }; balanceTokenY: { amountSol: number; usd: number } } }
+
+/** Token share of an open position (non-SOL side as % of position value) plus its bin range, from Meteora's per-pool position PnL endpoint; null if unreachable. */
+async function tokenShareLine(wallet: string, pool: string, solMint = 'So11111111111111111111111111111111111111112'): Promise<string | null> {
+  try {
+    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/positions/${pool}/pnl?user=${wallet}&status=open`)).json()) as { tokenX?: string; positions?: PnlPosition[] };
+    const pos = j.positions?.[0];
+    if (!pos) return null;
+    const u = pos.unrealizedPnl;
+    const [tok, sol] = j.tokenX === solMint ? [u.balanceTokenY, u.balanceTokenX] : [u.balanceTokenX, u.balanceTokenY];
+    const tokSol = Number(tok.amountSol), solSol = Number(sol.amountSol), total = tokSol + solSol; // the API returns numbers as strings
+    const pct = total > 0 ? (tokSol / total) * 100 : 0;
+    return `token share now: ${pct.toFixed(1)}% (token ${tokSol.toFixed(4)} SOL = $${Number(tok.usd).toFixed(2)}, SOL ${solSol.toFixed(4)}); active bin ${pos.poolActiveBinId}, ladder ${pos.lowerBinId}..${pos.upperBinId}`;
+  } catch {
+    return null;
+  }
+}
+
+/** /aireport: the facts (status, position detail, peak, last events, last AI decisions) handed to Claude, which writes the same kind of status read-out the user normally asks for in chat. */
+async function aiReportText(): Promise<string> {
+  const [status, pos] = await Promise.all([statusText(), posText()]);
+  const wallet = readState()?.wallet;
+  const pf = wallet ? await portfolio(wallet) : null;
+  const names = new Map((pf?.pools ?? []).map((p) => [p.poolAddress, `${p.tokenX}-${p.tokenY}`]));
+  const poolsBlock = (await Promise.all((pf?.pools ?? []).map(async (p) => {
+    const ts = wallet ? await tokenShareLine(wallet, p.poolAddress) : null;
+    return `${p.tokenX}-${p.tokenY} | address ${p.poolAddress} | https://app.meteora.ag/dlmm/${p.poolAddress}${ts ? '\n' + ts : ''}`;
+  }))).join('\n') || 'none';
+  let peak = 'n/a';
+  try {
+    const p = (JSON.parse(readFileSync('state/live-state.json', 'utf8')) as { position?: { peakProfitPct?: number } | null }).position;
+    if (p?.peakProfitPct !== undefined) peak = `${p.peakProfitPct.toFixed(2)}%`;
+  } catch {
+    /* peak stays n/a */
+  }
+  let decisions = 'none';
+  try {
+    decisions = readFileSync('logs/ai-decisions.jsonl', 'utf8').trim().split('\n').slice(-4).map((l) => {
+      const d = JSON.parse(l) as { at?: string; kind?: string; action?: string; pool?: string; strategy?: string; reason?: string };
+      return `${d.at} ${d.kind} ${d.action}${d.strategy ? ' ' + d.strategy : ''} ${d.pool ? (names.get(d.pool) ?? d.pool) : ''}: ${(d.reason ?? '').slice(0, 300)}`;
+    }).join('\n');
+  } catch {
+    /* decisions stay none */
+  }
+  // ponytail: thresholds below are the code defaults (env.ts MERIDIAN_*, STOP_LOSS_PCT); update here if .env.live overrides them
+  const prompt = [
+    'You report the live state of a Meteora DLMM LP bot (real money) to its owner, in Bahasa Indonesia, terse, no markdown tables, no secrets. Use ONLY the facts below; do not invent numbers.',
+    'Cover: bot up/down; the position (pool, value, fees in SOL and $, PnL incl. fees, in/out of range, CURRENT token share from OPEN POOLS); how close it is to each exit rule; what happens next; anything notable or worrying in the recent events/decisions. If there is no position, say what the bot is doing instead. Keep it under 1500 characters. ALWAYS name a pool by its token pair (for example FTR-SOL, never only an address) and print its FULL address plus the Meteora link on its own line, copied exactly from OPEN POOLS; never abbreviate or truncate an address.',
+    'Exit rules (defaults): take profit PnL >= 5%; trailing TP arms at peak PnL >= 3% and closes when PnL drops 1.5 points below the peak; stop loss -25%; out of range >= 30 min (token_spot: 15 min until first reach); price > 10 bins above the ladder; low yield (pool fee/TVL 24h < 7% after 60 min). PnL = value + unclaimed fees vs deposit. The AI manager may also close at any time.',
+    `Now (UTC): ${new Date().toISOString().slice(0, 16)}`,
+    `OPEN POOLS (name | full address | link):\n${poolsBlock}`,
+    `STATUS:\n${status}`,
+    `POSITION DETAIL:\n${pos}`,
+    `PEAK PNL (bot state): ${peak}`,
+    `RECENT EVENTS:\n${logText('15')}`,
+    `LAST AI DECISIONS:\n${decisions}`,
+  ].join('\n\n');
+  return askClaude(prompt);
 }
 
 async function suggestText(arg: string): Promise<string> {
@@ -536,6 +653,7 @@ const HELP = [
   '/status – bot up/down, position, wallet SOL',
   '/pnl – equity and PnL vs baselines',
   '/posisi – open position detail',
+  '/aireport – Claude reads the status, position and recent events and writes a short report (~30 s)',
   '/log [n] – last n events (default 8, max 20)',
   '/scan – top 10 trending TOKEN/SOL pools by 1h volume, no bot filters (~5s)',
   '/suggest [pool] – Claude analyst on the top 10 trending pools incl. X sentiment via web search (~3-6 min), or on one pool',
@@ -560,6 +678,18 @@ async function reply(text: string): Promise<string> {
     case '/pnl': return pnlText();
     case '/posisi': case '/position': return posText();
     case '/log': return logText(arg);
+    case '/aireport': {
+      if (isBusy()) return 'another operation is still running, wait';
+      busy = true;
+      await send('minta Claude baca status posisi (sekitar 30 detik)…');
+      try {
+        return await aiReportText();
+      } catch (e) {
+        return 'failed: ' + (e instanceof Error ? e.message.slice(0, 200) : 'unknown');
+      } finally {
+        busy = false;
+      }
+    }
     case '/scan':
     case '/suggest': {
       if (isBusy()) return 'another operation is still running, wait';
@@ -613,8 +743,10 @@ async function main(): Promise<void> {
       if (logPath) {
         const chunk = readFrom(logPath, offset);
         offset += Buffer.byteLength(chunk);
-        const hits = chunk.split('\n').filter((l) => EVENT_RE.test(l)).map((l) => scrub(l).slice(0, 300));
-        if (hits.length) await send(hits.slice(0, 8).join('\n') + (hits.length > 8 ? `\n…+${hits.length - 8} more` : ''));
+        // AI decision lines carry a long reason: keep up to 1500 chars per line and split into several messages (Telegram caps one at 4096)
+        const hits = chunk.split('\n').filter((l) => EVENT_RE.test(l)).map((l) => scrub(l).slice(0, 1500));
+        for (const msg of batchLines(hits.slice(0, 8), 3800)) await send(msg);
+        if (hits.length > 8) await send(`…+${hits.length - 8} more`);
       }
       const alive = botAlive();
       if (alive !== wasAlive) await send(alive ? 'bot STARTED' : 'bot STOPPED');

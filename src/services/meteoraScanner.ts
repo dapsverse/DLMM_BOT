@@ -560,15 +560,18 @@ export interface FilterOpts {
  */
 export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerConfig, opts: FilterOpts = {}): Promise<MeteoraPair[]> {
   updateChaseGuardResets(config.chaseGuardPools, pairs);
+  // 'meridian' mode screens ONLY by meridian's own window (meridianPoolReject, applied below) plus the token audit in index.ts;
+  // our older heuristics are skipped (mint-authority check included; the AI sees that field). Only the TVL/volume parse check stays.
+  const mer = config.entryStrategyMode === 'meridian';
 
   const preFiltered = pairs.filter((pair) => {
-    if (isBlacklisted(pair.address, config.blacklistPools)) return false;
+    if (isBlacklisted(pair.address, config.blacklistPools) || isBlacklisted(nonSolToken(pair)?.address ?? '', config.blacklistPools)) return false;
 
     const tvl = Number(pair.liquidity);
     const vol24h = Number(pair.trade_volume_24h);
     if (!Number.isFinite(tvl) || !Number.isFinite(vol24h) || tvl <= 0) return false;
 
-    if (tvl < config.minTvlUsd) return false;
+    if (!mer && tvl < config.minTvlUsd) return false;
     // 'range' mode's own absolute TVL floor (see RANGE_MIN_TVL_USD, env.ts)
     // — separate risk from maxCapitalTvlRatioPct below (that one's
     // capital-relative, protects against OUR trade moving a thin pool;
@@ -578,19 +581,19 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     if (!opts.skipSizingChecks && config.entryStrategyMode === 'range' && tvl < config.rangeMinTvlUsd) return false;
     // Real slippage-safety gate (see maxCapitalTvlRatioPct doc comment) —
     // scales with our actual capital instead of a fixed dollar floor.
-    if (!opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
+    if (!mer && !opts.skipSizingChecks && opts.currentCapitalSol !== undefined) {
       const sol = solToken(pair);
       if (sol) {
         const capitalUsd = opts.currentCapitalSol * sol.priceUsd;
         if ((capitalUsd / tvl) * 100 > config.maxCapitalTvlRatioPct) return false;
       }
     }
-    if (vol24h < config.minVolume24hUsd) return false;
-    if (!opts.skipSizingChecks && vol24h / tvl < config.minVolTvlRatio) return false;
-    if (pair.bin_step < config.minBinStep) return false;
+    if (!mer && vol24h < config.minVolume24hUsd) return false;
+    if (!mer && !opts.skipSizingChecks && vol24h / tvl < config.minVolTvlRatio) return false;
+    if (!mer && pair.bin_step < config.minBinStep) return false;
 
     const ageHours = (Date.now() - pair.createdAtMs) / 3_600_000;
-    if (ageHours < config.minPoolAgeHours) return false;
+    if (!mer && ageHours < config.minPoolAgeHours) return false;
 
     // Memecoin screen: require one side to be SOL, and the other side to
     // pass market-cap ceiling / holder floor / freeze-authority checks.
@@ -601,9 +604,10 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // genuinely dipped back down at least once. Entry-only, same as every
     // other capital-sizing-style check here (a HELD position isn't a
     // re-entry).
-    if (!opts.skipSizingChecks && isChaseGuarded(config.chaseGuardPools, memecoin.address)) return false;
-    if (!opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) return false;
-    if (memecoin.holders < config.minTokenHolders) return false;
+    if (!mer && !opts.skipSizingChecks && isChaseGuarded(config.chaseGuardPools, memecoin.address)) return false;
+    if (!mer && !opts.skipSizingChecks && memecoin.marketCapUsd > config.maxMemecoinMarketCapUsd) return false;
+    if (!mer && memecoin.holders < config.minTokenHolders) return false;
+    // free check (field already in the pool response), kept on in every mode incl. meridian
     if (config.requireFreezeAuthorityDisabled && !memecoin.freezeAuthorityDisabled) return false;
     if (!opts.skipSizingChecks && config.entryStrategyMode === 'meridian' && config.meridianLimits) {
       const why = meridianPoolReject({ tvlUsd: tvl, binStep: pair.bin_step, mcapUsd: memecoin.marketCapUsd, holders: memecoin.holders }, config.meridianLimits);
@@ -621,9 +625,10 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // hold (a transient 429 shouldn't force-exit it), but a fresh entry
     // should never commit capital on data we know is missing, not just
     // absent. See dexHydrationFailed doc comment / STONK10 incident.
-    if (!opts.skipSizingChecks && pair.dexHydrationFailed) return false;
+    if (!mer && !opts.skipSizingChecks && pair.dexHydrationFailed) return false;
 
     if (
+      !mer &&
       pair.priceChange1hPct !== undefined &&
       pair.priceChange1hPct < PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT
     ) {
@@ -638,7 +643,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // routinely show -8% to -28% troughs shortly after entry. Entry-only
     // (skipSizingChecks) — a HELD position pumping +50%+ in an hour is
     // exactly the outcome this bot wants, not a reason to force an exit.
-    if (!opts.skipSizingChecks && pair.priceChange1hPct !== undefined && pair.priceChange1hPct > config.maxPriceChange1hPumpPct) {
+    if (!mer && !opts.skipSizingChecks && pair.priceChange1hPct !== undefined && pair.priceChange1hPct > config.maxPriceChange1hPumpPct) {
       return false;
     }
 
@@ -646,7 +651,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // but catches a pool whose blow-off already happened over the last day
     // and has since decelerated enough to slip under the 1h check. See
     // MAX_PRICE_CHANGE_24H_PUMP_PCT (env.ts) for the GO-SOL incident.
-    if (!opts.skipSizingChecks && pair.priceChange24hPct !== undefined && pair.priceChange24hPct > config.maxPriceChange24hPumpPct) {
+    if (!mer && !opts.skipSizingChecks && pair.priceChange24hPct !== undefined && pair.priceChange24hPct > config.maxPriceChange24hPumpPct) {
       return false;
     }
 
@@ -665,16 +670,16 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // 5m only exists via DexScreener, so a failed lookup doesn't block.
     const vol24h = Number(pair.trade_volume_24h);
     const avgHourlyUsd = vol24h / 24;
-    if (pair.volume1hUsd < avgHourlyUsd * config.minRecentActivityRatio) return false;
+    if (!mer && pair.volume1hUsd < avgHourlyUsd * config.minRecentActivityRatio) return false;
 
     const avg5MinUsd = vol24h / 288;
-    if (pair.volumeM5Usd !== undefined && pair.volumeM5Usd < avg5MinUsd * config.minRecentActivityRatio) return false;
+    if (!mer && pair.volumeM5Usd !== undefined && pair.volumeM5Usd < avg5MinUsd * config.minRecentActivityRatio) return false;
 
     // Absolute floor, not relative: a pool with a weak 24h average already
     // has a low bar for the ratio check above, so it can still pass with 0
     // trades in the last 5 minutes. This just asks "did anyone actually
     // trade in the last 5 minutes" directly.
-    if (pair.txCountM5 !== undefined && pair.txCountM5 < config.minTxCountM5) return false;
+    if (!mer && pair.txCountM5 !== undefined && pair.txCountM5 < config.minTxCountM5) return false;
 
     // Basic wash-trading tell: huge volume relative to TVL with price barely
     // moving is what a self-trading loop (buy/sell back and forth, same
@@ -684,6 +689,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // don't block" if 1h price data never hydrated.
     const volTvlRatioNow = Number(pair.trade_volume_24h) / Number(pair.liquidity);
     if (
+      !mer &&
       volTvlRatioNow > WASH_TRADE_VOL_TVL_RATIO_THRESHOLD &&
       pair.priceChange1hPct !== undefined &&
       Math.abs(pair.priceChange1hPct) < WASH_TRADE_FLAT_PRICE_BAND_PCT
@@ -691,7 +697,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
       return false;
     }
 
-    if (config.requireMintAuthorityDisabled) {
+    if (!mer && config.requireMintAuthorityDisabled) {
       const memecoin = nonSolToken(pair);
       // fail-closed: unknown (RPC lookup failed) or still-active mint authority both block the pool
       if (!memecoin || memecoin.mintAuthorityRevoked !== true) return false;
@@ -705,7 +711,7 @@ export async function filterAndRankPools(pairs: MeteoraPair[], config: ScannerCo
     // sell-dominant while holding is itself a reason to reconsider, same
     // as the wash-trade/crash-guard checks). Unknown (no DexScreener h1 tx
     // data) doesn't block, same policy as the rest of this screen.
-    if (pair.buyRatio1h !== undefined && pair.buyRatio1h <= config.entryMinBuyRatio1h) return false;
+    if (!mer && pair.buyRatio1h !== undefined && pair.buyRatio1h <= config.entryMinBuyRatio1h) return false;
 
     // Absolute spike floor for FRESH entries only, 'momentum' mode only —
     // see ENTRY_MIN_SPIKE_RATIO doc comment. A held position's own spike
@@ -916,7 +922,7 @@ export interface PoolEligibility {
  */
 export function poolRejectReasons(pair: MeteoraPair, config: ScannerConfig, opts: FilterOpts = {}): string[] {
   const reasons: string[] = [];
-  if (isBlacklisted(pair.address, config.blacklistPools)) reasons.push('blacklisted');
+  if (isBlacklisted(pair.address, config.blacklistPools) || isBlacklisted(nonSolToken(pair)?.address ?? '', config.blacklistPools)) reasons.push('blacklisted');
   if (!opts.skipSizingChecks && pair.dexHydrationFailed) reasons.push('dexscreener batch hydration failed (unknown trend/tx data)');
 
   const tvl = Number(pair.liquidity);

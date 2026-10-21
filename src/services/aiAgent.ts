@@ -6,6 +6,7 @@ import { env } from '../config/env.js';
 import { parseManagerDecision, parseScreenerDecision, type ManagerDecision, type ScreenerDecision } from '../logic/aiDecision.js';
 import { buildManagerPrompt, buildScreenerPrompt, type AiCandidate, type AiPositionSnapshot, type AiRules } from '../logic/aiPrompts.js';
 import { memoryBlock } from '../logic/aiMemory.js';
+import { flipPromptInfo } from '../logic/flip.js';
 import { loadOutcomes } from './aiOutcomes.js';
 import { reactManage, reactScreen } from './aiReact.js';
 import { logger } from '../utils/logger.js';
@@ -74,8 +75,8 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
     return decision;
   }
   try {
-    const text = await askClaude(buildScreenerPrompt(candidates, capitalSol, recentLines('screen', 5), memoryBlock(loadOutcomes())), true, env.AI_SCREEN_TIMEOUT_S * 1000);
-    decision = parseScreenerDecision(text, new Set(candidates.map((c) => c.pool)), env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION);
+    const text = await askClaude(buildScreenerPrompt(candidates, capitalSol, recentLines('screen', 5), memoryBlock(loadOutcomes()), flipPromptInfo(env)), true, env.AI_SCREEN_TIMEOUT_S * 1000);
+    decision = parseScreenerDecision(text, new Set(candidates.map((c) => c.pool)), env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION, { minConviction: env.TOKEN_SPOT_MIN_CONVICTION, minBins: env.TOKEN_SPOT_MIN_BINS });
   } catch (err) {
     decision = { action: 'skip', reason: `claude call failed: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -102,7 +103,7 @@ export async function aiManage(snapshot: AiPositionSnapshot, rules: AiRules): Pr
     return decision;
   }
   try {
-    const text = await askClaude(buildManagerPrompt(snapshot, rules, recentLines('manage', 5), memoryBlock(loadOutcomes(), 5)), false, env.AI_MANAGE_TIMEOUT_S * 1000);
+    const text = await askClaude(buildManagerPrompt(snapshot, rules, recentLines('manage', 5), memoryBlock(loadOutcomes(), 5), flipPromptInfo(env)), false, env.AI_MANAGE_TIMEOUT_S * 1000);
     decision = parseManagerDecision(text);
   } catch (err) {
     decision = { action: 'hold', reason: `claude call failed: ${err instanceof Error ? err.message : String(err)}` };

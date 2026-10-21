@@ -16,6 +16,9 @@ import {
   computeGasReserveSol,
   walletCapitalSol,
   openLadderEntry,
+  openTokenSpotEntry,
+  executeFlip,
+  getLastClose,
   retryPendingSwapBack,
   getPendingSwapBack,
   restorePendingSwapBack,
@@ -41,11 +44,20 @@ import { auditRejectReason } from './logic/tokenAudit.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
+import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
+import { ladderBounds } from './logic/ladderRange.js';
+import { closeKindFromReason, cooldownHoursAfterClose, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
+import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig } from './logic/flip.js';
+import { estimateExitCostSol, realizedPnl } from './logic/realizedPnl.js';
 
+const meridianConfirmer = new ExitConfirmer();
+const flipConfirmer = new ExitConfirmer();
+// per-pool close history for meridian's cooldowns; in memory only (lost on restart)
+const closeHistory = new Map<string, CloseRec[]>();
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
 
 const blacklistPools = new Map<string, number>();
@@ -53,6 +65,10 @@ const chaseGuardPools = new Map<string, number>(); // see ScannerConfig.chaseGua
 // Optional comma-separated pool addresses to blacklist at boot (in-memory state is lost on restart; e.g. keep a just-closed pool out).
 for (const addr of (process.env.BOOT_BLACKLIST_POOLS ?? '').split(',').map((a) => a.trim()).filter(Boolean)) {
   blacklistPools.set(addr, Date.now() + env.BLACKLIST_DURATION_MS);
+}
+// User-managed pools: kept out of every scan for good (10y expiry; also hard-blocked in meteoraDLMM.ts).
+for (const addr of (process.env.PROTECTED_POOLS ?? '').split(',').map((a) => a.trim()).filter(Boolean)) {
+  blacklistPools.set(addr, Date.now() + 10 * 365 * 86_400_000);
 }
 let currentPool: PoolContext | null = null;
 // Non-SOL mint of the last pool we entered; used by the flat kill-switch to liquidate leftovers.
@@ -63,7 +79,7 @@ let lastSwitchAtMs: number | null = null;
 let lastDollarFlowCheckAtMs = 0;
 let lastDollarFlowBuyRatio: number | null = null;
 // AI manager: one in-flight `claude -p` call at a time, never awaited by the tick (deterministic exits keep running).
-let lastSnap = { valueSol: 0, profitPct: 0, peakPct: 0 };
+let lastSnap = { valueSol: 0, profitPct: 0, peakPct: 0, feesSol: 0 };
 let pendingExit: { ctx: PoolContext; reason: string; snap: typeof lastSnap } | null = null;
 /** Remember why the position is about to be closed; the outcome is written once the position is really gone (next tick). */
 function noteExit(ctx: PoolContext, reason: string): void {
@@ -74,6 +90,19 @@ function flushOutcome(now: number): void {
   const { ctx, reason, snap } = pendingExit;
   pendingExit = null;
   if (currentPool) return; // exit failed or reopened: the position lives on
+  if (env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined) {
+    const hist = [...(closeHistory.get(ctx.poolAddress) ?? []), { kind: closeKindFromReason(reason), feesSol: snap.feesSol }].slice(-10);
+    closeHistory.set(ctx.poolAddress, hist);
+    const hours = cooldownHoursAfterClose(hist, { oorCount: 3, oorHours: 12, repeatCount: 3, repeatHours: 12 });
+    if (hours > 0) {
+      // meridian cools both the pool and its base mint (the scanner checks the blacklist for either key)
+      addToBlacklist(blacklistPools, ctx.poolAddress, now, hours * 3_600_000);
+      addToBlacklist(blacklistPools, ctx.xIsSol ? ctx.mintY : ctx.mintX, now, hours * 3_600_000);
+    }
+  }
+  const lc = getLastClose();
+  const real = lc && lc.pool === ctx.poolAddress ? realizedPnl(ctx.openSpentSol, lc.receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol) : null;
+  logger.info('[index] outcome', { pool: ctx.poolAddress, snapshotPnlPct: +snap.profitPct.toFixed(2), realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null, realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null, spentSol: ctx.openSpentSol ?? null, receivedSol: lc && lc.pool === ctx.poolAddress ? lc.receivedSol : null });
   recordOutcome({
     at: new Date(now).toISOString(),
     pool: ctx.poolAddress,
@@ -83,10 +112,12 @@ function flushOutcome(now: number): void {
     depositSol: ctx.initialDepositSol,
     lastValueSol: snap.valueSol,
     pnlPct: +snap.profitPct.toFixed(2),
+    ...(real ? { realizedPnlPct: +real.pnlPct.toFixed(2), realizedPnlSol: +real.pnlSol.toFixed(5) } : {}),
     peakPct: +snap.peakPct.toFixed(2),
     exitReason: reason,
     entryConviction: ctx.aiEntryConviction ?? null,
     entryReason: ctx.aiEntryReason ?? null,
+    strategy: strategyLabel(ctx),
   });
 }
 let aiManagerBusy = false;
@@ -107,6 +138,7 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
   const c = e.candidate;
   const tok = nonSolToken(c);
   const dd = await getDrawdownFromHighPct(c.address, env.DRAWDOWN_WINDOW_DAYS).catch(() => null);
+  const feeBps = await getTransferFeeBps(e.xIsSol ? c.mint_y : c.mint_x).catch(() => null);
   return {
     pool: c.address,
     name: c.name,
@@ -128,6 +160,9 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
     priceChange6hPct: c.priceChange6hPct ?? null,
     priceChange24hPct: c.priceChange24hPct ?? null,
     drawdownFrom14dHighPct: dd,
+    transferFeePct: feeBps === null ? null : feeBps / 100,
+    freezeAuthorityDisabled: tok?.freezeAuthorityDisabled ?? null,
+    mintAuthorityRevoked: tok?.mintAuthorityRevoked ?? null,
     buyRatio1hByTxCount: c.buyRatio1h ?? null,
     dollarFlowBuyRatio: e.dollarFlow ? +e.dollarFlow.buyRatioUsd.toFixed(3) : null,
     dollarFlowTxSampled: e.dollarFlow?.txSampled ?? null,
@@ -271,12 +306,12 @@ async function tryEnterPool(): Promise<void> {
     // 2026-10-08) — see missingEntryData for the same policy on the rest.
     const solPriceUsd = xIsSol ? candidate.tokenX.priceUsd : candidate.tokenY.priceUsd;
     const reserveSolAccount = xIsSol ? candidate.reserve_x : candidate.reserve_y;
-    const missing = missingEntryData(candidate);
+    const missing = env.ENTRY_STRATEGY_MODE === 'meridian' ? [] : missingEntryData(candidate);
     if (missing.length > 0) {
       logger.warn(`[index] skipping pool ${candidate.address} — entry data incomplete (fail-closed)`, { missing });
       continue;
     }
-    if (env.MAX_DRAWDOWN_FROM_HIGH_PCT > 0) {
+    if (env.MAX_DRAWDOWN_FROM_HIGH_PCT > 0 && env.ENTRY_STRATEGY_MODE !== 'meridian') {
       const drawdownPct = await getDrawdownFromHighPct(candidate.address, env.DRAWDOWN_WINDOW_DAYS);
       if (drawdownPct === null) {
         logger.warn(`[index] skipping pool ${candidate.address} — drawdown-from-high unavailable (fail-closed)`);
@@ -300,11 +335,12 @@ async function tryEnterPool(): Promise<void> {
     }
     const tokenMint = xIsSol ? candidate.mint_y : candidate.mint_x;
     const feeBps = await getTransferFeeBps(tokenMint);
-    if (feeBps === null) {
+    // meridian mode: the AI judges transfer-fee tokens (it sees transferFeePct), no hard gate
+    if (env.ENTRY_STRATEGY_MODE !== 'meridian' && feeBps === null) {
       logger.warn(`[index] skipping pool ${candidate.address} — transfer-fee lookup failed (fail-closed)`);
       continue;
     }
-    if (feeBps > env.MAX_TRANSFER_FEE_BPS) {
+    if (env.ENTRY_STRATEGY_MODE !== 'meridian' && feeBps !== null && feeBps > env.MAX_TRANSFER_FEE_BPS) {
       logger.info(`[index] skipping pool ${candidate.address} — token has a ${feeBps / 100}% transfer fee (max ${env.MAX_TRANSFER_FEE_BPS / 100}%)`);
       continue;
     }
@@ -347,6 +383,7 @@ async function tryEnterPool(): Promise<void> {
   // AI agent (meridian-style screener): picks ONE of the eligible candidates or skips. Fail-closed.
   let toTry = eligible;
   let aiBins: number | undefined;
+  let aiStrategy: 'sol_ladder' | 'token_spot' = 'sol_ladder';
   let aiReason: string | undefined;
   let aiConviction: number | undefined;
   if (aiOn() && eligible.length > 0) {
@@ -357,6 +394,7 @@ async function tryEnterPool(): Promise<void> {
     } else {
       toTry = eligible.filter((e) => e.candidate.address === decision.pool);
       aiBins = decision.bins;
+      aiStrategy = decision.strategy;
       aiReason = decision.reason;
       aiConviction = decision.conviction;
     }
@@ -367,7 +405,9 @@ async function tryEnterPool(): Promise<void> {
       const pool = await openPool(candidate.address);
       lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;
       currentPool = await guarded(() =>
-        env.ENTRY_STRATEGY_MODE === 'meridian'
+        env.ENTRY_STRATEGY_MODE === 'meridian' && aiStrategy === 'token_spot'
+          ? openTokenSpotEntry(pool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y, aiBins)
+          : env.ENTRY_STRATEGY_MODE === 'meridian'
           ? openLadderEntry(pool, candidate.address, candidate.mint_x, candidate.mint_y, xIsSol, currentCapitalSol, candidate.bin_step, xIsSol ? candidate.reserve_x : candidate.reserve_y, aiBins)
           : openInitialPosition(
           pool,
@@ -430,6 +470,8 @@ async function tick(): Promise<void> {
     getBinRangeStatus(ctx),
   ]);
   updateOutOfRangeTracking(ctx, binStatus.isOutOfRange);
+  // token_spot: out of range BELOW = still all token (not reached); inside, or above (sold out into SOL), counts as reached
+  if (ctx.tokenSpot && !ctx.tokenSpotReached && (!binStatus.isOutOfRange || !binStatus.tokenBelowRange)) ctx.tokenSpotReached = true;
 
   // Option A (VOLUME_BASELINE_REFRESH_MS, default 0/disabled) — reuses the
   // volume1hNowUsd already fetched above, no extra API call. See env.ts
@@ -439,14 +481,20 @@ async function tick(): Promise<void> {
     ctx.volume1hBaselineSetAtMs = now;
   }
 
-  const currentProfitPct = ctx.initialDepositSol > 0 ? ((currentValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
+  // Meridian's PnL (Meteora's own) includes unclaimed fees: value excludes them, so add them back in meridian mode (TP/trailing/SL all read this).
+  const meridianRules = env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined;
+  // flip phase: the SOL banked at the flip sits in the wallet; the cycle PnL (SL, trailing, peak) must count it
+  // meridian mode: net of the estimated cost of selling the token side (user decision 2026-10-18), so TP/trailing/SL see what the exit would really return
+  const exitCostSol = meridianRules ? estimateExitCostSol(otherPrincipalSol, env.EXIT_COST_PCT, env.EXIT_COST_GAS_SOL) : 0;
+  const pnlValueSol = pnlBasisSol(currentValueSol, unclaimedFeesSol, ctx.bankedSol ?? 0, meridianRules, exitCostSol);
+  const currentProfitPct = ctx.initialDepositSol > 0 ? ((pnlValueSol - ctx.initialDepositSol) / ctx.initialDepositSol) * 100 : 0;
   ctx.peakProfitPct = Math.max(ctx.peakProfitPct, currentProfitPct);
-  lastSnap = { valueSol: currentValueSol, profitPct: currentProfitPct, peakPct: ctx.peakProfitPct };
+  lastSnap = { valueSol: currentValueSol + (ctx.bankedSol ?? 0), profitPct: currentProfitPct, peakPct: ctx.peakProfitPct, feesSol: unclaimedFeesSol };
 
   const gasCostSol = estimateCycleGasCostSol(ctx.initialDepositSol);
-  const { decision, reasons } = evaluatePosition({
+  const evald = evaluatePosition({
     initialDepositUsd: ctx.initialDepositSol,
-    currentValueUsd: currentValueSol,
+    currentValueUsd: pnlValueSol,
     rebalanceTimestamps: ctx.rebalanceTimestamps,
     volume1hNowUsd: volume1hNowUsd ?? ctx.volume1hBaselineUsd,
     volume1hBaselineUsd: ctx.volume1hBaselineUsd,
@@ -457,6 +505,11 @@ async function tick(): Promise<void> {
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
     peakProfitPct: ctx.peakProfitPct,
   }, now);
+  // Meridian mode: its deterministic close rules replace our own exit heuristics (volume drop, tiered TP, idle rebalance, upside break).
+  // Only the stop loss (STOP_LOSS_PCT) is kept from evaluatePosition.
+  const slHit = evald.reasons.some((r) => r.includes('STOP_LOSS_PCT'));
+  const decision = meridianRules ? 'HOLD' : evald.decision;
+  const reasons = meridianRules ? [] : evald.reasons;
 
   logger.info(`[index] pool ${ctx.poolAddress} health check`, {
     decision,
@@ -467,7 +520,7 @@ async function tick(): Promise<void> {
     currentBinId: binStatus.currentBinId,
   });
 
-  if (decision !== 'HARD_EXIT' && shouldExitOnUpsideBreak({
+  if (!meridianRules && decision !== 'HARD_EXIT' && shouldExitOnUpsideBreak({
     exitAfterMin: ctx.ladderBins !== undefined ? env.LADDER_OOR_EXIT_MIN : env.UPSIDE_BREAK_EXIT_MIN,
     isOutOfRange: binStatus.isOutOfRange,
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
@@ -488,6 +541,93 @@ async function tick(): Promise<void> {
       currentPool = await reconcilePoolStateAfterFailure(ctx);
     }
     return;
+  }
+
+  if (meridianRules && decision === 'HOLD') {
+    let binsAbove = 0;
+    if (ctx.centerBinId !== null && ctx.ladderBins !== undefined) {
+      const { lo, hi } = ladderBounds(ctx.centerBinId, ctx.ladderBins, isTokenSide(ctx) ? !ctx.xIsSol : ctx.xIsSol);
+      binsAbove = ctx.xIsSol ? lo - binStatus.currentBinId : binStatus.currentBinId - hi;
+    }
+    const ageMinutes = ctx.openedAtMs !== undefined ? (now - ctx.openedAtMs) / 60_000 : null;
+    const slReason = slHit ? evald.reasons.find((r) => r.includes('STOP_LOSS_PCT')) : undefined;
+    const exitCfg = {
+      takeProfitPct: env.MERIDIAN_TAKE_PROFIT_PCT,
+      trailingTriggerPct: env.MERIDIAN_TRAILING_TRIGGER_PCT,
+      trailingDropPct: env.MERIDIAN_TRAILING_DROP_PCT,
+      outOfRangeBinsToClose: env.MERIDIAN_OOR_BINS_TO_CLOSE,
+      outOfRangeWaitMinutes: oorWaitMinutes(!!ctx.tokenSpot, !!ctx.tokenSpotReached, { standard: env.MERIDIAN_OOR_WAIT_MIN, spotFirst: env.MERIDIAN_TOKEN_SPOT_OOR_WAIT_MIN, spotAfterReach: env.MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN }),
+      minFeePerTvl24hPct: env.MERIDIAN_MIN_FEE_TVL_24H_PCT,
+      minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
+    };
+    const signal = slReason !== undefined ? `stop loss: ${slReason}` : meridianExitSignal(
+      {
+        pnlPct: currentProfitPct,
+        peakPnlPct: ctx.peakProfitPct,
+        binsAbove,
+        isOutOfRange: binStatus.isOutOfRange,
+        minutesOutOfRange: ctx.outOfRangeSinceMs !== null ? (now - ctx.outOfRangeSinceMs) / 60_000 : null,
+        feePerTvl24hPct: ageMinutes !== null && ageMinutes >= env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN ? await getPoolFeeTvl24hPct(ctx.poolAddress) : null,
+        ageMinutes,
+      },
+      ctx.flipPhase ? flipExitConfig(exitCfg, env.FLIP_TRAILING_TRIGGER_PCT, binStatus.tokenBelowRange) : exitCfg,
+    );
+    if (signal) logger.info('[index] meridian rule signal', { pool: ctx.poolAddress, signal });
+    if (meridianConfirmer.hit(signal, env.MERIDIAN_CONFIRM_TICKS)) {
+      if (trailingBlockedByFloor(signal, currentProfitPct, env.TRAILING_MIN_PNL_PCT)) {
+        // overshoot: the dump outran the 2-tick confirmation, so closing now would only realise a loss. Keep the position and re-arm from here.
+        ctx.peakProfitPct = currentProfitPct;
+        logger.warn('[index] trailing TP confirmed below the PnL floor: NOT closing, peak reset to current PnL', { pool: ctx.poolAddress, signal, pnlPct: +currentProfitPct.toFixed(2), floorPct: env.TRAILING_MIN_PNL_PCT });
+        return;
+      }
+      logger.warn('[index] meridian close rule confirmed — closing', { pool: ctx.poolAddress, signal });
+      try {
+        noteExit(ctx, `MERIDIAN: ${signal!.slice(0, 120)}`);
+        currentCapitalSol = await guarded(() =>
+          signal!.startsWith('stop loss')
+            ? executeCleanExit(ctx, 'STOP_LOSS', chaseGuardPools, false)
+            : env.DOWNBREAK_ASK_PCT > 0 && binStatus.tokenBelowRange && !isTokenSide(ctx)
+              ? executeDownBreakExit(ctx)
+              : executeCleanExit(ctx, 'TAKE_PROFIT', chaseGuardPools, false),
+        );
+        currentPool = null;
+      } catch (err) {
+        logger.error('[index] meridian close threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+        currentPool = await reconcilePoolStateAfterFailure(ctx);
+        // A failed trailing close lets PnL drift far below the old peak; re-arm from where it is now so a later
+        // success does not dump the position at a loss on a stale peak (live 2026-10-16: peak 4.41% -> -0.55% during 388 failed closes).
+        if (currentPool && signal!.startsWith('trailing TP')) {
+          currentPool.peakProfitPct = currentProfitPct;
+          logger.warn('[index] trailing close failed: peak reset to current PnL', { pool: ctx.poolAddress, peakPct: +currentProfitPct.toFixed(2) });
+        }
+      }
+      return;
+    }
+
+    // Bid-ask flip: the SOL ladder has turned into the token. Only when no exit signal is pending (exits win), confirmed over N ticks.
+    if (!signal && env.FLIP_ENABLED) {
+      const sharePct = currentValueSol > 0 ? (otherPrincipalSol / currentValueSol) * 100 : 0;
+      const want = shouldFlip({
+        enabled: true,
+        sharePct,
+        thresholdPct: env.FLIP_TOKEN_SHARE_PCT,
+        isLadder: ctx.ladderBins !== undefined,
+        tokenSpot: !!ctx.tokenSpot,
+        flipPhase: !!ctx.flipPhase,
+      });
+      if (flipConfirmer.hit(want ? 'flip' : null, env.MERIDIAN_CONFIRM_TICKS)) {
+        logger.warn('[index] flip confirmed — closing the ladder and redepositing the token above the price', { pool: ctx.poolAddress, tokenSharePct: +sharePct.toFixed(1) });
+        try {
+          currentPool = await guarded(() => executeFlip(ctx, persist));
+        } catch (err) {
+          logger.error('[index] executeFlip threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
+          currentPool = await reconcilePoolStateAfterFailure(ctx);
+        }
+        return;
+      }
+    } else {
+      flipConfirmer.hit(null, env.MERIDIAN_CONFIRM_TICKS);
+    }
   }
 
   if (decision === 'HARD_EXIT') {
@@ -629,6 +769,8 @@ async function tick(): Promise<void> {
           isOutOfRange: binStatus.isOutOfRange,
           minutesOutOfRange: ctx.outOfRangeSinceMs ? Math.round((now - ctx.outOfRangeSinceMs) / 60_000) : null,
           priceVsLadder,
+          strategy: strategyLabel(ctx),
+          bankedSol: ctx.bankedSol,
           ladderBins: ctx.ladderBins,
           volume1hNowUsd,
           volume1hBaselineUsd: ctx.volume1hBaselineUsd,
