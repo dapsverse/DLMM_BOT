@@ -53,15 +53,28 @@ function batchLines(lines: string[], max: number): string[] {
   return out;
 }
 
-async function send(text: string): Promise<void> {
-  try {
-    await fetch(`${API}/sendMessage`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: CHAT, text: scrub(text).slice(0, 3800) }),
-    });
-  } catch (e) {
-    console.error('send failed', e instanceof Error ? e.message : e);
+/** fetch with a hard timeout: a hung socket must never stall the poll loop or a reply (the default undici timeout is about 5 min). */
+const tfetch = (url: string, init: RequestInit = {}, ms = 12_000): Promise<Response> => fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Sends to the owner chat (or `chatId`); up to 3 attempts, retrying only network errors, 429 (honouring retry_after) and 5xx. Never throws. */
+async function send(text: string, chatId: string = CHAT!): Promise<void> {
+  const body = JSON.stringify({ chat_id: chatId, text: scrub(text).slice(0, 3800) });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let waitMs = 1000 * attempt;
+    try {
+      const res = await tfetch(`${API}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }, 15_000);
+      if (res.ok) return;
+      console.error(`send http ${res.status} (attempt ${attempt})`);
+      if (res.status !== 429 && res.status < 500) return; // a 4xx other than 429 will not get better by retrying
+      if (res.status === 429) {
+        const j = (await res.json().catch(() => null)) as { parameters?: { retry_after?: number } } | null;
+        waitMs = Math.min(j?.parameters?.retry_after ?? 1, 10) * 1000;
+      }
+    } catch (e) {
+      console.error(`send failed (attempt ${attempt})`, e instanceof Error ? e.message : e);
+    }
+    if (attempt < 3) await sleep(waitMs);
   }
 }
 
@@ -89,7 +102,7 @@ const readFrom = (path: string, from: number): string => {
 async function walletSol(wallet: string): Promise<number | null> {
   if (!RPC_URL) return null;
   try {
-    const r = await fetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [wallet, { commitment: 'confirmed' }] }) });
+    const r = await tfetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [wallet, { commitment: 'confirmed' }] }) });
     const j = (await r.json()) as { result?: { value?: number } };
     return typeof j.result?.value === 'number' ? j.result.value / 1e9 : null;
   } catch {
@@ -100,7 +113,7 @@ async function walletSol(wallet: string): Promise<number | null> {
 /** Open DLMM positions per Meteora's portfolio API (ground truth, no SDK / private key); null if unreachable. */
 async function onChainPositionCount(wallet: string): Promise<number | null> {
   try {
-    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`)).json()) as { totalPositions?: number };
+    const j = (await (await tfetch(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`)).json()) as { totalPositions?: number };
     return typeof j.totalPositions === 'number' ? j.totalPositions : null;
   } catch {
     return null;
@@ -113,7 +126,7 @@ async function tokenHoldings(wallet: string): Promise<{ mint: string; symbol: st
   if (!RPC_URL) return out;
   for (const program of ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']) {
     try {
-      const r = await fetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [wallet, { programId: program }, { encoding: 'jsonParsed' }] }) });
+      const r = await tfetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [wallet, { programId: program }, { encoding: 'jsonParsed' }] }) });
       const j = (await r.json()) as { result?: { value?: { account: { data: { parsed: { info: { mint: string; tokenAmount: { uiAmount: number | null } } } } } }[] } };
       for (const a of j.result?.value ?? []) {
         const { mint, tokenAmount } = a.account.data.parsed.info;
@@ -122,7 +135,7 @@ async function tokenHoldings(wallet: string): Promise<{ mint: string; symbol: st
         let sol: number | null = null;
         let symbol = mint.slice(0, 6);
         try {
-          const d = (await (await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)).json()) as { pairs?: { priceNative?: string; baseToken?: { address?: string; symbol?: string }; quoteToken?: { address?: string }; liquidity?: { usd?: number } }[] };
+          const d = (await (await tfetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)).json()) as { pairs?: { priceNative?: string; baseToken?: { address?: string; symbol?: string }; quoteToken?: { address?: string }; liquidity?: { usd?: number } }[] };
           // Only a pair where THIS token is the base and SOL the quote prices it in SOL (EMBER/MET came first and was off by ~280x).
           const solPairs = (d.pairs ?? []).filter((p) => p.baseToken?.address === mint && p.quoteToken?.address === 'So11111111111111111111111111111111111111112');
           solPairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
@@ -184,7 +197,7 @@ interface Portfolio { solPrice: number; pools: PortfolioPool[] }
 /** Meteora portfolio API: per-pool value, fees, PnL (PnL includes unclaimed fees); null if unreachable. */
 async function portfolio(wallet: string): Promise<Portfolio | null> {
   try {
-    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`)).json()) as { solPrice?: string; pools?: PortfolioPool[] };
+    const j = (await (await tfetch(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`)).json()) as { solPrice?: string; pools?: PortfolioPool[] };
     return { solPrice: Number(j.solPrice ?? 0), pools: j.pools ?? [] };
   } catch {
     return null;
@@ -297,7 +310,7 @@ const TREND_MAX_MCAP = 200_000_000; // keeps majors (HYPE, TRUMP-size caps) and 
 
 /** Top-N TOKEN/SOL pools by 1h volume straight from Meteora, NO bot filters. */
 async function trendingPools(n = 10): Promise<{ addr: string; line: string; symbol: string; mint: string }[]> {
-  const d = (await (await fetch('https://dlmm.datapi.meteora.ag/pools?page_size=100&sort_by=volume_1h:desc')).json()) as {
+  const d = (await (await tfetch('https://dlmm.datapi.meteora.ag/pools?page_size=100&sort_by=volume_1h:desc')).json()) as {
     data: { address: string; name: string; tvl: number; volume: Record<string, number>; token_x: { address: string; symbol: string; market_cap?: number }; token_y: { address: string; symbol: string; market_cap?: number } }[];
   };
   const out: { addr: string; line: string; symbol: string; mint: string }[] = [];
@@ -325,7 +338,7 @@ async function scanText(): Promise<string> {
 async function poolFacts(addr: string): Promise<string> {
   const lines: string[] = [];
   try {
-    const d = (await (await fetch(`https://dlmm.datapi.meteora.ag/pools/${addr}`)).json()) as {
+    const d = (await (await tfetch(`https://dlmm.datapi.meteora.ag/pools/${addr}`)).json()) as {
       name?: string; tvl?: number; current_price?: number; created_at?: number; launchpad?: string; dynamic_fee_pct?: number;
       pool_config?: { bin_step?: number; base_fee_pct?: number; collect_fee_mode?: number };
       volume?: Record<string, number>; fees?: Record<string, number>; fee_tvl_ratio?: Record<string, number>;
@@ -349,7 +362,7 @@ async function poolFacts(addr: string): Promise<string> {
     lines.push(`POOL ${addr}: Meteora API unavailable`);
   }
   try {
-    const dx = (await (await fetch(`https://api.dexscreener.com/latest/dex/pairs/solana/${addr}`)).json()) as {
+    const dx = (await (await tfetch(`https://api.dexscreener.com/latest/dex/pairs/solana/${addr}`)).json()) as {
       pair?: { priceChange?: Record<string, number>; txns?: Record<string, { buys: number; sells: number }>; volume?: Record<string, number> };
     };
     const pc = dx.pair?.priceChange;
@@ -365,7 +378,7 @@ async function poolFacts(addr: string): Promise<string> {
 async function getTransferFee(mint: string): Promise<number | null> {
   if (!RPC_URL) return null;
   try {
-    const r = await fetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAccountInfo', params: [mint, { encoding: 'jsonParsed' }] }) });
+    const r = await tfetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAccountInfo', params: [mint, { encoding: 'jsonParsed' }] }) });
     const j = (await r.json()) as { result?: { value?: { data?: { parsed?: { info?: { extensions?: { extension: string; state?: { newerTransferFee?: { transferFeeBasisPoints?: number } } }[] } } } } } };
     const info = j.result?.value?.data?.parsed?.info;
     if (!info) return null;
@@ -393,7 +406,7 @@ interface PnlPosition { lowerBinId: number; upperBinId: number; poolActiveBinId:
 /** Token share of an open position (non-SOL side as % of position value) plus its bin range, from Meteora's per-pool position PnL endpoint; null if unreachable. */
 async function tokenShareLine(wallet: string, pool: string, solMint = 'So11111111111111111111111111111111111111112'): Promise<string | null> {
   try {
-    const j = (await (await fetch(`https://dlmm.datapi.meteora.ag/positions/${pool}/pnl?user=${wallet}&status=open`)).json()) as { tokenX?: string; positions?: PnlPosition[] };
+    const j = (await (await tfetch(`https://dlmm.datapi.meteora.ag/positions/${pool}/pnl?user=${wallet}&status=open`)).json()) as { tokenX?: string; positions?: PnlPosition[] };
     const pos = j.positions?.[0];
     if (!pos) return null;
     const u = pos.unrealizedPnl;
@@ -724,16 +737,23 @@ async function main(): Promise<void> {
   let offset = logPath ? statSync(logPath).size : 0; // start at the end: no backlog spam
   let wasAlive = botAlive();
   let updateOffset = 0;
-  const first = (await (await fetch(`${API}/getUpdates?offset=-1`)).json()) as { result?: { update_id: number }[] };
-  if (first.result?.length) updateOffset = first.result[first.result.length - 1]!.update_id + 1;
-  await fetch(`${API}/setMyCommands`, {
+  try {
+    const first = (await (await tfetch(`${API}/getUpdates?offset=-1`)).json()) as { result?: { update_id: number }[] };
+    if (first.result?.length) updateOffset = first.result[first.result.length - 1]!.update_id + 1;
+  } catch (e) {
+    console.error('initial getUpdates failed, starting from the queue head', e instanceof Error ? e.message : e);
+  }
+  await tfetch(`${API}/setMyCommands`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ commands: HELP.split('\n').map((l) => ({ command: l.slice(1, l.indexOf(' ')).replace('[n]', ''), description: l.slice(l.indexOf('–') + 2) })) }),
   }).catch(() => undefined);
   await send(`telegram notifier online (bot ${wasAlive ? 'running' : 'stopped'}). /help for commands.`);
 
+  let tickRunning = false; // a slow send must not let ticks pile up
   setInterval(async () => {
+    if (tickRunning) return;
+    tickRunning = true;
     try {
       const cur = newestLog();
       if (cur && cur !== logPath) {
@@ -753,20 +773,75 @@ async function main(): Promise<void> {
       wasAlive = alive;
     } catch (e) {
       console.error('tick failed', e instanceof Error ? e.message : e);
+    } finally {
+      tickRunning = false;
     }
   }, 10_000);
 
+  // Polling never waits for a command: each message is handled in the background, so a slow command cannot make the bot look dead.
+  const strangerAt = new Map<string, number>();
   for (;;) {
     try {
-      const r = (await (await fetch(`${API}/getUpdates?timeout=25&offset=${updateOffset}`)).json()) as { result?: { update_id: number; message?: { chat?: { id: number }; text?: string } }[] };
+      const res = await tfetch(`${API}/getUpdates?timeout=25&offset=${updateOffset}`, {}, 35_000);
+      const r = (await res.json()) as { ok?: boolean; error_code?: number; result?: { update_id: number; message?: { chat?: { id: number }; text?: string } }[] };
+      if (!r.ok) {
+        // e.g. 409 = another poller uses this token; back off instead of spinning
+        console.error(`getUpdates not ok (${r.error_code ?? res.status})${r.error_code === 409 ? ': another instance is polling this token' : ''}`);
+        await sleep(5000);
+        continue;
+      }
       for (const u of r.result ?? []) {
         updateOffset = u.update_id + 1;
-        if (String(u.message?.chat?.id) !== CHAT) continue; // only the owner is ever answered
-        if ((u.message?.text ?? '').startsWith('/')) await send(await reply(u.message!.text!));
+        const m = u.message;
+        const chatId = m?.chat?.id;
+        if (chatId === undefined) continue;
+        if (String(chatId) !== CHAT) {
+          // never run commands for another chat; answer at most once per 10 min per chat
+          const last = strangerAt.get(String(chatId)) ?? 0;
+          if (Date.now() - last > 600_000) {
+            strangerAt.set(String(chatId), Date.now());
+            void send('chat tidak dikenal. pakai /help dari chat pemilik.', String(chatId));
+          }
+          continue;
+        }
+        void handle(m?.text ?? '');
       }
-    } catch {
-      await new Promise((res) => setTimeout(res, 5000));
+    } catch (e) {
+      console.error('getUpdates failed', e instanceof Error ? e.message : e);
+      await sleep(5000);
     }
+  }
+}
+
+/** Commands that can run for minutes (Claude calls, manual on-chain ops, a confirmed action): one at a time, the rest are answered at once. */
+const SLOW_CMDS = new Set(['/aireport', '/scan', '/suggest', '/ya', '/open', '/openmarket', '/openpool', '/orders', '/cancelorder', '/close', '/clean']);
+let slowRunning: string | null = null;
+
+async function handle(text: string): Promise<void> {
+  try {
+    if (!text.startsWith('/')) {
+      await send('teks biasa tidak dibaca bot ini. pakai /help');
+      return;
+    }
+    const cmd = (text.trim().split(/\s+/)[0] ?? '').replace(/@\w+$/, '').toLowerCase();
+    if (!SLOW_CMDS.has(cmd)) {
+      await send(await reply(text));
+      return;
+    }
+    if (slowRunning) {
+      await send(`masih mengerjakan ${slowRunning}, tunggu selesai lalu coba lagi`);
+      return;
+    }
+    slowRunning = cmd;
+    try {
+      if (cmd === '/ya') await send('sedang dikerjakan…'); // the armed action may take minutes (the other slow commands announce themselves)
+      await send(await reply(text));
+    } finally {
+      slowRunning = null;
+    }
+  } catch (e) {
+    console.error('handle failed', e instanceof Error ? e.message : e);
+    await send('error: ' + (e instanceof Error ? e.message.slice(0, 200) : 'unknown'));
   }
 }
 
