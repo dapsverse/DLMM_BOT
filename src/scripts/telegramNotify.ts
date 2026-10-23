@@ -8,6 +8,7 @@ import { execFile, execSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { cycleView, type CycleBasis } from '../logic/cyclePnl.js';
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -179,10 +180,13 @@ function lastHealth(): Health | null {
   }
 }
 
-function readState(): { wallet: string | null; pool: string | null; outSince: number | null; pendingOrder: boolean; pendingSwap: boolean } | null {
+function readState(): { wallet: string | null; pool: string | null; outSince: number | null; pendingOrder: boolean; pendingSwap: boolean; basis: (CycleBasis & { pool: string }) | null } | null {
   try {
-    const s = JSON.parse(readFileSync('state/live-state.json', 'utf8')) as { wallet?: string; position?: { poolAddress: string; outOfRangeSinceMs: number | null } | null; pendingLimitOrder?: unknown; pendingSwapBack?: unknown };
-    return { wallet: s.wallet ?? null, pool: s.position?.poolAddress ?? null, outSince: s.position?.outOfRangeSinceMs ?? null, pendingOrder: !!s.pendingLimitOrder, pendingSwap: !!s.pendingSwapBack };
+    const s = JSON.parse(readFileSync('state/live-state.json', 'utf8')) as { wallet?: string; position?: { poolAddress: string; outOfRangeSinceMs: number | null; initialDepositSol?: number; flipPhase?: boolean; bankedSol?: number } | null; pendingLimitOrder?: unknown; pendingSwapBack?: unknown };
+    const p = s.position;
+    // cycle basis: a flip opens a new Meteora position, the bot's own basis (initialDepositSol + bankedSol) is what the cycle PnL must use
+    const basis = p && p.flipPhase ? { pool: p.poolAddress, initialDepositSol: p.initialDepositSol ?? 0, flipPhase: true, bankedSol: p.bankedSol ?? 0 } : null;
+    return { wallet: s.wallet ?? null, pool: p?.poolAddress ?? null, outSince: p?.outOfRangeSinceMs ?? null, pendingOrder: !!s.pendingLimitOrder, pendingSwap: !!s.pendingSwapBack, basis };
   } catch {
     return null;
   }
@@ -205,13 +209,16 @@ async function portfolio(wallet: string): Promise<Portfolio | null> {
 }
 const sg = (n: number, d = 4) => (n >= 0 ? '+' : '') + n.toFixed(d);
 
-function poolLines(p: PortfolioPool, solPrice: number, detail: boolean): string[] {
-  const val = Number(p.balancesSol), fee = Number(p.unclaimedFeesSol), dep = Number(p.totalDepositSol), pnl = Number(p.pnlSol), pct = Number(p.pnlSolPctChange);
+function poolLines(p: PortfolioPool, solPrice: number, detail: boolean, basis?: (CycleBasis & { pool: string }) | null): string[] {
+  const val = Number(p.balancesSol), fee = Number(p.unclaimedFeesSol);
+  // after a flip Meteora's deposit/PnL restart from the new position: show the whole cycle against the original deposit
+  const cv = cycleView(val, fee, Number(p.totalDepositSol), Number(p.pnlSol), Number(p.pnlSolPctChange), basis && basis.pool === p.poolAddress ? basis : null);
+  const dep = cv.depositSol, pnl = cv.pnlSol, pct = cv.pnlPct;
   const usd = (sol: number) => (solPrice > 0 ? ` ($${(sol * solPrice).toFixed(2)})` : '');
-  const out = [`${p.tokenX}-${p.tokenY}: value ${val.toFixed(4)} SOL${usd(val)}, fees ${fee.toFixed(4)} SOL${usd(fee)}, PnL ${sg(pnl)} SOL${usd(pnl)} (${sg(pct, 2)}%)`];
+  const out = [`${p.tokenX}-${p.tokenY}: value ${val.toFixed(4)} SOL${usd(val)}, fees ${fee.toFixed(4)} SOL${usd(fee)}, PnL ${sg(pnl)} SOL${usd(pnl)} (${sg(pct, 2)}%)${cv.flipped ? ` [cycle incl. flip, banked ${cv.bankedSol.toFixed(4)} SOL]` : ''}`];
   if (detail) {
     out.push(
-      `deposit: ${dep.toFixed(4)} SOL${usd(dep)}`,
+      cv.flipped ? `deposit (original, before flip): ${dep.toFixed(4)} SOL${usd(dep)}; flipped position deposit: ${Number(p.totalDepositSol).toFixed(4)} SOL` : `deposit: ${dep.toFixed(4)} SOL${usd(dep)}`,
       `fees generated (unclaimed): ${fee.toFixed(4)} SOL = $${Number(p.unclaimedFees).toFixed(2)}`,
       `position value now: ${val.toFixed(4)} SOL = $${Number(p.balances).toFixed(2)}`,
       `PnL incl. fees: ${sg(pnl)} SOL = ${sg(pnl * solPrice, 2).replace(/^([+-])/, '$1$')} (${sg(pct, 2)}%)`,
@@ -235,7 +242,7 @@ async function statusText(): Promise<string> {
   for (const h of holds) lines.push(`holding: ${fmtHold(h)}`);
   if (existsSync('state/manual-orders.json') && readFileSync('state/manual-orders.json', 'utf8').trim() !== '[]') lines.push('manual orders:\n' + (await ops(['orders'], 90_000)));
   const pf = count ? await portfolio(st.wallet) : null;
-  if (pf?.pools.length) for (const p of pf.pools) lines.push(...poolLines(p, pf.solPrice, false));
+  if (pf?.pools.length) for (const p of pf.pools) lines.push(...poolLines(p, pf.solPrice, false, st.basis));
   const h = count && !pf?.pools.length ? lastHealth() : null;
   if (h) lines.push(`pos ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (${hhmm(h.ts)}, ${ageMin(h.ts)}m ago)`);
   return lines.join('\n');
@@ -270,7 +277,7 @@ async function posText(): Promise<string> {
   const pf = await portfolio(st.wallet);
   if (pf?.pools.length) {
     const out: string[] = [];
-    for (const p of pf.pools) out.push(`pool ${p.poolAddress}`, ...poolLines(p, pf.solPrice, true), '');
+    for (const p of pf.pools) out.push(`pool ${p.poolAddress}`, ...poolLines(p, pf.solPrice, true, st.basis), '');
     const hh = lastHealth();
     if (hh) out.push(`bot health: bin ${hh.currentBinId}, as of ${hhmm(hh.ts)} (${ageMin(hh.ts)}m ago)`);
     if (st.outSince) out.push(`out of range since ${hhmm(new Date(st.outSince).toISOString())}`);
