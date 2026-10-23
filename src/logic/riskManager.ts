@@ -5,28 +5,19 @@ import { logger } from '../utils/logger.js';
 export type RiskDecision = 'HOLD' | 'REBALANCE' | 'HARD_EXIT' | 'TAKE_PROFIT';
 
 /**
- * Sticky-per-tier trailing floor — see TAKE_PROFIT_TIERS (constants.ts) for
- * the table and rationale. Returns null if peak hasn't armed yet (below the
- * first tier's armPct). Pure/exported so it's independently testable — see
- * checkTakeProfitTiers.ts.
+ * Ratcheting trailing take-profit floor — see TAKE_PROFIT_TIERS (constants.ts) for the anchors and rationale. Linear between anchors, so the
+ * floor rises continuously with the peak; above the last anchor it keeps that anchor's giveback. Returns null if the peak has not armed yet
+ * (below the first anchor's armPct). Pure/exported so it is independently testable — see checkTakeProfitTiers.ts.
  */
 export function trailingTakeProfitFloorPct(peakProfitPct: number, tiers = TAKE_PROFIT_TIERS): number | null {
   if (tiers.length === 0 || peakProfitPct < tiers[0]!.armPct) return null;
-
-  let floorPct = tiers[0]!.floorPct;
-  for (const tier of tiers) {
-    if (peakProfitPct >= tier.armPct) floorPct = tier.floorPct;
+  for (let i = 1; i < tiers.length; i++) {
+    const a = tiers[i - 1]!;
+    const b = tiers[i]!;
+    if (peakProfitPct <= b.armPct) return a.floorPct + ((b.floorPct - a.floorPct) * (peakProfitPct - a.armPct)) / (b.armPct - a.armPct);
   }
-
-  // Beyond the last tier, keep rolling using its own giveback delta instead
-  // of freezing forever — never below the sticky floor above.
   const last = tiers[tiers.length - 1]!;
-  if (peakProfitPct >= last.armPct) {
-    const giveback = last.armPct - last.floorPct;
-    floorPct = Math.max(floorPct, peakProfitPct - giveback);
-  }
-
-  return floorPct;
+  return Math.max(last.floorPct, peakProfitPct - (last.armPct - last.floorPct));
 }
 
 /**
@@ -133,7 +124,7 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
   const floorPct = trailingTakeProfitFloorPct(input.peakProfitPct);
   if (floorPct !== null && profitPct <= floorPct) {
     const r = [
-      `profit ${profitPct.toFixed(2)}% dropped to trailing floor ${floorPct.toFixed(2)}% (peak ${input.peakProfitPct.toFixed(2)}%, sticky tier — see TAKE_PROFIT_TIERS)`,
+      `profit ${profitPct.toFixed(2)}% dropped to trailing floor ${floorPct.toFixed(2)}% (peak ${input.peakProfitPct.toFixed(2)}%, ratcheting floor — see TAKE_PROFIT_TIERS)`,
     ];
     logger.info('[riskManager] TAKE_PROFIT', { reasons: r });
     return { decision: 'TAKE_PROFIT', reasons: r };

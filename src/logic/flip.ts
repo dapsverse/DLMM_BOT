@@ -1,8 +1,9 @@
 /**
  * Bid-ask flip (yunus-0x/meridian strategy 1, meridian mode): a SOL-only bid-ask ladder (DCA-in) whose price fell BELOW its lowest bin
  * (the SOL side is 100% token) is closed and redeposited token-only as a bid-ask ABOVE the old ladder's lower boundary (DCA-out).
- * Once flipped the position waits: no AI exit, no recenter, no out-of-range-below timer. The only exits are the cycle stop loss, a pool
- * liquidity collapse, and the ladder sold out above the range for FLIP_OOR_ABOVE_EXIT_MIN minutes. Pure decisions only; the on-chain steps
+ * Once flipped the position waits: no AI exit, no recenter, no out-of-range-below timer. The only exits are the cycle stop loss, the ratcheting
+ * trailing take-profit (once the cycle peak armed it, see flipTakeProfitSignal), a pool liquidity collapse, and the ladder sold out above the range
+ * for FLIP_OOR_ABOVE_EXIT_MIN minutes. Pure decisions only; the on-chain steps
  * live in rebalanceEngine.executeFlip. Kept import-free of the wallet so self-checks can load it.
  */
 export interface SideFlags {
@@ -54,8 +55,19 @@ export interface FlipExitConfig {
 }
 
 /**
- * Exit signals of the flip phase, besides the cycle stop loss (the caller handles that first). Everything else is OFF here on purpose:
- * no AI close, no trailing/take-profit, no low-yield, no pumped-above, no out-of-range-below timer, no recenter. Waiting for the bounce is the strategy.
+ * Profit protection of the flip phase (user decision 2026-10-24, after 9fm4XN peaked +21.4% and ended at the stop loss): `floorPct` is the ratcheting
+ * trailing floor of the cycle peak (trailingTakeProfitFloorPct; null = the peak never armed it, then the flip keeps waiting for the bounce and only
+ * the stop loss / liquidity / sold-out exits apply). The text before ':' stays constant so ExitConfirmer can compare ticks; it starts with
+ * "trailing TP" so trailingBlockedByFloor keeps a dump that already fell below the PnL floor from being sold at a loss.
+ */
+export function flipTakeProfitSignal(peakPct: number, pnlPct: number, floorPct: number | null): string | null {
+  if (floorPct === null || pnlPct > floorPct) return null;
+  return `trailing TP (flip): cycle PnL ${pnlPct.toFixed(2)}% <= floor ${floorPct.toFixed(2)}% (peak ${peakPct.toFixed(2)}%)`;
+}
+
+/**
+ * Exit signals of the flip phase, besides the cycle stop loss and the trailing take-profit (flipTakeProfitSignal; the caller handles those first).
+ * Everything else is OFF here on purpose: no AI close, no meridian TP/trailing, no low-yield, no pumped-above, no out-of-range-below timer, no recenter. Waiting for the bounce is the strategy.
  */
 export function flipExitSignal(i: FlipExitInput, c: FlipExitConfig): string | null {
   if (i.tvlUsd !== null && i.flipTvlUsd !== null && i.flipTvlUsd > 0 && i.tvlUsd < (i.flipTvlUsd * c.tvlCollapsePct) / 100) {

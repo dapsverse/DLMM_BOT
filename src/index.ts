@@ -29,7 +29,7 @@ import {
   POSITION_RENT_BUFFER_SOL,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
-import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist } from './logic/riskManager.js';
+import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist, trailingTakeProfitFloorPct } from './logic/riskManager.js';
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio, type DollarFlowResult } from './services/flowAnalysis.js';
 import { aiScreen, aiManage } from './services/aiAgent.js';
@@ -52,7 +52,7 @@ import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
-import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, selectExitSignal, aiExitAllowed } from './logic/flip.js';
+import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, flipTakeProfitSignal, selectExitSignal, aiExitAllowed } from './logic/flip.js';
 import { estimateExitCostSol, realizedPnl } from './logic/realizedPnl.js';
 
 const meridianConfirmer = new ExitConfirmer();
@@ -535,6 +535,10 @@ async function tick(): Promise<void> {
   const slHit = evald.reasons.some((r) => r.includes('STOP_LOSS_PCT'));
   const decision = meridianRules ? 'HOLD' : evald.decision;
   const reasons = meridianRules ? [] : evald.reasons;
+  // Flip phase: meridian's own TP/trailing are off there, so the ratcheting floor (TAKE_PROFIT_TIERS) is the profit protection: once the cycle peak armed it
+  // (peak below the first tier = never armed: the flip keeps waiting for the bounce, the stop loss decides) and the cycle PnL falls back to the floor, sell.
+  const flipTpFloor = ctx.flipPhase ? trailingTakeProfitFloorPct(ctx.peakProfitPct) : null;
+  const flipTp = flipTakeProfitSignal(ctx.peakProfitPct, currentProfitPct, flipTpFloor);
 
   logger.info(`[index] pool ${ctx.poolAddress} health check`, {
     decision,
@@ -588,8 +592,8 @@ async function tick(): Promise<void> {
       minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
     };
     const minutesOutOfRange = ctx.outOfRangeSinceMs !== null ? (now - ctx.outOfRangeSinceMs) / 60_000 : null;
-    // Flip phase: only the cycle stop loss (above), a pool TVL collapse and "sold out above the range for N min" can exit (logic/flip.ts flipExitSignal).
-    const flipPhaseSignal = ctx.flipPhase ? flipExitSignal({ isOutOfRange: binStatus.isOutOfRange, tokenBelowRange: binStatus.tokenBelowRange, minutesOutOfRange, tvlUsd: (await getPoolStats(ctx.poolAddress)).tvlUsd, flipTvlUsd: ctx.flipTvlUsd ?? null }, { oorAboveExitMin: env.FLIP_OOR_ABOVE_EXIT_MIN, tvlCollapsePct: env.FLIP_TVL_COLLAPSE_PCT }) : null;
+    // Flip phase: only the cycle stop loss (above), the ratcheting trailing TP (flipTp), a pool TVL collapse and "sold out above the range for N min" can exit (logic/flip.ts).
+    const flipPhaseSignal = ctx.flipPhase ? flipTp ?? flipExitSignal({ isOutOfRange: binStatus.isOutOfRange, tokenBelowRange: binStatus.tokenBelowRange, minutesOutOfRange, tvlUsd: (await getPoolStats(ctx.poolAddress)).tvlUsd, flipTvlUsd: ctx.flipTvlUsd ?? null }, { oorAboveExitMin: env.FLIP_OOR_ABOVE_EXIT_MIN, tvlCollapsePct: env.FLIP_TVL_COLLAPSE_PCT }) : null;
     // meridian's own rules only matter on a SOL ladder that is not about to flip (no needless fee/TVL call otherwise)
     const meridianSignal = ctx.flipPhase || flipWanted || slReason !== undefined ? null : meridianExitSignal(
       {

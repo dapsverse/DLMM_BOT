@@ -3,7 +3,7 @@
 Single-pool auto-managed Meteora DLMM LP bot for Solana memecoin pools. REAL MONEY is live (wallet address redacted as `<LIVE_WALLET_ADDRESS>` in git; key in `.env.live`).
 Current mode: `ENTRY_STRATEGY_MODE=meridian` with a Claude ReAct screener + manager (`AI_AGENT`, `AI_REACT`, `AI_REACT_MANAGER`).
 Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONLY when its topic is relevant to the task; do not load them all.
-`SCREEN_RULE.MD` is the spec of the entry screen filters. Remote: `origin` = github.com/dapsverse/DLMM_BOT (public). PR #2 = branch `feature/trend-aware-entry` (not merged).
+`SCREEN_RULE.MD` = entry screen spec. Remote: `origin` = github.com/dapsverse/DLMM_BOT.
 
 ## Safety rules (do not relax)
 - NEVER print private keys, seed phrases, Helius/RAPIDAPI keys or the Telegram token to any tool output. Do not `cat`/Read `.env*`. Edit env only via scripts that print nothing; verify with length/prefix only.
@@ -23,7 +23,7 @@ Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONL
 - `src/services/` I/O: `meteoraDLMM.ts`, `meteoraScanner.ts`, `jupiterSwap.ts`, `solana.ts` (decodes `PRIVATE_KEY` at import), `aiReact.ts` (Claude Agent SDK tools), `aiAgent.ts`, `xNarrative.ts` (RapidAPI X posts), `smartWallets.ts`, `stateStore.ts`, `flowAnalysis.ts`, `rugcheck.ts`.
 - `src/scripts/` `check*.ts` self-checks (plain `assert`, no test framework), `telegramNotify.ts` (separate daemon), `manualOps.ts`, `findSmartLpers.ts`, `paperTrade.ts`, `dryBootRecovery.ts`.
 - `moonbot/` read-only research sims (data dirs gitignored; NOT part of the bot). `scripts/livectl.sh` runs a command with `.env.live` loaded.
-- Local-only files (not in git): `.env`, `.env.live`, `.env.telegram`, `smart-wallets.json`, `state/`, `logs/`.
+- Local-only (never commit): `.env*`, `smart-wallets.json`, `state/`, `logs/`.
 
 ## Commands
 - Build/typecheck: `npm run build` (tsc), `npm run typecheck`. Run: `npm start` (= `node dist/index.js`, needs build; LIVE, user's word only). `npm run dev` = `tsx watch src/index.ts`.
@@ -44,7 +44,7 @@ Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONL
 
 ## Key operational facts (from the notes; do not re-derive)
 - On-chain positions are the source of truth at boot (`recoverOnBoot`): 0 -> flat, 1 -> resume from state or rebuild from chain, >1 -> refuse to trade.
-- Ladder = SOL-only bid-ask, 69-70 bins max in ONE tx (more needs a non-atomic 2-tx add). Flip only when price is below the lowest bin (100% token), then no AI exit/trailing/TP: exits = cycle SL, pool TVL collapse, sold-out above range 10 min; SL 25% of original deposit (our rule, meridian default is 50); meridian close rules confirmed over 2 ticks of 15 s; decision PnL includes unclaimed fees and banked SOL, net of exit cost.
+- Ladder = SOL-only bid-ask, 69-70 bins max in ONE tx (more needs a non-atomic 2-tx add). Flip only when price is below the lowest bin (100% token), then no AI exit/meridian TP: exits = cycle SL, ratcheting trailing TP (`TAKE_PROFIT_TIERS`, peak>=12%, `flipTakeProfitSignal`), pool TVL collapse, sold-out above range 10 min; SL 25% of original deposit (our rule, meridian default is 50); meridian close rules confirmed over 2 ticks of 15 s; decision PnL includes unclaimed fees and banked SOL, net of exit cost.
 - Read-after-write RPC races are real: use `waitForTokenBalance`; swaps re-quote on every retry; close txs need `LADDER_COMPUTE_UNIT_LIMIT` 900k.
 - Meteora datapi blocks python urllib (use curl) and returns numbers as strings. `getPositionHealthSnapshot.currentValueSol` excludes unclaimed fees. Helius free plan: per-second 429s; avoid RPC-heavy scans.
 - Telegram notifier is a separate daemon without the private key; ops go through `scripts/livectl.sh` + `manualOps.ts`.
