@@ -37,11 +37,11 @@ Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONL
 - Merged to main, live: falling-knife prompt as a caution, X narrative via RapidAPI (`x_posts_untrusted`, 15 min cache), Telegram push without truncation.
 - Bot runs on `main` under systemd since 2026-10-22; boot recovery resumes from `state/live-state.json` (carry it with the repo). Token `1` (pool `7UERUj…`, stopped out 10-21): 60% sold, the rest sits in a Jupiter limit order at +60% (cancel anytime).
 - Ubuntu services (user systemd): `dlmmbot.service`, `dlmm-telegram.service`; start/stop only on the user's word.
-- Telegram notifier (merged 2026-10-22): fetch timeouts, non-blocking polling (slow cmds under one lock), send() retry, 409 backoff, non-/ text gets "pakai /help"; systemd drop-in sets NODE_OPTIONS=--network-family-autoselection-attempt-timeout=3000 (Node's 250 ms default broke fetch). Run ONE notifier per token.
-- Flip PnL display (2026-10-23): /status and /posisi used Meteora's NEW-position deposit/PnL after a flip; now `src/logic/cyclePnl.ts` uses state `initialDepositSol` + `bankedSol` (bot's own PnL was already right). Self-check `checkCyclePnl.ts`.
+- Telegram notifier: non-blocking polling, timeouts, send() retry, 409 backoff; systemd drop-in `NODE_OPTIONS=--network-family-autoselection-attempt-timeout=3000` (Node's 250 ms default broke fetch). ONE notifier per token.
 - Flip rules (branch feat/flip-hold-until-sl): flip at tokenBelowRange, asks start above the OLD ladder bottom (`flipAnchorBin`), AI manager not consulted in flip phase (`aiExitAllowed`), `selectExitSignal`, env `FLIP_CONFIRM_TICKS` 1 / `FLIP_OOR_ABOVE_EXIT_MIN` 10 / `FLIP_TVL_COLLAPSE_PCT` 30 (ref `flipTvlUsd` in state); replay `src/scripts/replayFlipCycles.ts`.
 - Not proven live: AI deploy/close paths in all variants, down-break on a ladder, flip over a full cycle, token_spot.
 - Pending/open: rotate leaked keys; meridian threshold auto-evolution after 20-30 closed positions; Telegram `/status` still shows gross PnL; known `openInitialPosition` gaps (notes/12); RapidAPI quota vs plan.
+- Flip display (2026-10-23): /status, /posisi, /aireport show a flip as one cycle: `logic/cyclePnl.ts` + `logic/poolLines.ts` use state `initialDepositSol` + `bankedSol`, label "flip position value" and add a "total cycle value" line. Checks `checkCyclePnl.ts`, `checkPoolLines.ts`.
 
 ## Key operational facts (from the notes; do not re-derive)
 - On-chain positions are the source of truth at boot (`recoverOnBoot`): 0 -> flat, 1 -> resume from state or rebuild from chain, >1 -> refuse to trade. Rebuilt-from-chain contexts cannot know flip/token_spot.
