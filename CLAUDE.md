@@ -3,10 +3,10 @@
 Single-pool auto-managed Meteora DLMM LP bot for Solana memecoin pools. REAL MONEY is live (wallet address redacted as `<LIVE_WALLET_ADDRESS>` in git; key in `.env.live`).
 Current mode: `ENTRY_STRATEGY_MODE=meridian` with a Claude ReAct screener + manager (`AI_AGENT`, `AI_REACT`, `AI_REACT_MANAGER`).
 Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONLY when its topic is relevant to the task; do not load them all.
-`SCREEN_RULE.MD` is the spec of the entry screen filters. Remote: `origin` = github.com/dapsverse/DLMM_BOT (public). PR #2 = branch `feature/trend-aware-entry` (not merged).
+`SCREEN_RULE.MD` = entry screen spec. Remote: `origin` = github.com/dapsverse/DLMM_BOT.
 
 ## Safety rules (do not relax)
-- NEVER print private keys, seed phrases, Helius/RAPIDAPI keys or the Telegram token to any tool output. Do not `cat`/Read `.env*`. Edit env only via scripts that print nothing; verify with length/prefix only.
+- NEVER print private keys, seed phrases, Helius/RAPIDAPI keys or the Telegram token to any tool output. No `cat`/Read of `.env*`. Edit env only via scripts that print nothing.
 - NEVER start the live bot (`npm start`, `node dist/index.js`, `/startbot`) or the Telegram listener, open/close positions, or send on-chain tx without the user's explicit word. A bare kill/SIGTERM (incl. `/stopbot`) does NOT close positions.
 - Do not close the open position `2tdDrG…` unless the user says so. `PROTECTED_POOLS` (in `.env.live`) shields the user's MANUAL DARK-SOL pool: the bot never enters/closes/recovers it.
 - Never commit to `main`/`master` (protected). Work on a branch + PR. Update this CLAUDE.md (and the notes) before any PR. Never commit `.env*`, `state/`, `logs/`, `smart-wallets.json`, `*.bak*`.
@@ -35,7 +35,7 @@ Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONL
 - Mode meridian, wallet shared with the user's manual DARK-SOL pool. Settings: `TOKEN_SHARE_PCT` 50, `MIN_EQUITY_STOP_SOL=0`, `MAX_CAPITAL_SOL=0`, trailing TP floor `TRAILING_MIN_PNL_PCT` 0, own smart-wallet list (35 wallets), Bid-Ask Flip enabled, realized-PnL reporting (decision PnL net of exit cost), WebSearch-once narrative as a consideration.
 - Bot runs on `main` under systemd since 2026-10-22; boot recovery resumes from `state/live-state.json`. Token `1` (pool `7UERUj…`, stopped out 10-21): 60% sold, the rest sits in a Jupiter limit order at +60% (cancel anytime).
 - Ubuntu services (user systemd): `dlmmbot.service`, `dlmm-telegram.service`; start/stop only on the user's word.
-- Telegram notifier: non-blocking polling, timeouts, send() retry, 409 backoff; systemd drop-in `NODE_OPTIONS=--network-family-autoselection-attempt-timeout=3000`. ONE notifier per token; it tails the newest `logs/live-*.log`, so start the bot with systemd-run `-p StandardOutput=append:logs/live-systemd-<date>.log`; events formatted by `logic/telegram{Ai,Event}Format.ts`.
+- Telegram notifier: non-blocking polling, timeouts, send() retry, 409 backoff; systemd drop-in `NODE_OPTIONS=--network-family-autoselection-attempt-timeout=3000`. ONE notifier per token; it tails the newest `logs/live-*.log`, so start the bot with systemd-run `-p StandardOutput=append:logs/live-systemd-<date>.log`; events formatted + deduped by `logic/telegram{Ai,Event}Format.ts`. Meridian ignores riskManager's TP (SL only); flip phase has no profit protection (SL/TVL/sold-out only).
 - Flip rules (merged #7): flip at tokenBelowRange, asks above the OLD ladder bottom (`flipAnchorBin`), no AI exit in flip phase (`aiExitAllowed`, `selectExitSignal`), env `FLIP_CONFIRM_TICKS` 1 / `FLIP_OOR_ABOVE_EXIT_MIN` 10 / `FLIP_TVL_COLLAPSE_PCT` 30.
 - Shadow selector (log only, never touches entries/exits): `logic/shadowStrategy.ts` votes pick A (two-sided 50:50) or B (SOL ladder + flip) per entry -> `state/shadow-strategy.jsonl`; env `SHADOW_*`. Wallet-free `scripts/shadowRunner.ts` (unit `dlmm-shadow`: `PRIVATE_KEY=SHADOW_RUNNER_NO_KEY`, `DOTENV_CONFIG_PATH=/nonexistent`, public `RPC_URL`) also runs 1-SOL paper positions (`logic/shadowSim.ts`, bot's exit rules) -> `state/shadow-sim.jsonl`; paired (`SHADOW_SIM_PAIRED`): each decision opens A and B, `chosen` marks the selector pick; `scripts/reportShadowStrategy.ts`.
 - Not proven live: AI deploy/close paths in all variants, down-break on a ladder, flip over a full cycle, token_spot.

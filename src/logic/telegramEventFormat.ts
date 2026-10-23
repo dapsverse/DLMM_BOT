@@ -99,3 +99,15 @@ export function formatEvent(line: string): string | null | undefined {
   }
   return generic(level, mod, msg, d, time);
 }
+
+/** Drops a message identical to one seen within `windowMs` (the WIB time line is ignored), so a line the bot repeats every tick is sent once per window. */
+export function createDeduper(windowMs: number): (msg: string, nowMs?: number) => boolean {
+  const seen = new Map<string, number>();
+  return (msg, nowMs = Date.now()) => {
+    for (const [k, t] of seen) if (nowMs - t >= windowMs) seen.delete(k);
+    const key = msg.replace(/\d{2}:\d{2} WIB/g, '');
+    if (seen.has(key)) return true;
+    seen.set(key, nowMs);
+    return false;
+  };
+}

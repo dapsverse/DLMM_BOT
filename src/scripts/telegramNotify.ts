@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import type { CycleBasis } from '../logic/cyclePnl.js';
 import { poolLineTexts } from '../logic/poolLines.js';
-import { formatEvent } from '../logic/telegramEventFormat.js';
+import { createDeduper, formatEvent } from '../logic/telegramEventFormat.js';
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -760,6 +760,7 @@ async function main(): Promise<void> {
   }).catch(() => undefined);
   await send(`telegram notifier online (bot ${wasAlive ? 'running' : 'stopped'}). /help for commands.`);
 
+  const isRepeat = createDeduper(10 * 60_000);
   let tickRunning = false; // a slow send must not let ticks pile up
   setInterval(async () => {
     if (tickRunning) return;
@@ -783,7 +784,7 @@ async function main(): Promise<void> {
             const f = formatEvent(s);
             return f === undefined ? s.slice(0, 1500) : f?.slice(0, 1500) ?? null;
           })
-          .filter((m): m is string => m !== null);
+          .filter((m): m is string => m !== null && !isRepeat(m)); // the same message again within 10 min (a line logged every tick) is sent once
         for (const msg of batchLines(hits.slice(0, 8), 3800)) await send(msg);
         if (hits.length > 8) await send(`…+${hits.length - 8} more`);
       }

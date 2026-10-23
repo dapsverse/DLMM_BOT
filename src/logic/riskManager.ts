@@ -135,7 +135,9 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
     const r = [
       `profit ${profitPct.toFixed(2)}% dropped to trailing floor ${floorPct.toFixed(2)}% (peak ${input.peakProfitPct.toFixed(2)}%, sticky tier — see TAKE_PROFIT_TIERS)`,
     ];
-    logger.info('[riskManager] TAKE_PROFIT', { reasons: r });
+    // debug, not info: meridian mode (index.ts) calls this only for the stop loss and drops this decision, so an info line on every 15 s tick looked
+    // like an exit that never happened (live 2026-10-23: 119 lines, 18:43-19:13Z, no close). A real exit is logged by rebalanceEngine ("TAKE_PROFIT: closing position").
+    logger.debug('[riskManager] TAKE_PROFIT', { reasons: r });
     return { decision: 'TAKE_PROFIT', reasons: r };
   }
 

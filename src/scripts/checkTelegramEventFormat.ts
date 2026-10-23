@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { formatEvent } from '../logic/telegramEventFormat.js';
+import { createDeduper, formatEvent } from '../logic/telegramEventFormat.js';
 
 const entered = '2026-10-23T13:46:55.365Z [info] [index] entered pool 9fm4XNjiNUXVQqu7d4X2iqjkhgftptcUvD2XbgheexAY {"capitalSol":0.613240337,"priceChange1hPct":4.99,"priceChange6hPct":-18.54,"priceChange24hPct":410,"volumeSpikeRatio":0.477,"buyRatio1h":0.5303030303030303,"priceContext":{"aboveLow6hPct":14.95,"belowHigh6hPct":-30.8,"aboveLow48hPct":978.47,"belowHigh48hPct":-45.5,"chg15mPct":-1.97,"chg1hPct":5.1,"higherLow":true},"feeYield":{"r24h":10.569494930124756,"r4hx6":12.755},"dollarFlow":null}';
 assert.equal(
@@ -34,4 +34,15 @@ assert.equal(formatEvent('2026-10-23T10:07:39.486Z [error] [x] boom'), '❌ boom
 assert.ok(formatEvent('2026-10-23T13:31:15.445Z [info] [ai] screener decision {"action":"skip","reason":"r","conviction":6}')!.startsWith('🤖 AI Screener: SKIP'));
 assert.equal(formatEvent('2026-10-23T13:31:58.487Z [info] [index] AI screener: skip {"reason":"r"}'), null);
 assert.equal(formatEvent('plain text line'), undefined);
+
+// deduper: the same message within the window is dropped (time line ignored), a different one or one after the window passes
+const rep = createDeduper(10 * 60_000);
+const tp = '2026-10-23T18:43:00.224Z [info] [riskManager] TAKE_PROFIT {"reasons":["profit 4.23% dropped to trailing floor 6.00%"]}';
+const m1 = formatEvent(tp)!;
+const m2 = formatEvent(tp.replace('18:43:00', '18:44:15'))!; // next minute: only the WIB time differs
+assert.notEqual(m1, m2);
+assert.equal(rep(m1, 0), false);
+assert.equal(rep(m2, 60_000), true);
+assert.equal(rep(formatEvent(tp.replace('4.23%', '3.30%'))!, 61_000), false); // different content
+assert.equal(rep(m1, 11 * 60_000), false); // window over
 console.log('checkTelegramEventFormat ok');
