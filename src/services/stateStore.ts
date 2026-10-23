@@ -40,6 +40,8 @@ export interface PersistedPosition {
   flipPhase?: boolean;
   /** SOL taken out at the flip, left in the wallet and counted in the cycle PnL */
   bankedSol?: number;
+  /** pool TVL (USD) at the flip, reference of the liquidity-collapse exit; absent in older files */
+  flipTvlUsd?: number;
   /** wallet SOL spent by the entry (deposit + rent + gas, measured across the entry tx); absent when not measured reliably */
   openSpentSol?: number;
 }

@@ -92,18 +92,18 @@ function flipScreenerText(f: FlipPromptInfo | null): string {
   if (!f) return '';
   return `BID-ASK FLIP (our strategy; it is what happens to EVERY sol_ladder you deploy after entry — the bot runs it, you only choose the entry):
 1. DCA-in: the SOL-only bid-ask sits below the price. As price falls through the bins the SOL turns into the token and earns fees on the way.
-2. Flip: when about ${f.tokenSharePct}% of the position value is the token, the bot withdraws it and redeposits the token ALONE as a bid-ask ABOVE the price (DCA-out). The SOL taken out stays in the wallet and counts in the PnL.
-3. DCA-out: it then WAITS for a bounce (no out-of-range timer, no recenter). Floor: stop loss ${f.stopLossPct}% of the original deposit. Take profit: a trailing stop that arms at +${f.trailingTriggerPct}% PnL and closes ${f.trailingDropPct} points under the peak; the position also closes when price runs far above the range (the token has sold back into SOL).
+2. Flip: only when the price falls BELOW the lowest bin (the whole SOL side is token), the bot withdraws it at once and redeposits the token ALONE as a bid-ask ABOVE the old ladder's bottom (DCA-out). The SOL taken out stays in the wallet and counts in the PnL.
+3. DCA-out: it then WAITS for a bounce (no AI close, no out-of-range-below timer, no recenter, no trailing stop). It exits only on: the stop loss ${f.stopLossPct}% of the whole cycle (original deposit, banked SOL and fees counted), a pool liquidity collapse, or the token sold out above the range for ${f.oorAboveExitMin} minutes (the take profit).
 What this means for your pick: a sol_ladder entry is a plan to buy the dip AND hold the token until it bounces. A token with real volume and holders that can bounce fits; a token whose volume and buyers are disappearing (dump, rug, dead narrative) never bounces and the loss runs to the stop loss. The numbers above are the bot's defaults, not rules for you: judge with all the data, and skip when the bounce case is weak.`;
 }
 
 function flipManagerText(f: FlipPromptInfo | null): string {
   if (!f) return '';
   return `STRATEGY CONTEXT (bid-ask flip, ours). The position is in one of these phases (snapshot field "strategy"):
-- sol_ladder: DCA-in. SOL-only bid-ask below the price; the SOL turns into the token as price falls. The bot flips it automatically at about ${f.tokenSharePct}% token share.
-- bid_ask_flip: DCA-out. The token was redeposited alone as a bid-ask above the price and the bot WAITS for a bounce on purpose: being out of range below the position is expected, not a problem by itself. profitPct is the WHOLE cycle versus the original deposit and already includes bankedSol (SOL taken out at the flip, held in the wallet); valueSol is only what is still in the pool. Automatic exits: stop loss ${f.stopLossPct}%, a trailing stop that arms at +${f.trailingTriggerPct}% and closes ${f.trailingDropPct} points under the peak, and a close when price runs far above the range (the final take profit).
+- sol_ladder: DCA-in. SOL-only bid-ask below the price; the SOL turns into the token as price falls. The bot flips it automatically once the price is below the lowest bin (100% token).
+- bid_ask_flip: DCA-out. The token was redeposited alone as a bid-ask above the price and the bot WAITS for a bounce on purpose; you are NOT asked about it and cannot close it (an AI close is blocked in this phase). profitPct is the WHOLE cycle versus the original deposit and already includes bankedSol (SOL taken out at the flip, held in the wallet); valueSol is only what is still in the pool. Automatic exits: stop loss ${f.stopLossPct}% of the cycle, a pool liquidity collapse, and the token sold out above the range for ${f.oorAboveExitMin} minutes (the take profit).
 - token_spot: a token-only spot bounce trade, unrelated to the flip.
-These numbers are defaults, not rules for you. Close earlier when the data says the bounce is not coming (volume dead, sustained dump, rug or holder signals), hold longer when it still looks alive. Closing a flip position early realises the cycle loss, so give a concrete reason.`;
+For a sol_ladder, close earlier only when the data says the bounce is not coming (volume dead, sustained dump, rug or holder signals) and say why.`;
 }
 
 function screenerCore(capitalSol: number, memory: string, recentDecisions: string[], flip: FlipPromptInfo | null): string {
