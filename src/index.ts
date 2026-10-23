@@ -37,6 +37,7 @@ import type { AiCandidate } from './logic/aiPrompts.js';
 import { outcomeLine, priorFor } from './logic/aiMemory.js';
 import { managerTrigger } from './logic/aiTriggers.js';
 import { loadOutcomes, recordOutcome } from './services/aiOutcomes.js';
+import { shadowDecision, shadowOutcome } from './services/shadowLog.js';
 import type { TokenAudit } from './logic/tokenAudit.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
 import { getTokenAudit } from './services/tokenAudit.js';
@@ -118,6 +119,19 @@ function flushOutcome(now: number): void {
     entryConviction: ctx.aiEntryConviction ?? null,
     entryReason: ctx.aiEntryReason ?? null,
     strategy: strategyLabel(ctx),
+  });
+  // SHADOW strategy selector: the real result next to what the rule would have picked (log only, never throws)
+  shadowOutcome({
+    pool: ctx.poolAddress,
+    openedAtMs: ctx.openedAtMs,
+    realStrategy: ctx.flipPhase ? 'bid_ask_flip' : strategyLabel(ctx),
+    flipped: !!ctx.flipPhase,
+    exitReason: reason,
+    minutesHeld: ctx.openedAtMs ? Math.round((now - ctx.openedAtMs) / 60_000) : null,
+    depositSol: ctx.initialDepositSol,
+    realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null,
+    realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null,
+    snapshotPnlPct: +snap.profitPct.toFixed(2),
   });
 }
 let aiManagerBusy = false;
@@ -400,6 +414,17 @@ async function tryEnterPool(): Promise<void> {
     }
   }
   for (const { candidate, xIsSol, reserveSolAccount, solPriceUsd, dollarFlow } of toTry) {
+    // SHADOW strategy selector: logs which strategy a trend rule WOULD pick. Fire and forget (never awaited, never throws, own timeout): zero effect on this entry.
+    void shadowDecision({
+      pool: candidate.address,
+      name: candidate.name ?? null,
+      mint: xIsSol ? candidate.mint_y : candidate.mint_x,
+      binStep: candidate.bin_step,
+      buyRatio1h: candidate.buyRatio1h ?? null,
+      solPriceUsd: Number.isFinite(solPriceUsd) ? solPriceUsd : null,
+      aiStrategy,
+      aiConviction: aiConviction ?? null,
+    }).catch(() => undefined);
     const priceContext = await getEntryPriceContext(candidate.address); // observability only, never gates entry
     try {
       const pool = await openPool(candidate.address);

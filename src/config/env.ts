@@ -537,6 +537,18 @@ export const env = {
   MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN: num('MERIDIAN_TOKEN_SPOT_OOR_AFTER_REACH_MIN', 30), // after it has been in range (bounces are jagged: moonbot/spotbounce.mjs)
   TOKEN_SPOT_MIN_CONVICTION: num('TOKEN_SPOT_MIN_CONVICTION', 8),
   TOKEN_SPOT_MIN_BINS: num('TOKEN_SPOT_MIN_BINS', 20),
+  // SHADOW strategy selector (log only, never changes an entry or an exit): which of A (two-sided 50:50 bid-ask) / B (SOL-only ladder + flip) a trend rule
+  // WOULD pick at each entry. Rules and thresholds: logic/shadowStrategy.ts. Output: state/shadow-strategy.jsonl, report: src/scripts/reportShadowStrategy.ts.
+  SHADOW_STRATEGY_ENABLED: bool('SHADOW_STRATEGY_ENABLED', true),
+  SHADOW_CHG_15M_PCT: num('SHADOW_CHG_15M_PCT', 1.5), // 15m price change that counts as up/down
+  SHADOW_CHG_1H_PCT: num('SHADOW_CHG_1H_PCT', 3),
+  SHADOW_CHG_4H_PCT: num('SHADOW_CHG_4H_PCT', 8),
+  SHADOW_EMA_SLOPE_PCT: num('SHADOW_EMA_SLOPE_PCT', 0.5), // EMA12 (5m) change over the last 15 min
+  SHADOW_PRESSURE_BAND: num('SHADOW_PRESSURE_BAND', 0.05), // buy pressure above 0.5+band = +1, below 0.5-band = -1
+  SHADOW_VOL_CONFIRM_RATIO: num('SHADOW_VOL_CONFIRM_RATIO', 1.3), // volume last 1h / prior 1h that confirms the 1h move
+  SHADOW_DOWN_SCORE: num('SHADOW_DOWN_SCORE', 2), // score <= -this enters "down" (B); >= +this is "up"
+  SHADOW_EXIT_SCORE: num('SHADOW_EXIT_SCORE', 1), // hysteresis: once "down", stay down until the score is >= this
+  SHADOW_FETCH_TIMEOUT_MS: num('SHADOW_FETCH_TIMEOUT_MS', 4000),
   // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.
   FLIP_ENABLED: bool('FLIP_ENABLED', false),
   FLIP_TOKEN_SHARE_PCT: num('FLIP_TOKEN_SHARE_PCT', 80),
