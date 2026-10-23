@@ -8,7 +8,8 @@ import { execFile, execSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
-import { cycleView, type CycleBasis } from '../logic/cyclePnl.js';
+import type { CycleBasis } from '../logic/cyclePnl.js';
+import { poolLineTexts } from '../logic/poolLines.js';
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -207,27 +208,28 @@ async function portfolio(wallet: string): Promise<Portfolio | null> {
     return null;
   }
 }
-const sg = (n: number, d = 4) => (n >= 0 ? '+' : '') + n.toFixed(d);
-
+/** After a flip Meteora's deposit/PnL restart from the new position: poolLineTexts shows the whole cycle against the original deposit (logic/poolLines.ts). */
 function poolLines(p: PortfolioPool, solPrice: number, detail: boolean, basis?: (CycleBasis & { pool: string }) | null): string[] {
-  const val = Number(p.balancesSol), fee = Number(p.unclaimedFeesSol);
-  // after a flip Meteora's deposit/PnL restart from the new position: show the whole cycle against the original deposit
-  const cv = cycleView(val, fee, Number(p.totalDepositSol), Number(p.pnlSol), Number(p.pnlSolPctChange), basis && basis.pool === p.poolAddress ? basis : null);
-  const dep = cv.depositSol, pnl = cv.pnlSol, pct = cv.pnlPct;
-  const usd = (sol: number) => (solPrice > 0 ? ` ($${(sol * solPrice).toFixed(2)})` : '');
-  const out = [`${p.tokenX}-${p.tokenY}: value ${val.toFixed(4)} SOL${usd(val)}, fees ${fee.toFixed(4)} SOL${usd(fee)}, PnL ${sg(pnl)} SOL${usd(pnl)} (${sg(pct, 2)}%)${cv.flipped ? ` [cycle incl. flip, banked ${cv.bankedSol.toFixed(4)} SOL]` : ''}`];
-  if (detail) {
-    out.push(
-      cv.flipped ? `deposit (original, before flip): ${dep.toFixed(4)} SOL${usd(dep)}; flipped position deposit: ${Number(p.totalDepositSol).toFixed(4)} SOL` : `deposit: ${dep.toFixed(4)} SOL${usd(dep)}`,
-      `fees generated (unclaimed): ${fee.toFixed(4)} SOL = $${Number(p.unclaimedFees).toFixed(2)}`,
-      `position value now: ${val.toFixed(4)} SOL = $${Number(p.balances).toFixed(2)}`,
-      `PnL incl. fees: ${sg(pnl)} SOL = ${sg(pnl * solPrice, 2).replace(/^([+-])/, '$1$')} (${sg(pct, 2)}%)`,
-      `pool fee/TVL 24h: ${Number(p.feePerTvl24h).toFixed(2)}%, bin step ${p.binStep}, base fee ${p.baseFee}%`,
-      `range: ${p.outOfRange ? 'OUT OF RANGE' : 'in range'}`,
-      `SOL price: $${solPrice.toFixed(2)}`,
-    );
-  }
-  return out;
+  return poolLineTexts(
+    {
+      tokenX: p.tokenX,
+      tokenY: p.tokenY,
+      binStep: p.binStep,
+      baseFee: p.baseFee,
+      valueSol: Number(p.balancesSol),
+      valueUsd: Number(p.balances),
+      feesSol: Number(p.unclaimedFeesSol),
+      feesUsd: Number(p.unclaimedFees),
+      depositSol: Number(p.totalDepositSol),
+      pnlSol: Number(p.pnlSol),
+      pnlPct: Number(p.pnlSolPctChange),
+      feePerTvl24h: Number(p.feePerTvl24h),
+      outOfRange: p.outOfRange,
+    },
+    solPrice,
+    detail,
+    basis && basis.pool === p.poolAddress ? basis : null,
+  );
 }
 
 async function statusText(): Promise<string> {
@@ -456,7 +458,7 @@ async function aiReportText(): Promise<string> {
   const prompt = [
     'You report the live state of a Meteora DLMM LP bot (real money) to its owner, in Bahasa Indonesia, terse, no markdown tables, no secrets. Use ONLY the facts below; do not invent numbers.',
     'Cover: bot up/down; the position (pool, value, fees in SOL and $, PnL incl. fees, in/out of range, CURRENT token share from OPEN POOLS); how close it is to each exit rule; what happens next; anything notable or worrying in the recent events/decisions. If there is no position, say what the bot is doing instead. Keep it under 1500 characters. ALWAYS name a pool by its token pair (for example FTR-SOL, never only an address) and print its FULL address plus the Meteora link on its own line, copied exactly from OPEN POOLS; never abbreviate or truncate an address.',
-    'Exit rules (defaults): take profit PnL >= 5%; trailing TP arms at peak PnL >= 3% and closes when PnL drops 1.5 points below the peak; stop loss -25%; out of range >= 30 min (token_spot: 15 min until first reach); price > 10 bins above the ladder; low yield (pool fee/TVL 24h < 7% after 60 min). PnL = value + unclaimed fees vs deposit. The AI manager may also close at any time.',
+    'Exit rules (defaults): take profit PnL >= 5%; trailing TP arms at peak PnL >= 3% and closes when PnL drops 1.5 points below the peak; stop loss -25%; out of range >= 30 min (token_spot: 15 min until first reach); price > 10 bins above the ladder; low yield (pool fee/TVL 24h < 7% after 60 min). PnL = value + unclaimed fees vs deposit. For a flipped position (a "total cycle value" line is present) report that total and the cycle PnL; "flip position value" is only the token-side position, never call it the whole value. The AI manager may also close at any time.',
     `Now (UTC): ${new Date().toISOString().slice(0, 16)}`,
     `OPEN POOLS (name | full address | link):\n${poolsBlock}`,
     `STATUS:\n${status}`,
