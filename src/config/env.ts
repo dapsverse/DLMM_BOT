@@ -549,6 +549,9 @@ export const env = {
   SHADOW_DOWN_SCORE: num('SHADOW_DOWN_SCORE', 2), // score <= -this enters "down" (B); >= +this is "up"
   SHADOW_EXIT_SCORE: num('SHADOW_EXIT_SCORE', 1), // hysteresis: once "down", stay down until the score is >= this
   SHADOW_FETCH_TIMEOUT_MS: num('SHADOW_FETCH_TIMEOUT_MS', 4000),
+  // standalone runner (src/scripts/shadowRunner.ts, no wallet): minutes between scans (min 5) and how many top candidates per scan are logged
+  SHADOW_RUNNER_INTERVAL_MIN: num('SHADOW_RUNNER_INTERVAL_MIN', 15),
+  SHADOW_RUNNER_TOP: num('SHADOW_RUNNER_TOP', 3),
   // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.
   FLIP_ENABLED: bool('FLIP_ENABLED', false),
   // Flip trigger: price below the lowest bin of the SOL ladder (100% token), confirmed over FLIP_CONFIRM_TICKS ticks (1 = immediately). Flip phase: no AI exit,
