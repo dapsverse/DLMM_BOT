@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import type { CycleBasis } from '../logic/cyclePnl.js';
 import { poolLineTexts } from '../logic/poolLines.js';
+import { formatAiScreener } from '../logic/telegramAiFormat.js';
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -773,7 +774,16 @@ async function main(): Promise<void> {
         const chunk = readFrom(logPath, offset);
         offset += Buffer.byteLength(chunk);
         // AI decision lines carry a long reason: keep up to 1500 chars per line and split into several messages (Telegram caps one at 4096)
-        const hits = chunk.split('\n').filter((l) => EVENT_RE.test(l)).map((l) => scrub(l).slice(0, 1500));
+        // AI screener lines become one readable message each (the duplicate "[index] AI screener: skip" line is dropped); every other event stays the raw line
+        const hits = chunk
+          .split('\n')
+          .filter((l) => EVENT_RE.test(l))
+          .map((l) => {
+            const s = scrub(l);
+            const f = formatAiScreener(s);
+            return f === undefined ? s.slice(0, 1500) : f?.slice(0, 1500) ?? null;
+          })
+          .filter((m): m is string => m !== null);
         for (const msg of batchLines(hits.slice(0, 8), 3800)) await send(msg);
         if (hits.length > 8) await send(`…+${hits.length - 8} more`);
       }
