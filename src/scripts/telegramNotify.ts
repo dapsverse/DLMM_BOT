@@ -555,7 +555,7 @@ async function confirmText(arg: string): Promise<string> {
 
 async function startBot(): Promise<string> {
   if (botPid()) return 'bot sudah jalan';
-  if (isBusy()) return 'ada operasi manual yang masih berjalan, tunggu selesai';
+  // no isBusy() here: confirm() already set busy=true for this very call (and rejected a concurrent one), so a check here always refused /startbot
   try {
     await run('npm', ['run', 'build'], { timeout: 180_000, maxBuffer: 4_000_000 });
   } catch (e) {
