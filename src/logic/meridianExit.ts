@@ -78,20 +78,30 @@ export class ExitConfirmer {
   }
 }
 
-const feeCache = new Map<string, { at: number; v: number | null }>();
+export interface PoolStats {
+  feeTvl24hPct: number | null;
+  tvlUsd: number | null;
+}
+const statsCache = new Map<string, { at: number; v: PoolStats }>();
+
+/** Pool fee/TVL 24h (percent) and TVL (USD) from Meteora's own API (cached 5 min); null fields on any failure. */
+export async function getPoolStats(pool: string, nowMs = Date.now()): Promise<PoolStats> {
+  const hit = statsCache.get(pool);
+  if (hit && nowMs - hit.at < 300_000) return hit.v;
+  let v: PoolStats = { feeTvl24hPct: null, tvlUsd: null };
+  try {
+    const r = await axios.get<{ fee_tvl_ratio?: { '24h'?: number }; tvl?: number }>(`https://dlmm.datapi.meteora.ag/pools/${pool}`, { timeout: 10_000 });
+    const x = r.data?.fee_tvl_ratio?.['24h'];
+    const t = r.data?.tvl;
+    v = { feeTvl24hPct: typeof x === 'number' && Number.isFinite(x) ? x : null, tvlUsd: typeof t === 'number' && Number.isFinite(t) ? t : null };
+  } catch {
+    /* unknown */
+  }
+  statsCache.set(pool, { at: nowMs, v });
+  return v;
+}
 
 /** Pool fee/TVL 24h in percent from Meteora's own API (cached 5 min); null on any failure. */
 export async function getPoolFeeTvl24hPct(pool: string, nowMs = Date.now()): Promise<number | null> {
-  const hit = feeCache.get(pool);
-  if (hit && nowMs - hit.at < 300_000) return hit.v;
-  let v: number | null = null;
-  try {
-    const r = await axios.get<{ fee_tvl_ratio?: { '24h'?: number } }>(`https://dlmm.datapi.meteora.ag/pools/${pool}`, { timeout: 10_000 });
-    const x = r.data?.fee_tvl_ratio?.['24h'];
-    v = typeof x === 'number' && Number.isFinite(x) ? x : null;
-  } catch {
-    v = null;
-  }
-  feeCache.set(pool, { at: nowMs, v });
-  return v;
+  return (await getPoolStats(pool, nowMs)).feeTvl24hPct;
 }

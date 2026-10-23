@@ -6,6 +6,7 @@ import { COMPUTE_UNIT_LIMIT } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
 import { orderSpec, spreadBins, filledFraction, type OrderGoal } from '../logic/limitOrderMath.js';
+import { flipAnchorBin } from '../logic/flip.js';
 
 /**
  * ponytail: @meteora-ag/dlmm has TWO separate packaging bugs, both worked
@@ -353,13 +354,15 @@ export interface LadderTx {
  * price falling = bin id rising there). No token side, so no entry swap. SDK emits create + add as two txs; their
  * instructions are merged (verified by simulateTransaction: 1116 bytes, 681k CU for 69 bins). Refetches pool state first.
  */
-export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, user: PublicKey = wallet.publicKey, strategyType: StrategyType = StrategyType.BidAsk, offsetBins = 0): Promise<LadderTx> {
+export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, user: PublicKey = wallet.publicKey, strategyType: StrategyType = StrategyType.BidAsk, offsetBins = 0, anchorBoundBinId?: number): Promise<LadderTx> {
   // `xIsSol` here means "the single deposited token is X": SOL for the SOL-only ladder, the memecoin for the token-only spot position.
   await pool.refetchStates();
   const activeBinId = (await getActiveBin(pool)).binId;
-  // offsetBins > 0 starts the range that many bins away from the active bin, on the deposited side (token_spot: just above the price)
-  const minBinId = xIsSol ? activeBinId + offsetBins : activeBinId - offsetBins - (bins - 1);
-  const maxBinId = xIsSol ? activeBinId + offsetBins + (bins - 1) : activeBinId - offsetBins;
+  // offsetBins > 0 starts the range that many bins away from the anchor on the deposited side (token_spot: just above the price). The anchor is the active
+  // bin, except for the flip, which passes the old ladder's price-bottom bin so the asks never start below where the DCA-in ended (logic/flip.ts flipAnchorBin).
+  const anchorBinId = flipAnchorBin(activeBinId, anchorBoundBinId, xIsSol);
+  const minBinId = xIsSol ? anchorBinId + offsetBins : anchorBinId - offsetBins - (bins - 1);
+  const maxBinId = xIsSol ? anchorBinId + offsetBins + (bins - 1) : anchorBinId - offsetBins;
   const positionKeypair = Keypair.generate();
   const create = await pool.createExtendedEmptyPosition(minBinId, maxBinId, positionKeypair.publicKey, user);
   const adds = await pool.addLiquidityByStrategyChunkable({
@@ -377,11 +380,11 @@ export async function buildLadderTx(pool: DlmmPool, xIsSol: boolean, solLamports
 }
 
 /** Opens the SOL-only ladder (see buildLadderTx), rebuilding from a fresh active bin on every retry. */
-export async function openLadderPosition(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, strategyType: StrategyType = StrategyType.BidAsk, offsetBins = 0): Promise<OpenPositionResult> {
+export async function openLadderPosition(pool: DlmmPool, xIsSol: boolean, solLamports: BN, bins: number, strategyType: StrategyType = StrategyType.BidAsk, offsetBins = 0, anchorBoundBinId?: number): Promise<OpenPositionResult> {
   assertNotProtected(pool);
   return withRetry(
     async () => {
-      const { tx, positionKeypair, minBinId, maxBinId, activeBinId } = await buildLadderTx(pool, xIsSol, solLamports, bins, wallet.publicKey, strategyType, offsetBins);
+      const { tx, positionKeypair, minBinId, maxBinId, activeBinId } = await buildLadderTx(pool, xIsSol, solLamports, bins, wallet.publicKey, strategyType, offsetBins, anchorBoundBinId);
       await withPriorityFee(tx, [wallet.publicKey, positionKeypair.publicKey], LADDER_COMPUTE_UNIT_LIMIT);
       const signature = await sendTx(tx, [positionKeypair], 'openLadder');
       logger.info('[dlmm] ladder position opened', { position: positionKeypair.publicKey.toBase58(), signature, minBinId, maxBinId, activeBinId });

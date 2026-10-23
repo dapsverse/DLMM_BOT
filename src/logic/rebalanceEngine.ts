@@ -24,7 +24,7 @@ import { connection, getWalletSolBalance, getTokenBalance, waitForTokenBalance }
 import { isPoolStillEligible, getCurrentPriceUsd, recordChaseGuardExit, type ScannerConfig } from '../services/meteoraScanner.js';
 import { addToBlacklist, rangeCeilingProfitOverride } from './riskManager.js';
 import { computeBinRadius } from './binRange.js';
-import { ladderRangeStatus } from './ladderRange.js';
+import { ladderRangeStatus, ladderBounds } from './ladderRange.js';
 import { computeOutOfRangeTracking } from './outOfRangeTracking.js';
 import { logger } from '../utils/logger.js';
 import type { PersistedPosition } from '../services/stateStore.js';
@@ -74,6 +74,8 @@ export interface PoolContext {
   flipPhase?: boolean;
   /** SOL taken out at the flip, left in the wallet and counted in the cycle PnL (see logic/flip.ts pnlBasisSol) */
   bankedSol?: number;
+  /** pool TVL (USD) when the flip happened, the reference of the liquidity-collapse exit; absent = unknown, that check is skipped */
+  flipTvlUsd?: number;
   /** wallet SOL spent by the entry (deposit + rent + gas, measured across the entry tx); absent when not measured reliably (see logic/realizedPnl.ts) */
   openSpentSol?: number;
   /** epoch ms the position was opened (ladder entries) */
@@ -409,9 +411,13 @@ export async function executeFlip(ctx: PoolContext, onState?: () => void): Promi
   const otherMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
   const depositIsX = !ctx.xIsSol; // the deposited token is X when the memecoin is X (SOL is Y)
   const bankedSol = Number(solRaw.toString()) / LAMPORTS_PER_SOL;
+  // the old ladder's price-bottom bin (where the DCA-in ended): the asks start above it, never below even if price fell further (logic/flip.ts flipAnchorBin)
+  const oldBounds = ctx.centerBinId !== null ? ladderBounds(ctx.centerBinId, ctx.ladderBins, ctx.xIsSol) : null;
+  const oldBottomBin = oldBounds ? (ctx.xIsSol ? oldBounds.hi : oldBounds.lo) : undefined;
   logger.warn('[rebalanceEngine] FLIP: closing the SOL ladder to redeposit its token above the price', {
     pool: ctx.poolAddress,
     bankedSol,
+    oldBottomBin,
     expectedTokenRaw: expectedOther.toString(),
   });
   try {
@@ -431,7 +437,7 @@ export async function executeFlip(ctx: PoolContext, onState?: () => void): Promi
   try {
     const held = await waitForTokenBalance(otherMint, expectedOther.muln(95).divn(100));
     // never redeposit more than the close returned: older dust of the same mint would inflate the position above its basis
-    result = await openLadderPosition(ctx.pool, depositIsX, BN.min(held, expectedOther), ctx.ladderBins, StrategyType.BidAsk, env.TOKEN_SPOT_START_OFFSET_BINS);
+    result = await openLadderPosition(ctx.pool, depositIsX, BN.min(held, expectedOther), ctx.ladderBins, StrategyType.BidAsk, env.TOKEN_SPOT_START_OFFSET_BINS, oldBottomBin);
   } catch (err) {
     const [landed] = await getUserPositions(ctx.pool);
     if (landed) {
