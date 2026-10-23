@@ -37,31 +37,24 @@ export const PRICE_CHANGE_1H_CRASH_THRESHOLD_PCT = -12;
 export const TREND_SHORTLIST_SIZE = 3;
 
 /**
- * Trailing take-profit schedule — sticky per tier, not a flat giveback.
- * Once peakProfitPct crosses a tier's `armPct`, the floor locks to that
- * tier's `floorPct` and STAYS there (doesn't recompute continuously) until
- * peak crosses the next tier's `armPct`. Below the first tier, take-profit
- * isn't armed at all (same as the old TAKE_PROFIT_ARM_PCT gate). Above the
- * last tier, the floor keeps rolling using the last tier's giveback delta
- * (150 - 125 = 25pp here) — see trailingTakeProfitFloorPct() in
- * riskManager.ts for the exact logic and src/scripts/checkTakeProfitTiers.ts
- * for the self-check.
+ * Trailing take-profit schedule — a RATCHET: the floor follows the peak and locks most of the gain.
+ * Anchors (peak -> floor) are joined by straight lines (trailingTakeProfitFloorPct, riskManager.ts), so the floor is continuous and never
+ * decreases while the peak rises (no plateaus, no jumps). Below the first anchor's armPct take-profit is not armed (a flip then waits / the
+ * stop loss decides). Above the last anchor the floor keeps the last anchor's giveback (150 -> 130 = 20pp). Locked share of the peak:
+ * 12 -> 58%, 20 -> 73%, 30 -> 77%, 50 -> 80%, 100 -> 85%, 150 -> 87%; peak 21.4 -> floor ~15.7 (gives back ~5.7pp; it was 15.4pp).
  *
- * Replaced a flat 30% arm / 25pp giveback 2026-09-26 after PAID-SOL peaked
- * +57.71% and got exited at +32.28% (a 25pp giveback locked way too early
- * relative to peak in the 30-100% band) — the token kept running to +136%+
- * afterward. User-specified tiers: wide room early (protect only 25% while
- * peak is anywhere 30-100%, since memecoin peaks in that band are often
- * noise/pullback-and-continue), progressively tighter as gains compound.
- * Low-confidence starting guess like every other threshold in this file —
- * not yet validated over multiple live episodes.
+ * History: 2026-09-26 replaced a flat 30% arm / 25pp giveback with sticky wide bands (peak 12-30 -> floor 6, 30-100 -> 25, ...) after PAID-SOL
+ * peaked +57.71% and was exited at +32.28% (it ran to +136%+). Live 2026-10-23 (pool 9fm4XN, flip phase) the sticky 6% floor at a +21.4% peak
+ * gave back ~72% of the profit and the position ended at the stop loss; user decision 2026-10-24: lock most of the peak, tighter as it grows.
+ * Low-confidence starting values like every other threshold in this file: a runner now gives back less before it is closed.
  */
 export const TAKE_PROFIT_TIERS: ReadonlyArray<{ armPct: number; floorPct: number }> = [
-  { armPct: 12, floorPct: 6 }, // 2026-10-08: protect small wins (SI/TWEETCRAFT-style 0-30% band had no protection but stop-loss)
-  { armPct: 30, floorPct: 25 },
-  { armPct: 100, floorPct: 50 },
-  { armPct: 125, floorPct: 100 },
-  { armPct: 150, floorPct: 125 },
+  { armPct: 12, floorPct: 7 },
+  { armPct: 20, floorPct: 14.5 },
+  { armPct: 30, floorPct: 23 },
+  { armPct: 50, floorPct: 40 },
+  { armPct: 100, floorPct: 85 },
+  { armPct: 150, floorPct: 130 },
 ];
 
 export const RPC_MAX_RETRIES = 5;

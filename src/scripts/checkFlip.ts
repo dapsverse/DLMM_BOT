@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, selectExitSignal, aiExitAllowed, flipAnchorBin, flipPromptInfo, flipCenterFromBounds, type FlipExitInput, type FlipExitConfig } from '../logic/flip.js';
+import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, flipTakeProfitSignal, selectExitSignal, aiExitAllowed, flipAnchorBin, flipPromptInfo, flipCenterFromBounds, type FlipExitInput, type FlipExitConfig } from '../logic/flip.js';
 import { ladderBounds, ladderRangeStatus } from '../logic/ladderRange.js';
 import { buildReactScreenerPrompt, buildReactManagerPrompt } from '../logic/aiPrompts.js';
-import { meridianExitSignal, ExitConfirmer, type MeridianExitConfig, type MeridianExitInput } from '../logic/meridianExit.js';
+import { meridianExitSignal, ExitConfirmer, trailingBlockedByFloor, type MeridianExitConfig, type MeridianExitInput } from '../logic/meridianExit.js';
 import { parseState, STATE_VERSION } from '../services/stateStore.js';
 
 // labels / geometry side
@@ -128,5 +128,14 @@ assert.match(manOn, /bid_ask_flip/);
 assert.match(manOn, /AI close is blocked/);
 assert.doesNotMatch(manOn, /about 80%|trailing stop that arms/);
 assert.doesNotMatch(buildReactManagerPrompt(rules, '', [], null), /bid_ask_flip/);
+
+// flip-phase trailing TP: wins over the other flip-phase signals as the flipPhaseSignal, a stop loss still wins over it, and a dump already below the PnL floor is not sold
+const tpSig = flipTakeProfitSignal(21.4, 15.0, 15.69)!;
+assert.equal(pick({ flipPhase: true, flipPhaseSignal: tpSig }), tpSig);
+assert.equal(pick({ stopLoss: 'stop loss: x', flipPhase: true, flipPhaseSignal: tpSig }), 'stop loss: x');
+assert.equal(pick({ flipPhase: true, flipPhaseSignal: flipTakeProfitSignal(21.4, 18, 15.69) }), null);
+assert.equal(trailingBlockedByFloor(tpSig, 15.0, 0), false); // in profit: carried out
+assert.equal(trailingBlockedByFloor(flipTakeProfitSignal(21.4, -3, 15.69), -3, 0), true); // overshoot below the floor: keep, peak reset by the caller
+assert.equal(flipTakeProfitSignal(8, -20, null), null); // never armed
 
 console.log('checkFlip ok');
