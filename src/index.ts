@@ -45,14 +45,14 @@ import { auditRejectReason } from './logic/tokenAudit.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
-import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
+import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
 import { ladderBounds } from './logic/ladderRange.js';
 import { closeKindFromReason, cooldownHoursAfterClose, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
-import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitConfig } from './logic/flip.js';
+import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, selectExitSignal, aiExitAllowed } from './logic/flip.js';
 import { estimateExitCostSol, realizedPnl } from './logic/realizedPnl.js';
 
 const meridianConfirmer = new ExitConfirmer();
@@ -576,6 +576,8 @@ async function tick(): Promise<void> {
     }
     const ageMinutes = ctx.openedAtMs !== undefined ? (now - ctx.openedAtMs) / 60_000 : null;
     const slReason = slHit ? evald.reasons.find((r) => r.includes('STOP_LOSS_PCT')) : undefined;
+    // Flip: the SOL ladder is 100% token (price below its lowest bin). The flip wins over every non-stop-loss exit signal (low yield, ...): selling the dip is what it avoids.
+    const flipWanted = env.FLIP_ENABLED && shouldFlip({ enabled: true, belowRange: binStatus.tokenBelowRange, isLadder: ctx.ladderBins !== undefined, tokenSpot: !!ctx.tokenSpot, flipPhase: !!ctx.flipPhase });
     const exitCfg = {
       takeProfitPct: env.MERIDIAN_TAKE_PROFIT_PCT,
       trailingTriggerPct: env.MERIDIAN_TRAILING_TRIGGER_PCT,
@@ -585,18 +587,23 @@ async function tick(): Promise<void> {
       minFeePerTvl24hPct: env.MERIDIAN_MIN_FEE_TVL_24H_PCT,
       minAgeBeforeYieldCheckMin: env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN,
     };
-    const signal = slReason !== undefined ? `stop loss: ${slReason}` : meridianExitSignal(
+    const minutesOutOfRange = ctx.outOfRangeSinceMs !== null ? (now - ctx.outOfRangeSinceMs) / 60_000 : null;
+    // Flip phase: only the cycle stop loss (above), a pool TVL collapse and "sold out above the range for N min" can exit (logic/flip.ts flipExitSignal).
+    const flipPhaseSignal = ctx.flipPhase ? flipExitSignal({ isOutOfRange: binStatus.isOutOfRange, tokenBelowRange: binStatus.tokenBelowRange, minutesOutOfRange, tvlUsd: (await getPoolStats(ctx.poolAddress)).tvlUsd, flipTvlUsd: ctx.flipTvlUsd ?? null }, { oorAboveExitMin: env.FLIP_OOR_ABOVE_EXIT_MIN, tvlCollapsePct: env.FLIP_TVL_COLLAPSE_PCT }) : null;
+    // meridian's own rules only matter on a SOL ladder that is not about to flip (no needless fee/TVL call otherwise)
+    const meridianSignal = ctx.flipPhase || flipWanted || slReason !== undefined ? null : meridianExitSignal(
       {
         pnlPct: currentProfitPct,
         peakPnlPct: ctx.peakProfitPct,
         binsAbove,
         isOutOfRange: binStatus.isOutOfRange,
-        minutesOutOfRange: ctx.outOfRangeSinceMs !== null ? (now - ctx.outOfRangeSinceMs) / 60_000 : null,
+        minutesOutOfRange,
         feePerTvl24hPct: ageMinutes !== null && ageMinutes >= env.MERIDIAN_MIN_AGE_YIELD_CHECK_MIN ? await getPoolFeeTvl24hPct(ctx.poolAddress) : null,
         ageMinutes,
       },
-      ctx.flipPhase ? flipExitConfig(exitCfg, env.FLIP_TRAILING_TRIGGER_PCT, binStatus.tokenBelowRange) : exitCfg,
+      exitCfg,
     );
+    const signal = selectExitSignal({ stopLoss: slReason !== undefined ? `stop loss: ${slReason}` : null, flipPhase: !!ctx.flipPhase, flipWanted, flipPhaseSignal, meridianSignal });
     if (signal) logger.info('[index] meridian rule signal', { pool: ctx.poolAddress, signal });
     if (meridianConfirmer.hit(signal, env.MERIDIAN_CONFIRM_TICKS)) {
       if (trailingBlockedByFloor(signal, currentProfitPct, env.TRAILING_MIN_PNL_PCT)) {
@@ -629,20 +636,13 @@ async function tick(): Promise<void> {
       return;
     }
 
-    // Bid-ask flip: the SOL ladder has turned into the token. Only when no exit signal is pending (exits win), confirmed over N ticks.
-    if (!signal && env.FLIP_ENABLED) {
-      const sharePct = currentValueSol > 0 ? (otherPrincipalSol / currentValueSol) * 100 : 0;
-      const want = shouldFlip({
-        enabled: true,
-        sharePct,
-        thresholdPct: env.FLIP_TOKEN_SHARE_PCT,
-        isLadder: ctx.ladderBins !== undefined,
-        tokenSpot: !!ctx.tokenSpot,
-        flipPhase: !!ctx.flipPhase,
-      });
-      if (flipConfirmer.hit(want ? 'flip' : null, env.MERIDIAN_CONFIRM_TICKS)) {
-        logger.warn('[index] flip confirmed — closing the ladder and redepositing the token above the price', { pool: ctx.poolAddress, tokenSharePct: +sharePct.toFixed(1) });
+    // Bid-ask flip: price fell below the lowest bin, so the whole SOL side is token. Only when no stop loss is pending (it wins), confirmed over FLIP_CONFIRM_TICKS ticks (1 = at once).
+    if (!signal && flipWanted) {
+      if (flipConfirmer.hit('flip', env.FLIP_CONFIRM_TICKS)) {
+        logger.warn('[index] flip confirmed — price is below the lowest bin, closing the ladder and redepositing the token above the old bottom', { pool: ctx.poolAddress, tokenSharePct: currentValueSol > 0 ? +((otherPrincipalSol / currentValueSol) * 100).toFixed(1) : 0 });
         try {
+          // reference for the liquidity-collapse exit; unknown (undefined) skips that check
+          ctx.flipTvlUsd = (await getPoolStats(ctx.poolAddress)).tvlUsd ?? undefined;
           currentPool = await guarded(() => executeFlip(ctx, persist));
         } catch (err) {
           logger.error('[index] executeFlip threw, reconciling state', { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
@@ -743,8 +743,14 @@ async function tick(): Promise<void> {
     return;
   }
 
+  // Flip phase: the AI manager is not consulted and a close it asked for earlier is dropped (AI_EXIT blocked). The bot waits for the bounce;
+  // only the cycle stop loss, a pool TVL collapse and "sold out above the range" exit (see flipExitSignal), plus the existing dollar-flow exit when enabled.
+  if (!aiExitAllowed(ctx) && aiManagerClose && aiManagerClose.pool === ctx.poolAddress) {
+    logger.warn('[ai] AI_EXIT blocked in flip phase (waiting for the bounce)', { pool: ctx.poolAddress, reason: aiManagerClose.reason.slice(0, 160) });
+    aiManagerClose = null;
+  }
   // AI manager (meridian-style): hold/close from Claude. Never blocks the tick; the automatic exits above/below always run first.
-  if (aiOn() && ctx.ladderBins !== undefined) {
+  if (aiOn() && ctx.ladderBins !== undefined && aiExitAllowed(ctx)) {
     if (aiManagerClose && aiManagerClose.pool === ctx.poolAddress) {
       const { reason } = aiManagerClose;
       aiManagerClose = null;

@@ -17,6 +17,8 @@ export interface CycleView {
   /** SOL banked at the flip (0 when not flipped) */
   bankedSol: number;
   flipped: boolean;
+  /** whole cycle: position value + unclaimed fees + banked SOL (equals value + fees when not flipped) */
+  totalValueSol: number;
 }
 
 /** `meteora*` are the open position's own figures (PnL already includes unclaimed fees). Non-flip positions return Meteora's numbers unchanged. */
@@ -24,7 +26,7 @@ export function cycleView(valueSol: number, feesSol: number, meteoraDepositSol: 
   if (basis?.flipPhase && Number.isFinite(basis.initialDepositSol) && basis.initialDepositSol > 0) {
     const bankedSol = Number.isFinite(basis.bankedSol) ? (basis.bankedSol as number) : 0;
     const pnlSol = valueSol + feesSol + bankedSol - basis.initialDepositSol;
-    return { depositSol: basis.initialDepositSol, pnlSol, pnlPct: (pnlSol / basis.initialDepositSol) * 100, bankedSol, flipped: true };
+    return { depositSol: basis.initialDepositSol, pnlSol, pnlPct: (pnlSol / basis.initialDepositSol) * 100, bankedSol, flipped: true, totalValueSol: valueSol + feesSol + bankedSol };
   }
-  return { depositSol: meteoraDepositSol, pnlSol: meteoraPnlSol, pnlPct: meteoraPnlPct, bankedSol: 0, flipped: false };
+  return { depositSol: meteoraDepositSol, pnlSol: meteoraPnlSol, pnlPct: meteoraPnlPct, bankedSol: 0, flipped: false, totalValueSol: valueSol + feesSol };
 }

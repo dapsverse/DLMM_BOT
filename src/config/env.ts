@@ -551,8 +551,11 @@ export const env = {
   SHADOW_FETCH_TIMEOUT_MS: num('SHADOW_FETCH_TIMEOUT_MS', 4000),
   // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.
   FLIP_ENABLED: bool('FLIP_ENABLED', false),
-  FLIP_TOKEN_SHARE_PCT: num('FLIP_TOKEN_SHARE_PCT', 80),
-  FLIP_TRAILING_TRIGGER_PCT: num('FLIP_TRAILING_TRIGGER_PCT', 5),
+  // Flip trigger: price below the lowest bin of the SOL ladder (100% token), confirmed over FLIP_CONFIRM_TICKS ticks (1 = immediately). Flip phase: no AI exit,
+  // no trailing/TP; exits are only the cycle stop loss, a pool TVL collapse (< FLIP_TVL_COLLAPSE_PCT % of the TVL at the flip) and the ladder sold out above the range for FLIP_OOR_ABOVE_EXIT_MIN minutes.
+  FLIP_CONFIRM_TICKS: num('FLIP_CONFIRM_TICKS', 1),
+  FLIP_OOR_ABOVE_EXIT_MIN: num('FLIP_OOR_ABOVE_EXIT_MIN', 10),
+  FLIP_TVL_COLLAPSE_PCT: num('FLIP_TVL_COLLAPSE_PCT', 30),
   // Decision PnL (meridian mode: SL, TP, trailing, peak) is net of the estimated cost of selling the token side (user decision 2026-10-18). Jupiter fee + impact is about 1% per leg (friction accounting 2026-10-11).
   EXIT_COST_PCT: num('EXIT_COST_PCT', 1),
   EXIT_COST_GAS_SOL: num('EXIT_COST_GAS_SOL', 0.0005),
