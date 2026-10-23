@@ -556,7 +556,9 @@ export const env = {
   // closed at market after SHADOW_SIM_MAX_HOURS (the real bot has no time stop); fee income = pool fee/TVL 24h * SHADOW_SIM_FEE_FACTOR
   SHADOW_SIM_ENABLED: bool('SHADOW_SIM_ENABLED', true),
   SHADOW_SIM_CAPITAL_SOL: num('SHADOW_SIM_CAPITAL_SOL', 1),
-  SHADOW_SIM_MAX_OPEN: num('SHADOW_SIM_MAX_OPEN', 12),
+  SHADOW_SIM_MAX_OPEN: num('SHADOW_SIM_MAX_OPEN', 24),
+  // paired: every decision opens BOTH modes (A and B) as separate paper positions; the selector's pick is marked chosen, the other one counterfactual
+  SHADOW_SIM_PAIRED: bool('SHADOW_SIM_PAIRED', true),
   SHADOW_SIM_MAX_HOURS: num('SHADOW_SIM_MAX_HOURS', 48),
   SHADOW_SIM_FEE_FACTOR: num('SHADOW_SIM_FEE_FACTOR', 1),
   // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.

@@ -52,6 +52,8 @@ export interface SimPosition {
   id: string;
   decisionId: string;
   mode: 'A' | 'B';
+  /** true: the mode the selector picked; false: the counterfactual twin simulated for comparison (absent in old open files = chosen) */
+  chosen?: boolean;
   pool: string;
   name: string | null;
   mint: string;
@@ -158,6 +160,7 @@ export interface OpenInput {
   id: string;
   decisionId: string;
   mode: 'A' | 'B';
+  chosen?: boolean;
   pool: string;
   name: string | null;
   mint: string;
@@ -292,7 +295,7 @@ export function advanceSim(posIn: SimPosition, candlesIn: ShadowCandle[], ctx: S
   return { pos, exit: null, flipped };
 }
 
-/** One simulated position per pool at a time, and a cap on how many are open at once. */
-export function canOpenSim(open: Pick<SimPosition, 'pool'>[], pool: string, maxOpen: number): boolean {
-  return open.length < maxOpen && !open.some((p) => p.pool === pool);
+/** One simulated position per pool (and per mode when `mode` is given) at a time, and a cap on how many are open at once. */
+export function canOpenSim(open: (Pick<SimPosition, 'pool'> & Partial<Pick<SimPosition, 'mode'>>)[], pool: string, maxOpen: number, mode?: 'A' | 'B'): boolean {
+  return open.length < maxOpen && !open.some((p) => p.pool === pool && (mode === undefined || p.mode === mode));
 }
