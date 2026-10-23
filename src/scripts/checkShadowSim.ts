@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import axios from 'axios';
 import { advanceSim, binOfU, canOpenSim, openSim, priceOfU, simBinRadius, uOf, valuePosition, type OpenInput, type SimParams, type SimPosition } from '../logic/shadowSim.js';
-import { summarizeSim, type SimLine } from '../logic/shadowSimReport.js';
+import { summarizePairs, summarizeSim, type SimLine } from '../logic/shadowSimReport.js';
 import { appendSimLine, loadOpenSims, readSimLines, saveOpenSims } from '../services/shadowSimStore.js';
 import type { ShadowCandle } from '../logic/shadowStrategy.js';
 
@@ -148,6 +148,10 @@ const open = [{ pool: 'P1' }, { pool: 'P2' }];
 assert.equal(canOpenSim(open, 'P1', 12), false); // already open in that pool
 assert.equal(canOpenSim(open, 'P3', 12), true);
 assert.equal(canOpenSim(open, 'P3', 2), false); // cap
+const openM = [{ pool: 'P1', mode: 'A' as const }];
+assert.equal(canOpenSim(openM, 'P1', 12, 'B'), true); // per mode: the other mode of the same pool is free
+assert.equal(canOpenSim(openM, 'P1', 12, 'A'), false);
+assert.equal(canOpenSim(openM, 'P1', 12), false); // without a mode the whole pool counts
 
 // ---- report ----
 const L: SimLine[] = [
@@ -174,6 +178,34 @@ near(sum.B.sumPnlUsd, -24);
 assert.equal(sum.B.flipped, 2);
 assert.deepEqual(sum.B.reasons, { 'stop loss': 1, 'flip sold out above range': 1 });
 
+// ---- chosen scope + paired summary ----
+const e = (id: string, decisionId: string, mode: 'A' | 'B', chosen?: boolean): SimLine => ({ type: 'sim_entry', id, decisionId, ts: 't', pool: 'p', name: null, mode, ...(chosen === undefined ? {} : { chosen, paired: true }), price: 1, capitalSol: 1 });
+const x = (id: string, mode: 'A' | 'B', pnlSol: number): SimLine => ({ type: 'sim_exit', id, ts: 't', pool: 'p', mode, price: 1, reason: 'take profit: x', pnlSol, pnlUsd: pnlSol * 100, pnlPct: pnlSol * 100, minutesHeld: 10, flipped: false });
+const PL: SimLine[] = [
+  e('a1', 'd1', 'A', true), e('b1', 'd1', 'B', false), x('a1', 'A', 0.05), x('b1', 'B', -0.1), // selector right (A)
+  e('a2', 'd2', 'A', false), e('b2', 'd2', 'B', true), x('a2', 'A', 0.1), x('b2', 'B', -0.2), // selector wrong (B)
+  e('a3', 'd3', 'A', true), e('b3', 'd3', 'B', false), x('a3', 'A', 0.01), // B twin still open: pending
+  e('old', 'd0', 'B'), x('old', 'B', 0.5), // unmarked old line = chosen, never paired
+];
+const all = summarizeSim(PL, 'all');
+assert.equal(all.A.entries, 3);
+assert.equal(all.B.entries, 4);
+const ch = summarizeSim(PL, 'chosen');
+assert.equal(ch.A.entries, 2); // a1, a3
+assert.equal(ch.B.entries, 2); // b2, old
+near(ch.A.sumPnlSol, 0.06);
+near(ch.B.sumPnlSol, 0.3);
+const pp = summarizePairs(PL);
+assert.equal(pp.complete, 2);
+assert.equal(pp.pending, 1);
+assert.equal(pp.agree, 1);
+assert.equal(pp.aBetter, 2);
+assert.equal(pp.bBetter, 0);
+near(pp.sumASol, 0.15);
+near(pp.sumBSol, -0.3);
+near(pp.sumChosenSol, 0.05 + -0.2);
+near(pp.sumOtherSol, -0.1 + 0.1);
+
 // ---- store + orchestration (axios mocked, temp files) ----
 const dir = mkdtempSync(join(tmpdir(), 'shadowsim-'));
 process.env.SHADOW_SIM_FILE = join(dir, 'sim.jsonl');
@@ -191,6 +223,8 @@ try {
   saveOpenSims([]); // start the orchestration from a clean slate
 
   const { runSimCycle } = await import('../services/shadowSimRun.js');
+  const { env } = await import('../config/env.js');
+  (env as unknown as Record<string, unknown>).SHADOW_SIM_PAIRED = false; // the single-mode flow first
   const NOW = (T0 + 7200) * 1000;
   let rows: Record<string, number>[] = [];
   (axios as unknown as { get: unknown }).get = async (url: string) => (url.includes('/ohlcv') ? { data: { data: rows } } : { data: { tvl: 100_000, fee_tvl_ratio: { '24h': 0 } } });
@@ -216,7 +250,7 @@ try {
   const c3 = await runSimCycle([], NOW);
   assert.deepEqual(c3, { opened: 0, closed: 1, open: 0 });
   const ls2 = readSimLines().filter((l) => l.type === 'sim_entry' || l.type === 'sim_exit');
-  assert.equal(ls2.filter((l) => l.type === 'sim_entry' && l.id === 'sim:POOLX:1').length, 1);
+  assert.equal(ls2.filter((l) => l.type === 'sim_entry' && l.id === 'sim:POOLX:1:B').length, 1);
   const ex = ls2.find((l) => l.type === 'sim_exit')!;
   assert.equal(ex.type, 'sim_exit');
   if (ex.type === 'sim_exit') {
@@ -235,6 +269,33 @@ try {
   assert.equal(c4.open, 1);
   assert.equal(c4.closed, 0);
   assert.equal(readFileSync(process.env.SHADOW_SIM_FILE!, 'utf8').includes('POOLX:3'), true);
+
+  // ---- paired: every decision opens BOTH modes, the pick is marked chosen, the other counterfactual ----
+  (env as unknown as Record<string, unknown>).SHADOW_SIM_PAIRED = true;
+  saveOpenSims([]);
+  rows = [{ timestamp: Math.floor(NOW / 1000) - 100, open: 1, high: 1, low: 1, close: 1, volume: 1 }];
+  (axios as unknown as { get: unknown }).get = async (url: string) => (url.includes('/ohlcv') ? { data: { data: rows } } : { data: { tvl: 100_000, fee_tvl_ratio: { '24h': 0 } } });
+  const pc = await runSimCycle([{ ...mk('POOLP:1', 'A'), pool: 'POOLP' }], NOW);
+  assert.deepEqual(pc, { opened: 2, closed: 0, open: 2 });
+  const pe = readSimLines().filter((l) => l.type === 'sim_entry' && l.pool === 'POOLP');
+  assert.equal(pe.length, 2);
+  for (const l of pe) if (l.type === 'sim_entry') assert.equal(l.chosen, l.mode === 'A'), assert.equal(l.paired, true), assert.equal(l.decisionId, 'POOLP:1');
+  assert.deepEqual(pe.map((l) => l.id).sort(), ['sim:POOLP:1:A', 'sim:POOLP:1:B']);
+  // no duplicate per pool and mode while the twins are open
+  assert.equal((await runSimCycle([{ ...mk('POOLP:2', 'B'), pool: 'POOLP' }], NOW)).opened, 0);
+  // the cap needs room for both twins
+  (env as unknown as Record<string, unknown>).SHADOW_SIM_MAX_OPEN = 3;
+  assert.equal((await runSimCycle([{ ...mk('POOLQ:1', 'B'), pool: 'POOLQ' }], NOW)).opened, 0);
+  (env as unknown as Record<string, unknown>).SHADOW_SIM_MAX_OPEN = 24;
+  // a big pump closes both twins; the pair is complete and comparable
+  rows = [{ timestamp: T0, open: 1, high: 1, low: 1, close: priceOfU(60, 1, STEP), volume: 1 }];
+  assert.equal((await runSimCycle([], NOW)).closed, 2);
+  const pairs = summarizePairs(readSimLines());
+  assert.equal(pairs.complete, 1);
+  assert.equal(pairs.pending, 0);
+  const exits = readSimLines().filter((l) => l.type === 'sim_exit' && l.pool === 'POOLP');
+  assert.equal(exits.length, 2);
+  for (const l of exits) if (l.type === 'sim_exit') assert.equal((l as unknown as { chosen: boolean }).chosen, l.mode === 'A');
 } finally {
   (axios as unknown as { get: unknown }).get = realGet;
   rmSync(dir, { recursive: true, force: true });

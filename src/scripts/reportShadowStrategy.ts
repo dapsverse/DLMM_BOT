@@ -7,7 +7,7 @@
 import { readShadowLines, shadowFile } from '../services/shadowFile.js';
 import { readSimLines, simLogFile } from '../services/shadowSimStore.js';
 import { summarizeShadow } from '../logic/shadowReport.js';
-import { summarizeSim } from '../logic/shadowSimReport.js';
+import { summarizePairs, summarizeSim, type SimScope } from '../logic/shadowSimReport.js';
 
 const file = process.argv[2] ?? shadowFile();
 const lines = readShadowLines(file);
@@ -25,16 +25,29 @@ if (a.withOutcome > 0) console.log(`entries the rule would have sent to A but ra
 
 const simFile = process.argv[3] ?? simLogFile();
 const simLines = readSimLines(simFile);
-const sim = summarizeSim(simLines);
 console.log(`\nsimulated positions (${simFile}): ${simLines.length} lines`);
-for (const mode of ['A', 'B'] as const) {
-  const m = sim[mode];
-  const label = mode === 'A' ? 'A two-sided 50:50' : 'B SOL-only ladder + flip';
-  const avg = m.closed ? m.sumPnlSol / m.closed : 0;
-  const reasons = Object.entries(m.reasons).map(([k, v]) => `${k} ${v}`).join(', ') || '-';
-  console.log(`  ${label}: ${m.entries} entries, ${m.closed} exits, ${m.open} still open${mode === 'B' ? `, ${m.flipped} of the exits had flipped` : ''}`);
-  console.log(`    PnL: total ${m.sumPnlSol.toFixed(4)} SOL (~$${m.sumPnlUsd.toFixed(2)}), avg ${avg.toFixed(4)} SOL (${((avg / 1) * 100).toFixed(2)}% of 1 SOL), win rate ${m.closed ? ((m.wins / m.closed) * 100).toFixed(0) : '-'}% (${m.wins}/${m.closed}), avg held ${m.closed ? Math.round(m.sumMinutes / m.closed) : '-'} min`);
-  console.log(`    exits: ${reasons}`);
+const printScope = (title: string, scope: SimScope) => {
+  const sim = summarizeSim(simLines, scope);
+  console.log(`  == ${title} ==`);
+  for (const mode of ['A', 'B'] as const) {
+    const m = sim[mode];
+    const label = mode === 'A' ? 'A two-sided 50:50' : 'B SOL-only ladder + flip';
+    const avg = m.closed ? m.sumPnlSol / m.closed : 0;
+    const reasons = Object.entries(m.reasons).map(([k, v]) => `${k} ${v}`).join(', ') || '-';
+    console.log(`  ${label}: ${m.entries} entries, ${m.closed} exits, ${m.open} still open${mode === 'B' ? `, ${m.flipped} of the exits had flipped` : ''}`);
+    console.log(`    PnL: total ${m.sumPnlSol.toFixed(4)} SOL (~$${m.sumPnlUsd.toFixed(2)}), avg ${avg.toFixed(4)} SOL (${((avg / 1) * 100).toFixed(2)}% of 1 SOL), win rate ${m.closed ? ((m.wins / m.closed) * 100).toFixed(0) : '-'}% (${m.wins}/${m.closed}), avg held ${m.closed ? Math.round(m.sumMinutes / m.closed) : '-'} min`);
+    console.log(`    exits: ${reasons}`);
+  }
+  return sim;
+};
+const sim = printScope('all positions (selector pick + counterfactual twins)', 'all');
+printScope('only the mode the selector picked', 'chosen');
+const pr = summarizePairs(simLines);
+if (pr.complete + pr.pending > 0) {
+  const pct = (x: number) => (pr.complete ? `${((x / pr.complete) * 100).toFixed(0)}%` : '-');
+  console.log(`  == paired decisions (A and B on the same decision): ${pr.complete} complete, ${pr.pending} with a twin still open ==`);
+  console.log(`    same decisions, A total ${pr.sumASol.toFixed(4)} SOL vs B total ${pr.sumBSol.toFixed(4)} SOL; A better ${pr.aBetter}, B better ${pr.bBetter}, ties ${pr.complete - pr.aBetter - pr.bBetter}`);
+  console.log(`    selector pick total ${pr.sumChosenSol.toFixed(4)} SOL vs counterfactual ${pr.sumOtherSol.toFixed(4)} SOL; agreement (pick earned >= the other) ${pr.agree}/${pr.complete} = ${pct(pr.agree)}`);
 }
 const recent = simLines.filter((l) => l.type === 'sim_exit').slice(-5);
 for (const l of recent) if (l.type === 'sim_exit') console.log(`  last exit ${l.ts.slice(5, 16).replace('T', ' ')} ${l.mode} ${l.pool.slice(0, 6)} ${l.reason.split(':')[0]} ${l.pnlSol >= 0 ? '+' : ''}${l.pnlSol.toFixed(4)} SOL`);
