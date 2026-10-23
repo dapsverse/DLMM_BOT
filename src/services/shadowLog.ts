@@ -23,9 +23,10 @@ const paramsFromEnv = (): ShadowParams => ({
 // hysteresis memory per pool (in-process only: after a restart the first decision uses the entry threshold)
 const wasDown = new Map<string, boolean>();
 
-async function fetchCandles5m(pool: string, timeoutMs: number): Promise<ShadowCandle[]> {
+/** 5m OHLCV of the last `hours` (Meteora caps a 5m request at about 97 candles = 8 h). Read-only. */
+export async function fetchCandles5m(pool: string, timeoutMs: number, hours = 6): Promise<ShadowCandle[]> {
   const end = Math.floor(Date.now() / 1000);
-  const res = await axios.get(`https://dlmm.datapi.meteora.ag/pools/${pool}/ohlcv`, { params: { timeframe: '5m', start_time: end - 6 * 3600, end_time: end }, timeout: timeoutMs });
+  const res = await axios.get(`https://dlmm.datapi.meteora.ag/pools/${pool}/ohlcv`, { params: { timeframe: '5m', start_time: end - Math.min(hours, 8) * 3600, end_time: end }, timeout: timeoutMs });
   const rows = (res.data?.data ?? []) as Record<string, unknown>[];
   return rows.map((r) => ({ timestamp: Number(r.timestamp), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume) }));
 }
@@ -41,8 +42,11 @@ export interface ShadowEntryInfo {
   aiConviction: number | null;
 }
 
+/** The decision plus what the simulation needs to open a position at the decision price: the logged id/time and the start time of the last candle the price came from. */
+export type LoggedShadowDecision = ShadowDecision & { id: string; ts: number; lastCandleTs: number | null };
+
 /** Decide + log. NEVER throws and is meant to be fired without await from the entry path; resolves with the decision (or null on any failure/timeout). */
-export async function shadowDecision(info: ShadowEntryInfo): Promise<ShadowDecision | null> {
+export async function shadowDecision(info: ShadowEntryInfo): Promise<LoggedShadowDecision | null> {
   if (!env.SHADOW_STRATEGY_ENABLED) return null;
   try {
     const budget = env.SHADOW_FETCH_TIMEOUT_MS;
@@ -73,7 +77,8 @@ export async function shadowDecision(info: ShadowEntryInfo): Promise<ShadowDecis
       prevDown: decision.prevDown,
       realIntent: { aiStrategy: info.aiStrategy, aiConviction: info.aiConviction },
     });
-    return decision;
+    const lastCandleTs = candles.reduce((m, c) => (Number.isFinite(c.timestamp) && c.timestamp > m ? c.timestamp : m), 0);
+    return { ...decision, id: `${info.pool}:${ts}`, ts, lastCandleTs: lastCandleTs > 0 ? lastCandleTs : null };
   } catch (err) {
     logger.warn('[shadow] decision skipped', { pool: info.pool, error: err instanceof Error ? err.message : String(err) });
     return null;

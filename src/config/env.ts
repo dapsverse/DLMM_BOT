@@ -552,6 +552,13 @@ export const env = {
   // standalone runner (src/scripts/shadowRunner.ts, no wallet): minutes between scans (min 5) and how many top candidates per scan are logged
   SHADOW_RUNNER_INTERVAL_MIN: num('SHADOW_RUNNER_INTERVAL_MIN', 15),
   SHADOW_RUNNER_TOP: num('SHADOW_RUNNER_TOP', 3),
+  // runner paper positions (logic/shadowSim.ts): one per shadow decision (A or B), SHADOW_SIM_CAPITAL_SOL each, at most SHADOW_SIM_MAX_OPEN at once,
+  // closed at market after SHADOW_SIM_MAX_HOURS (the real bot has no time stop); fee income = pool fee/TVL 24h * SHADOW_SIM_FEE_FACTOR
+  SHADOW_SIM_ENABLED: bool('SHADOW_SIM_ENABLED', true),
+  SHADOW_SIM_CAPITAL_SOL: num('SHADOW_SIM_CAPITAL_SOL', 1),
+  SHADOW_SIM_MAX_OPEN: num('SHADOW_SIM_MAX_OPEN', 12),
+  SHADOW_SIM_MAX_HOURS: num('SHADOW_SIM_MAX_HOURS', 48),
+  SHADOW_SIM_FEE_FACTOR: num('SHADOW_SIM_FEE_FACTOR', 1),
   // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.
   FLIP_ENABLED: bool('FLIP_ENABLED', false),
   // Flip trigger: price below the lowest bin of the SOL ladder (100% token), confirmed over FLIP_CONFIRM_TICKS ticks (1 = immediately). Flip phase: no AI exit,
