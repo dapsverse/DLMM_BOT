@@ -115,7 +115,7 @@ export function sanitizeCloseHistory(raw: unknown): [string, CloseRec[]][] {
   for (const e of raw) {
     if (!Array.isArray(e) || typeof e[0] !== 'string' || !Array.isArray(e[1])) continue;
     const recs = (e[1] as unknown[]).filter(
-      (r): r is CloseRec => !!r && typeof r === 'object' && ['low yield', 'oor', 'other'].includes((r as CloseRec).kind) && isFiniteNum((r as CloseRec).feesSol),
+      (r): r is CloseRec => !!r && typeof r === 'object' && ['low yield', 'oor', 'stop loss', 'other'].includes((r as CloseRec).kind) && isFiniteNum((r as CloseRec).feesSol),
     );
     if (recs.length) out.push([e[0], recs.slice(-CLOSE_HISTORY_PER_POOL)]);
   }

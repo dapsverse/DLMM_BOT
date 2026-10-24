@@ -2,7 +2,7 @@
 
 Single-pool auto-managed Meteora DLMM LP bot for Solana memecoin pools. REAL MONEY is live (wallet address redacted as `<LIVE_WALLET_ADDRESS>` in git; key in `.env.live`).
 Current mode: `ENTRY_STRATEGY_MODE=meridian` with a Claude ReAct screener + manager (`AI_AGENT`, `AI_REACT`, `AI_REACT_MANAGER`).
-Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONLY when its topic is relevant to the task; do not load them all.
+Detailed history lives in `docs/claude-notes/` (see index); read an old note ONLY when relevant.
 `SCREEN_RULE.MD` = entry screen spec. Remote: `origin` = github.com/dapsverse/DLMM_BOT.
 
 ## Safety rules (do not relax)
@@ -33,13 +33,12 @@ Detailed history lives in `docs/claude-notes/` (see index). Read an old note ONL
 
 ## Current state (2026-10-19/20)
 - Mode meridian, wallet shared with the user's manual DARK-SOL pool. Settings: `TOKEN_SHARE_PCT` 50, `MIN_EQUITY_STOP_SOL=0`, `MAX_CAPITAL_SOL=0`, trailing TP floor `TRAILING_MIN_PNL_PCT` 0, own smart-wallet list (35 wallets), Bid-Ask Flip enabled, realized-PnL reporting (decision PnL net of exit cost), WebSearch-once narrative as a consideration.
-- Bot runs on `main` under systemd since 2026-10-22; boot recovery resumes from `state/live-state.json` (also blacklist, chase guard and meridian `closeHistory`, so cooldowns survive restarts). Token `1` (pool `7UERUj…`): 60% sold, rest in a Jupiter limit order at +60%.
-- Ubuntu services (user systemd): `dlmmbot.service`, `dlmm-telegram.service`; start/stop only on the user's word.
+- Bot runs on `main` under systemd since 2026-10-22; boot recovery resumes from `state/live-state.json` (also blacklist, chase guard, meridian `closeHistory`: cooldowns survive restarts). A stop-loss close blacklists that pool `SL_POOL_COOLDOWN_HOURS` (4, 0 = off); `manualOps close` records history, outcome and cooldown too.- Ubuntu services (user systemd): `dlmmbot.service`, `dlmm-telegram.service`; start/stop only on the user's word.
 - Telegram notifier: non-blocking polling, timeouts, send() retry, 409 backoff; systemd drop-in `NODE_OPTIONS=--network-family-autoselection-attempt-timeout=3000`. ONE notifier per token; it tails the newest `logs/live-*.log`, so start the bot with systemd-run `-p StandardOutput=append:logs/live-systemd-<date>.log`; events formatted + deduped by `logic/telegram{Ai,Event}Format.ts`.- Flip rules (merged #7): flip at tokenBelowRange, asks above the OLD ladder bottom (`flipAnchorBin`), no AI exit in flip phase (`aiExitAllowed`, `selectExitSignal`), env `FLIP_CONFIRM_TICKS` 1 / `FLIP_OOR_ABOVE_EXIT_MIN` 10 / `FLIP_TVL_COLLAPSE_PCT` 30.
 - Shadow selector (log only, never touches entries/exits): `logic/shadowStrategy.ts` votes pick A (two-sided 50:50) or B (SOL ladder + flip) per entry -> `state/shadow-strategy.jsonl`; env `SHADOW_*`. Wallet-free `scripts/shadowRunner.ts` (unit `dlmm-shadow`: `PRIVATE_KEY=SHADOW_RUNNER_NO_KEY`, `DOTENV_CONFIG_PATH=/nonexistent`, public `RPC_URL`) also runs 1-SOL paper positions (`logic/shadowSim.ts`, bot's exit rules) -> `state/shadow-sim.jsonl`; paired (`SHADOW_SIM_PAIRED`): each decision opens A and B, `chosen` marks the selector pick; `scripts/reportShadowStrategy.ts`.
 - Not proven live: AI deploy/close paths in all variants, down-break on a ladder, flip over a full cycle, token_spot.
 - Pending/open: rotate leaked keys; meridian threshold auto-evolution after 20-30 closed positions; Telegram `/status` still shows gross PnL; known `openInitialPosition` gaps (notes/12); RapidAPI quota vs plan.
-- Flip display: /status, /posisi, /aireport show a flip as one cycle (`logic/cyclePnl.ts`, `logic/poolLines.ts`).
+- /status, /posisi, /aireport show a flip as one cycle (`logic/cyclePnl.ts`, `poolLines.ts`).
 
 ## Key operational facts (from the notes; do not re-derive)
 - On-chain positions are the source of truth at boot (`recoverOnBoot`): 0 -> flat, 1 -> resume from state or rebuild from chain, >1 -> refuse to trade.

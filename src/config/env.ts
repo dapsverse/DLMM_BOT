@@ -342,6 +342,8 @@ export const env = {
 
   // Risk management
   STOP_LOSS_PCT: num('STOP_LOSS_PCT', 25),
+  // Hours the SAME pool is kept out of entry after a close by the stop loss (meridian mode; persisted in the state's blacklist). 0 disables it.
+  SL_POOL_COOLDOWN_HOURS: num('SL_POOL_COOLDOWN_HOURS', 4),
   MAX_REBALANCE_PER_HOUR: num('MAX_REBALANCE_PER_HOUR', 3),
   REBALANCE_COOLDOWN_MS: num('REBALANCE_COOLDOWN_MS', 5 * 60_000),
   // FEE_GAS_MULTIPLIER removed 2026-09-26 along with the standalone

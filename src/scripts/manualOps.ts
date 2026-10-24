@@ -28,6 +28,10 @@ const { emergencySwapAllToSol } = await import('../services/jupiterSwap.js');
 const { loadState, saveState, STATE_VERSION } = await import('../services/stateStore.js');
 const { recoverOnBoot } = await import('../logic/bootRecovery.js');
 const eng = await import('../logic/rebalanceEngine.js');
+const { closeRecordUpdate } = await import('../logic/meridianCooldown.js');
+const { pnlBasisSol, strategyLabel } = await import('../logic/flip.js');
+const { estimateExitCostSol, realizedPnl } = await import('../logic/realizedPnl.js');
+const { recordOutcome } = await import('../services/aiOutcomes.js');
 
 const [cmd = '', arg1 = '', arg2 = ''] = process.argv.slice(2);
 
@@ -264,6 +268,41 @@ function closePct(modeArg: string): number {
   return n > 0 ? n : env.DOWNBREAK_ASK_PCT;
 }
 
+/**
+ * A manual close counts like any other close for the meridian pool-memory cooldowns (3 OOR / 3 fee-earning closes -> 12 h, SL_POOL_COOLDOWN_HOURS after a stop
+ * loss) and gets an outcome line. manualOps refuses to run while the bot is up (single writer), so editing state/live-state.json here is safe; the bot
+ * reads closeHistory and the blacklist at its next boot. A close made while the position was out of range is recorded as 'oor', anything else as 'other'.
+ */
+function recordManualClose(ctx: Awaited<ReturnType<typeof recoverOnBoot>>['ctx'] & object, pre: { value: number; fees: number; other: number; oor: boolean } | null): void {
+  const now = Date.now();
+  const mint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+  const prev = loadState(getWalletPubkey().toBase58());
+  const upd = closeRecordUpdate(prev?.closeHistory, prev?.blacklist ?? [], ctx.poolAddress, mint, { kind: pre?.oor ? 'oor' : 'other', feesSol: pre?.fees ?? 0 }, now, env.SL_POOL_COOLDOWN_HOURS);
+  writeState({ closeHistory: upd.closeHistory, blacklist: upd.blacklist });
+  const init = ctx.initialDepositSol;
+  const basis = pre ? pnlBasisSol(pre.value, pre.fees, ctx.bankedSol ?? 0, true, estimateExitCostSol(pre.other, env.EXIT_COST_PCT, env.EXIT_COST_GAS_SOL)) : null;
+  const pnlPct = basis !== null && init > 0 ? ((basis - init) / init) * 100 : 0;
+  const lc = eng.getLastClose();
+  const real = lc && lc.pool === ctx.poolAddress ? realizedPnl(ctx.openSpentSol, lc.receivedSol, ctx.bankedSol ?? 0, init) : null;
+  recordOutcome({
+    at: new Date(now).toISOString(),
+    pool: ctx.poolAddress,
+    name: ctx.poolName ?? null,
+    tokenMint: mint,
+    minutesHeld: ctx.openedAtMs ? Math.round((now - ctx.openedAtMs) / 60_000) : null,
+    depositSol: init,
+    lastValueSol: pre ? pre.value + (ctx.bankedSol ?? 0) : 0,
+    pnlPct: +pnlPct.toFixed(2),
+    ...(real ? { realizedPnlPct: +real.pnlPct.toFixed(2), realizedPnlSol: +real.pnlSol.toFixed(5) } : {}),
+    peakPct: +ctx.peakProfitPct.toFixed(2),
+    exitReason: `MANUAL: close now${pre?.oor ? ' (out of range)' : ''}`,
+    entryConviction: ctx.aiEntryConviction ?? null,
+    entryReason: ctx.aiEntryReason ?? null,
+    strategy: strategyLabel(ctx),
+  });
+  console.log(`bookkeeping: closeHistory + outcome recorded${upd.blacklist.some(([a]) => a === ctx.poolAddress) ? ', pool is on the cooldown list' : ''}`);
+}
+
 async function close(modeArg: string): Promise<void> {
   if (botAlive()) throw new Error('live bot is running, stop it first');
   const rec = await recoverOnBoot();
@@ -274,6 +313,14 @@ async function close(modeArg: string): Promise<void> {
     return;
   }
   writeState({ inFlight: true, lastOtherMint: ctx.xIsSol ? ctx.mintY : ctx.mintX });
+  // snapshot BEFORE the close for the bookkeeping below (best effort: a failed read only costs the pnl/fees fields)
+  let pre: { value: number; fees: number; other: number; oor: boolean } | null = null;
+  try {
+    const sn = await eng.getPositionHealthSnapshot(ctx);
+    pre = { value: sn.currentValueSol, fees: sn.unclaimedFeesSol, other: sn.otherPrincipalSol, oor: (await eng.getBinRangeStatus(ctx)).isOutOfRange };
+  } catch {
+    /* ignore */
+  }
   try {
     const next = await eng.executeManualClose(ctx, closePct(modeArg));
     // A manual ask is tracked in manual-orders.json, NOT as the bot's pendingLimitOrder (the bot would cancel/market-sell it after its deadline).
@@ -283,6 +330,7 @@ async function close(modeArg: string): Promise<void> {
       eng.restorePendingLimitOrder(null);
     }
     writeState({ position: null, inFlight: false, currentCapitalSol: next, pendingSwapBack: eng.getPendingSwapBack(), pendingLimitOrder: null });
+    recordManualClose(ctx, pre);
     console.log(`closed. wallet SOL ${(await getWalletSolBalance()).toFixed(4)}${ask ? '. Sell ask placed, track with /orders.' : ''}${eng.getPendingSwapBack() ? ' (token swap-back pending, use /clean)' : ''}`);
   } catch (err) {
     const still = (await getUserPositions(ctx.pool)).length > 0;

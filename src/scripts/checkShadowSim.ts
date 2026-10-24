@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import axios from 'axios';
 import { advanceSim, binOfU, canOpenSim, openSim, priceOfU, simBinRadius, uOf, valuePosition, type OpenInput, type SimParams, type SimPosition } from '../logic/shadowSim.js';
-import { summarizePairs, summarizeSim, type SimLine } from '../logic/shadowSimReport.js';
+import { slCooldownActive, summarizePairs, summarizeSim, type SimLine } from '../logic/shadowSimReport.js';
 import { appendSimLine, loadOpenSims, readSimLines, saveOpenSims } from '../services/shadowSimStore.js';
 import type { ShadowCandle } from '../logic/shadowStrategy.js';
 
@@ -205,6 +205,16 @@ near(pp.sumASol, 0.15);
 near(pp.sumBSol, -0.3);
 near(pp.sumChosenSol, 0.05 + -0.2);
 near(pp.sumOtherSol, -0.1 + 0.1);
+
+// ---- stop-loss pool cooldown (same rule as the live bot) ----
+const slx = (pool: string, reason: string, ts: string): SimLine => ({ type: 'sim_exit', id: pool + ts, ts, pool, mode: 'A', price: 1, reason, pnlSol: -0.3, pnlUsd: null, pnlPct: -30, minutesHeld: 10, flipped: false });
+const slLines = [slx('P1', 'stop loss: cycle PnL -26%', '2026-10-24T00:00:00.000Z'), slx('P2', 'take profit: PnL 5%', '2026-10-24T00:00:00.000Z')];
+const at0 = Date.parse('2026-10-24T00:00:00.000Z');
+assert.equal(slCooldownActive(slLines, 'P1', at0 + 3 * 3_600_000, 4), true); // 3 h after the stop loss
+assert.equal(slCooldownActive(slLines, 'P1', at0 + 4 * 3_600_000 + 1, 4), false); // expired
+assert.equal(slCooldownActive(slLines, 'P2', at0 + 3_600_000, 4), false); // not a stop loss
+assert.equal(slCooldownActive(slLines, 'P3', at0 + 3_600_000, 4), false); // other pool
+assert.equal(slCooldownActive(slLines, 'P1', at0 + 3_600_000, 0), false); // env = 0
 
 // ---- store + orchestration (axios mocked, temp files) ----
 const dir = mkdtempSync(join(tmpdir(), 'shadowsim-'));
