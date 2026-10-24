@@ -47,7 +47,7 @@ import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleC
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
 import { ladderBounds } from './logic/ladderRange.js';
-import { closeKindFromReason, cooldownHoursAfterClose, type CloseRec } from './logic/meridianCooldown.js';
+import { closeKindFromReason, recordClose, cooldownBlacklistAdds, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, sanitizeCloseHistory, STATE_VERSION } from './services/stateStore.js';
@@ -92,15 +92,11 @@ function flushOutcome(now: number): void {
   pendingExit = null;
   if (currentPool) return; // exit failed or reopened: the position lives on
   if (env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined) {
-    const hist = [...(closeHistory.get(ctx.poolAddress) ?? []), { kind: closeKindFromReason(reason), feesSol: snap.feesSol }].slice(-10);
-    closeHistory.set(ctx.poolAddress, hist);
-    persist(); // written at once: a restart right after the close must not lose this record
-    const hours = cooldownHoursAfterClose(hist, { oorCount: 3, oorHours: 12, repeatCount: 3, repeatHours: 12 });
-    if (hours > 0) {
-      // meridian cools both the pool and its base mint (the scanner checks the blacklist for either key)
-      addToBlacklist(blacklistPools, ctx.poolAddress, now, hours * 3_600_000);
-      addToBlacklist(blacklistPools, ctx.xIsSol ? ctx.mintY : ctx.mintX, now, hours * 3_600_000);
-    }
+    const u = recordClose(closeHistory.get(ctx.poolAddress), { kind: closeKindFromReason(reason), feesSol: snap.feesSol }, env.SL_POOL_COOLDOWN_HOURS);
+    closeHistory.set(ctx.poolAddress, u.hist);
+    // meridian cools the pool and its base mint (3 OOR / 3 fee-earning / low yield); a stop loss cools this pool only (SL_POOL_COOLDOWN_HOURS)
+    for (const [addr, until] of cooldownBlacklistAdds(u, ctx.poolAddress, ctx.xIsSol ? ctx.mintY : ctx.mintX, now)) addToBlacklist(blacklistPools, addr, now, until - now);
+    persist(); // written at once (history + blacklist): a restart right after the close must not lose them
   }
   const lc = getLastClose();
   const real = lc && lc.pool === ctx.poolAddress ? realizedPnl(ctx.openSpentSol, lc.receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol) : null;

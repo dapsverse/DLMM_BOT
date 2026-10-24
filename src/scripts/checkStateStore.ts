@@ -85,4 +85,12 @@ const many = Array.from({ length: 150 }, (_, i): [string, CloseRec[]] => [`P${i}
 const kept = sanitizeCloseHistory(many);
 assert.equal(kept.length, CLOSE_HISTORY_MAX_POOLS);
 assert.equal(kept.at(-1)![0], 'P149');
+// the stop-loss cooldown lives in the persisted blacklist: it survives a restart while active and is pruned once expired
+const slNow = 5_000_000;
+const slState = { ...state, blacklist: [['SLPOOL', slNow + 4 * 3_600_000], ['OLD', slNow - 1]] as [string, number][], closeHistory: [['SLPOOL', [{ kind: 'stop loss' as const, feesSol: 0.02 }]]] as [string, CloseRec[]][] };
+assert.equal(saveState(slState, f), true);
+const slBack = loadState(W, f)!;
+assert.deepEqual(pruneExpired(slBack.blacklist, slNow + 3_600_000), [['SLPOOL', slNow + 4 * 3_600_000]]); // 1 h later: still cooling, the expired entry is gone
+assert.deepEqual(pruneExpired(slBack.blacklist, slNow + 5 * 3_600_000), []); // 5 h later: expired
+assert.deepEqual(sanitizeCloseHistory(slBack.closeHistory), [['SLPOOL', [{ kind: 'stop loss', feesSol: 0.02 }]]]); // the new kind survives the round trip
 console.log('OK: state store round-trips, rejects corrupt/foreign files, boot reconciliation trusts the chain and refuses ambiguity');

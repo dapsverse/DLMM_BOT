@@ -128,3 +128,9 @@ export function summarizePairs(lines: SimLine[]): PairStats {
   }
   return r;
 }
+
+/** True while `pool` is inside the stop-loss cooldown: a paper position of it closed by the stop loss less than `hours` ago (hours 0 = off). Mirrors SL_POOL_COOLDOWN_HOURS of the live bot. */
+export function slCooldownActive(lines: SimLine[], pool: string, nowMs: number, hours: number): boolean {
+  if (!(hours > 0)) return false;
+  return lines.some((l) => l.type === 'sim_exit' && l.pool === pool && l.reason.toLowerCase().startsWith('stop loss') && Date.parse(l.ts) + hours * 3_600_000 > nowMs);
+}

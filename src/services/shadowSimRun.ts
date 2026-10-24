@@ -3,7 +3,8 @@ import { logger } from '../utils/logger.js';
 import { getPoolStats } from '../logic/meridianExit.js';
 import { advanceSim, canOpenSim, openSim, type SimParams, type SimPosition } from '../logic/shadowSim.js';
 import { fetchCandles5m, type LoggedShadowDecision } from './shadowLog.js';
-import { appendSimLine, loadOpenSims, saveOpenSims } from './shadowSimStore.js';
+import { appendSimLine, loadOpenSims, readSimLines, saveOpenSims } from './shadowSimStore.js';
+import { slCooldownActive } from '../logic/shadowSimReport.js';
 
 /**
  * One simulation cycle for the shadow runner (see logic/shadowSim.ts for the model): open one paper position per fresh shadow decision (no second one
@@ -56,10 +57,12 @@ export async function runSimCycle(cands: SimCandidate[], nowMs = Date.now()): Pr
   try {
     const p = simParamsFromEnv();
     open = loadOpenSims();
+    const exitLines = env.SL_POOL_COOLDOWN_HOURS > 0 ? readSimLines().filter((l) => l.type === 'sim_exit') : [];
     for (const c of cands) {
       const d = c.decision;
       const price = d.inputs?.lastClose;
       if (d.mode === 'unknown' || !price || d.lastCandleTs === null) continue;
+      if (slCooldownActive(exitLines, c.pool, nowMs, env.SL_POOL_COOLDOWN_HOURS)) continue; // same stop-loss pool cooldown as the live bot
       const modes: ('A' | 'B')[] = env.SHADOW_SIM_PAIRED ? ['A', 'B'] : [d.mode];
       // a pair opens whole or not at all (room for both, none of them open in this pool), so A vs B always compares the same decision
       const room = env.SHADOW_SIM_PAIRED ? env.SHADOW_SIM_MAX_OPEN - 1 : env.SHADOW_SIM_MAX_OPEN;
