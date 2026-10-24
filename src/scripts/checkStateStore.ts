@@ -3,9 +3,10 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  applyStaleTimers, loadState, parseState, pruneExpired, reconcileBoot, saveState,
-  STATE_VERSION, STALE_TIMER_MS, type PersistedPosition, type PersistedState,
+  applyStaleTimers, loadState, parseState, pruneExpired, reconcileBoot, saveState, sanitizeCloseHistory,
+  STATE_VERSION, STALE_TIMER_MS, CLOSE_HISTORY_PER_POOL, CLOSE_HISTORY_MAX_POOLS, type PersistedPosition, type PersistedState,
 } from '../services/stateStore.js';
+import { cooldownHoursAfterClose, type CloseRec } from '../logic/meridianCooldown.js';
 
 const W = 'WalletPubkeyForTest';
 const pos: PersistedPosition = {
@@ -63,4 +64,25 @@ assert.equal(readFileSync(`${f}.bad`, 'utf8'), '{"version":1,"trunc');
 const withOrder = { ...state, pendingLimitOrder: { kind: 'exitAsk' as const, pool: 'P', order: 'O', xIsSol: false, mint: 'M', amountRaw: '100', keepRaw: '5', deadlineMs: 123 } };
 assert.deepEqual(parseState(JSON.stringify(withOrder), W)?.pendingLimitOrder, withOrder.pendingLimitOrder);
 assert.equal(parseState(JSON.stringify({ ...state, pendingLimitOrder: { kind: 'exitAsk', pool: 'P' } }), W), null);
+// closeHistory (meridian cooldowns) survives a save/load, an old file without it still loads, junk entries are skipped, and the restored history
+// still triggers the cooldown (the 2026-10-23 case: 3 fee-earning closes of one pool, a restart in between must not reset the count)
+const hist: [string, CloseRec[]][] = [['POOLX', [{ kind: 'other', feesSol: 0.01 }, { kind: 'other', feesSol: 0.02 }, { kind: 'oor', feesSol: 0.03 }]]];
+assert.equal(saveState({ ...state, closeHistory: hist }, f), true);
+const back = loadState(W, f)!;
+assert.deepEqual(back.closeHistory, hist);
+assert.equal(cooldownHoursAfterClose(sanitizeCloseHistory(back.closeHistory)[0]![1], { oorCount: 3, oorHours: 12, repeatCount: 3, repeatHours: 12 }), 12);
+assert.equal(parseState(JSON.stringify(state), W)?.closeHistory, undefined); // file written before this field existed
+assert.deepEqual(sanitizeCloseHistory(undefined), []);
+assert.deepEqual(sanitizeCloseHistory('x'), []);
+assert.deepEqual(
+  sanitizeCloseHistory([['P', [{ kind: 'bogus', feesSol: 1 }, { kind: 'oor', feesSol: Number.NaN }, { kind: 'oor', feesSol: 0 }]], [5, []], ['Q', 'nope'], ['R', []], 'junk']),
+  [['P', [{ kind: 'oor', feesSol: 0 }]]],
+);
+const long = Array.from({ length: 25 }, (_, i) => ({ kind: 'other' as const, feesSol: i }));
+assert.equal(sanitizeCloseHistory([['P', long]])[0]![1].length, CLOSE_HISTORY_PER_POOL);
+assert.equal(sanitizeCloseHistory([['P', long]])[0]![1].at(-1)!.feesSol, 24); // the newest are kept
+const many = Array.from({ length: 150 }, (_, i): [string, CloseRec[]] => [`P${i}`, [{ kind: 'other', feesSol: 1 }]]);
+const kept = sanitizeCloseHistory(many);
+assert.equal(kept.length, CLOSE_HISTORY_MAX_POOLS);
+assert.equal(kept.at(-1)![0], 'P149');
 console.log('OK: state store round-trips, rejects corrupt/foreign files, boot reconciliation trusts the chain and refuses ambiguity');

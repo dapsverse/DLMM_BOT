@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync, renameSync, readFileSync, existsSync, copyFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import type { CloseRec } from '../logic/meridianCooldown.js';
 
 /**
  * Persisted live-bot state (2026-10-11): everything the live loop keeps only in memory
@@ -61,6 +62,8 @@ export interface PersistedState {
   /** [mint, exit price USD] — see ScannerConfig.chaseGuardPools */
   chaseGuard: [string, number][];
   dollarFlowBreach: { pool: string; count: number; sinceMs?: number };
+  /** meridian per-pool close history ([pool, last closes]) behind the pool cooldowns, so a restart does not reset them; absent in files written before 2026-10-24 */
+  closeHistory?: [string, CloseRec[]][];
   /** exit swap-back that failed after the close; absent in files written before 2026-10-12 */
   pendingSwapBack?: { mint: string; amount: string } | null;
   /** open limit order the bot placed (entry bid or exit ask) that must be settled before anything else; absent in older files */
@@ -100,6 +103,23 @@ export function pruneExpired(entries: [string, number][], nowMs: number): [strin
 
 function isFiniteNum(x: unknown): x is number {
   return typeof x === 'number' && Number.isFinite(x);
+}
+
+export const CLOSE_HISTORY_PER_POOL = 10;
+export const CLOSE_HISTORY_MAX_POOLS = 100;
+
+/** Restores the saved close history; anything malformed is skipped (it is only cooldown bookkeeping, never a reason to reject the state file). */
+export function sanitizeCloseHistory(raw: unknown): [string, CloseRec[]][] {
+  if (!Array.isArray(raw)) return [];
+  const out: [string, CloseRec[]][] = [];
+  for (const e of raw) {
+    if (!Array.isArray(e) || typeof e[0] !== 'string' || !Array.isArray(e[1])) continue;
+    const recs = (e[1] as unknown[]).filter(
+      (r): r is CloseRec => !!r && typeof r === 'object' && ['low yield', 'oor', 'other'].includes((r as CloseRec).kind) && isFiniteNum((r as CloseRec).feesSol),
+    );
+    if (recs.length) out.push([e[0], recs.slice(-CLOSE_HISTORY_PER_POOL)]);
+  }
+  return out.slice(-CLOSE_HISTORY_MAX_POOLS);
 }
 
 /** Structural validation: a corrupt or foreign file must never be trusted as bookkeeping. */

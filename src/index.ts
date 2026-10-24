@@ -50,14 +50,14 @@ import { ladderBounds } from './logic/ladderRange.js';
 import { closeKindFromReason, cooldownHoursAfterClose, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted } from './logic/rebalanceEngine.js';
-import { saveState, pruneExpired, STATE_VERSION } from './services/stateStore.js';
+import { saveState, pruneExpired, sanitizeCloseHistory, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
 import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, flipTakeProfitSignal, selectExitSignal, aiExitAllowed } from './logic/flip.js';
 import { estimateExitCostSol, realizedPnl } from './logic/realizedPnl.js';
 
 const meridianConfirmer = new ExitConfirmer();
 const flipConfirmer = new ExitConfirmer();
-// per-pool close history for meridian's cooldowns; in memory only (lost on restart)
+// per-pool close history for meridian's cooldowns; persisted in state/live-state.json (persist() / boot restore) so a restart does not reset them
 const closeHistory = new Map<string, CloseRec[]>();
 const LOOP_INTERVAL_MS = 15_000; // position health check cadence (faster than pool scan cadence)
 
@@ -94,6 +94,7 @@ function flushOutcome(now: number): void {
   if (env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined) {
     const hist = [...(closeHistory.get(ctx.poolAddress) ?? []), { kind: closeKindFromReason(reason), feesSol: snap.feesSol }].slice(-10);
     closeHistory.set(ctx.poolAddress, hist);
+    persist(); // written at once: a restart right after the close must not lose this record
     const hours = cooldownHoursAfterClose(hist, { oorCount: 3, oorHours: 12, repeatCount: 3, repeatHours: 12 });
     if (hours > 0) {
       // meridian cools both the pool and its base mint (the scanner checks the blacklist for either key)
@@ -201,6 +202,7 @@ function persist(): void {
     lastSwitchAtMs,
     blacklist: [...blacklistPools.entries()],
     chaseGuard: [...chaseGuardPools.entries()],
+    closeHistory: sanitizeCloseHistory([...closeHistory.entries()]),
     dollarFlowBreach,
     pendingSwapBack: getPendingSwapBack(),
     pendingLimitOrder: getPendingLimitOrder(),
@@ -980,6 +982,7 @@ async function main(): Promise<void> {
     const now = Date.now();
     for (const [addr, until] of pruneExpired(saved.blacklist, now)) if (!blacklistPools.has(addr)) blacklistPools.set(addr, until);
     for (const [mint, px] of saved.chaseGuard) chaseGuardPools.set(mint, px);
+    for (const [pool, hist] of sanitizeCloseHistory(saved.closeHistory)) if (!closeHistory.has(pool)) closeHistory.set(pool, hist);
     lastOtherMint = saved.lastOtherMint;
     lastSwitchAtMs = saved.lastSwitchAtMs;
     dollarFlowBreach = saved.dollarFlowBreach;
