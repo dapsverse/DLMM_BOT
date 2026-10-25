@@ -42,6 +42,7 @@ import type { TokenAudit } from './logic/tokenAudit.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
 import { getTokenAudit } from './services/tokenAudit.js';
 import { auditRejectReason } from './logic/tokenAudit.js';
+import { fallingKnifeReject } from './logic/entryHardSkip.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
@@ -369,6 +370,11 @@ async function tryEnterPool(): Promise<void> {
     });
     if (auditReject) {
       logger.info(`[index] skipping pool ${candidate.address} — token audit: ${auditReject}`, { audit });
+      continue;
+    }
+    const knifeReject = fallingKnifeReject(candidate.priceChange24hPct, volumeSpikeRatio(candidate), { minDrop24hPct: env.ENTRY_HARD_SKIP_DROP24H_PCT, maxSpikeRatio: env.ENTRY_HARD_SKIP_MAX_SPIKE });
+    if (knifeReject) {
+      logger.info(`[index] skipping pool ${candidate.address} — ${knifeReject}`);
       continue;
     }
     logger.info('[index] token audit ok', { pool: candidate.address, audit });

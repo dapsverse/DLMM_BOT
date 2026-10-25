@@ -479,6 +479,12 @@ export const env = {
   MIN_TOKEN_GLOBAL_FEES_SOL: num('MIN_TOKEN_GLOBAL_FEES_SOL', 30),
   /** Jupiter organic score floor, 0 = off (meridian uses 60). */
   MIN_ORGANIC_SCORE: num('MIN_ORGANIC_SCORE', 0),
+  // Entry hard skips (logic/entryHardSkip.ts), all modes. Falling knife: 24h change <= -this % AND volumeSpikeRatio < max (0 = off). 50 / 0.2: the
+  // Moustache-SOL entry (-67% 24h, spike 0.07x) was a loss, and 0.2 is the existing low end (MIN_RECENT_ACTIVITY_RATIO 0.15 is the 1h floor).
+  ENTRY_HARD_SKIP_DROP24H_PCT: num('ENTRY_HARD_SKIP_DROP24H_PCT', 50),
+  ENTRY_HARD_SKIP_MAX_SPIKE: num('ENTRY_HARD_SKIP_MAX_SPIKE', 0.2),
+  // Distribution: deploy refused when KOLs net sell AND every early buyer already sold (MadeOnSol intel; missing data never blocks).
+  ENTRY_HARD_SKIP_DISTRIBUTION: bool('ENTRY_HARD_SKIP_DISTRIBUTION', true),
   // 'meridian' entry mode (SOL-only bid-ask ladder below price, from yunus-0x/meridian) — size window + ladder shape.
   MERIDIAN_MIN_MCAP_USD: num('MERIDIAN_MIN_MCAP_USD', 150_000),
   MERIDIAN_MAX_MCAP_USD: num('MERIDIAN_MAX_MCAP_USD', 10_000_000),
