@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import type { CycleBasis } from '../logic/cyclePnl.js';
 import { poolLineTexts } from '../logic/poolLines.js';
+import { walletFreeLine, totalLines } from '../logic/walletTotals.js';
 import { createDeduper, formatEvent } from '../logic/telegramEventFormat.js';
 
 function loadEnv(path: string): Record<string, string> {
@@ -241,13 +242,16 @@ async function statusText(): Promise<string> {
   lines.push(count === null ? `position (state file, unverified): ${st.pool ? st.pool.slice(0, 6) + '…' : 'none'}` : count === 0 ? 'position: none on-chain' + (st.pool ? ' (state file is stale)' : '') : `position: ${count} open on-chain`);
   if (st.pendingOrder) lines.push('pending limit order: yes');
   if (st.pendingSwap) lines.push('pending swap-back: yes');
-  if (sol !== null) lines.push(`wallet SOL: ${sol.toFixed(4)}`);
+  lines.push(walletFreeLine(sol, new Date().toISOString()));
   for (const h of holds) lines.push(`holding: ${fmtHold(h)}`);
   if (existsSync('state/manual-orders.json') && readFileSync('state/manual-orders.json', 'utf8').trim() !== '[]') lines.push('manual orders:\n' + (await ops(['orders'], 90_000)));
   const pf = count ? await portfolio(st.wallet) : null;
   if (pf?.pools.length) for (const p of pf.pools) lines.push(...poolLines(p, pf.solPrice, false, st.basis));
   const h = count && !pf?.pools.length ? lastHealth() : null;
   if (h) lines.push(`pos ${h.currentValueSol.toFixed(4)} + fees ${h.unclaimedFeesSol.toFixed(4)} SOL, bin ${h.currentBinId}${h.isOutOfRange ? ' OUT OF RANGE' : ''} (${hhmm(h.ts)}, ${ageMin(h.ts)}m ago)`);
+  // total needs the position values from the portfolio API; the stale log health line is not used for the sum
+  const positions = count === 0 ? [] : pf?.pools.length ? pf.pools.map((p) => ({ valueSol: Number(p.balancesSol), feesSol: Number(p.unclaimedFeesSol) })) : null;
+  lines.push(...totalLines({ walletSol: sol, positions, bankedSol: st.basis?.bankedSol ?? 0 }));
   return lines.join('\n');
 }
 
