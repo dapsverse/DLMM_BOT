@@ -12,6 +12,7 @@ import { checkSmartWalletsOnPool } from './smartWallets.js';
 import { logger } from '../utils/logger.js';
 import { fetchXNarrative } from './xNarrative.js';
 import { fetchTokenIntel } from './madeonSol.js';
+import { distributionReject } from '../logic/entryHardSkip.js';
 
 const text = (o: unknown, maxChars = 6000) => ({ content: [{ type: 'text' as const, text: JSON.stringify(o).slice(0, maxChars) }] });
 
@@ -228,6 +229,12 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
       note('submit_decision', { action: a.action, pool: a.pool, conviction: a.conviction });
       if (submitted) return text({ error: 'already submitted' });
       submitted = validateSubmit(a, allowed, env.AI_MIN_BINS, env.AI_MAX_BINS, env.AI_MIN_CONVICTION, { minConviction: env.TOKEN_SPOT_MIN_CONVICTION, minBins: env.TOKEN_SPOT_MIN_BINS });
+      // hard skip: KOLs net selling AND every early buyer sold (intel is cached 30 min; unavailable intel never blocks)
+      if (env.ENTRY_HARD_SKIP_DISTRIBUTION && submitted.action === 'deploy') {
+        const mint = candidates.find((c) => c.pool === a.pool)?.tokenMint;
+        const why = mint ? distributionReject(await fetchTokenIntel(mint)) : null;
+        if (why) submitted = { action: 'skip', reason: `hard skip, ${why}` };
+      }
       return text({ ok: true, recorded: submitted.action });
     },
   );
