@@ -11,6 +11,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rea
 import type { CycleBasis } from '../logic/cyclePnl.js';
 import { poolLineTexts } from '../logic/poolLines.js';
 import { walletFreeLine, totalLines } from '../logic/walletTotals.js';
+import { notifyKinds } from '../logic/notifyKind.js';
 import { createDeduper, formatEvent } from '../logic/telegramEventFormat.js';
 
 function loadEnv(path: string): Record<string, string> {
@@ -62,13 +63,16 @@ const tfetch = (url: string, init: RequestInit = {}, ms = 12_000): Promise<Respo
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Sends to the owner chat (or `chatId`); up to 3 attempts, retrying only network errors, 429 (honouring retry_after) and 5xx. Never throws. */
-async function send(text: string, chatId: string = CHAT!): Promise<void> {
+async function send(text: string, chatId: string = CHAT!, kind = 'reply'): Promise<void> {
   const body = JSON.stringify({ chat_id: chatId, text: scrub(text).slice(0, 3800) });
   for (let attempt = 1; attempt <= 3; attempt++) {
     let waitMs = 1000 * attempt;
     try {
       const res = await tfetch(`${API}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }, 15_000);
-      if (res.ok) return;
+      if (res.ok) {
+        console.log(`[notify] sent kind=${kind} chars=${text.length}`); // proof of delivery in the journal; kind only, never the content
+        return;
+      }
       console.error(`send http ${res.status} (attempt ${attempt})`);
       if (res.status !== 429 && res.status < 500) return; // a 4xx other than 429 will not get better by retrying
       if (res.status === 429) {
@@ -789,7 +793,7 @@ async function main(): Promise<void> {
             return f === undefined ? s.slice(0, 1500) : f?.slice(0, 1500) ?? null;
           })
           .filter((m): m is string => m !== null && !isRepeat(m)); // the same message again within 10 min (a line logged every tick) is sent once
-        for (const msg of batchLines(hits.slice(0, 8), 3800)) await send(msg);
+        for (const msg of batchLines(hits.slice(0, 8), 3800)) await send(msg, CHAT!, notifyKinds(msg));
         if (hits.length > 8) await send(`…+${hits.length - 8} more`);
       }
       const alive = botAlive();
