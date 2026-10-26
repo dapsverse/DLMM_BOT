@@ -477,7 +477,7 @@ export async function executeFlip(ctx: PoolContext, onState?: () => void): Promi
 export { estimateCycleGasCostSol } from './costEstimate.js';
 import { estimateBinRentSol } from './costEstimate.js';
 import { isTokenSide, flipCenterFromBounds } from './flip.js';
-import { sanitizeSpent } from './realizedPnl.js';
+import { sanitizeSpent, realizedPnl } from './realizedPnl.js';
 
 // claimFeesOnly (fee-threshold REBALANCE while still in-range) removed
 // 2026-09-26 — see riskManager.ts's removal note. Fees are now only ever
@@ -1168,8 +1168,11 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
   const solBalance = await getWalletSolBalance();
   const nextCapital = walletCapitalSol(solBalance);
   // proceeds of this exit (close + token swap), measured over seconds; incomplete (null) when a swap-back is still pending or the close was not run here
-  lastClose = { pool: ctx.poolAddress, receivedSol: solBeforeClose !== null && !pendingSwapBack ? solBalance - solBeforeClose : null };
-  logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital });
+  const receivedSol = solBeforeClose !== null && !pendingSwapBack ? solBalance - solBeforeClose : null;
+  lastClose = { pool: ctx.poolAddress, receivedSol };
+  // same inputs as the [index] outcome line (flushOutcome in index.ts), so Telegram and state/ai-outcomes.jsonl show identical numbers
+  const real = realizedPnl(ctx.openSpentSol, receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol);
+  logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital, depositSol: ctx.initialDepositSol, realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null, realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null });
   return nextCapital;
 }
 
