@@ -7,6 +7,13 @@ const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 const pct = (v: number) => `${v >= 0 ? '+' : ''}${Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1)}%`;
 const sol = (v: number) => `${v.toFixed(3)} SOL`;
 
+/** realized PnL line of a finished exit: SOL and % of the deploy, the numbers state/ai-outcomes.jsonl records; null inputs = the exit legs were not measured reliably */
+function realizedLine(pnlSol: number | null, pnlPct: number | null, deposit: number | null): string {
+  if (pnlSol === null || pnlPct === null) return 'PnL realized: tidak terukur';
+  const sg = (v: number, d: number) => `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
+  return `PnL realized ${sg(pnlSol, 4)} SOL (${sg(pnlPct, 2)}% dari modal deploy${deposit !== null ? ` ${sol(deposit)}` : ''})`;
+}
+
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Obj) : null);
 
@@ -92,10 +99,13 @@ export function formatEvent(line: string): string | null | undefined {
   const cl = /^(\w+)(: closing position| complete)$/.exec(msg);
   if (mod === 'rebalanceEngine' && cl && d) {
     const pool = typeof d.pool === 'string' ? shortPool(d.pool) : '';
-    if (cl[2] === ': closing position') return [`🔻 ${cl[1]}: menutup posisi${pool ? ` ${pool}` : ''}`, time].filter(Boolean).join('\n');
+    // realized PnL only exists once the close and the token swap are done, so the closing message just announces it
+    if (cl[2] === ': closing position') return [`🔻 ${cl[1]}: menutup posisi${pool ? ` ${pool}` : ''}`, 'PnL realized menyusul', time].filter(Boolean).join('\n');
     const bal = num(d.solBalance);
     const next = num(d.nextCapital);
-    return [`✅ ${cl[1]} selesai${pool ? ` · pool ${pool}` : ''}`, [bal !== null ? `saldo wallet ${sol(bal)}` : '', next !== null ? `modal berikut ${sol(next)}` : ''].filter(Boolean).join(' · '), time].filter(Boolean).join('\n');
+    // old log lines (no realizedPnlSol key at all) keep the old format
+    const pnl = 'realizedPnlSol' in d ? realizedLine(num(d.realizedPnlSol), num(d.realizedPnlPct), num(d.depositSol)) : '';
+    return [`✅ ${cl[1]} selesai${pool ? ` · pool ${pool}` : ''}`, [bal !== null ? `saldo wallet ${sol(bal)}` : '', next !== null ? `modal berikut ${sol(next)}` : ''].filter(Boolean).join(' · '), pnl, time].filter(Boolean).join('\n');
   }
   return generic(level, mod, msg, d, time);
 }
