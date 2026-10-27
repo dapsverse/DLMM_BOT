@@ -1,4 +1,5 @@
 import { meridianPoolReject, type MeridianLimits } from '../logic/meridianFilter.js';
+import { activeBoosts } from '../logic/dexBoost.js';
 import axios from 'axios';
 import { env } from '../config/env.js';
 import {
@@ -105,6 +106,8 @@ export interface MeteoraPair {
   txCountM5?: number;
   /** DexScreener's 1h buys / (buys+sells) — a volume spike can be genuine buying pressure OR a sell-off/dump; this distinguishes them. Used to gate the opportunistic-switch candidate (see evaluateSwitchOpportunity) so a "spike" that's actually distribution doesn't trigger a switch. */
   buyRatio1h?: number;
+  /** Active paid DexScreener boost points over the token's pairs (0 = none; undefined = unknown). Context for the AI screener only, never a filter. */
+  dexBoostsActive?: number;
   /**
    * True when this pool's whole DexScreener batch call failed (429/timeout/etc) —
    * distinct from a pool that DexScreener simply has no data for. Every
@@ -385,6 +388,8 @@ interface DexScreenerPair {
   volume?: { m5?: number; h1?: number; h6?: number };
   txns?: { m5?: { buys?: number; sells?: number }; h1?: { buys?: number; sells?: number } };
   liquidity?: { usd?: number };
+  /** present while a paid DexScreener boost is running (see logic/dexBoost.ts) */
+  boosts?: { active?: number };
 }
 
 /** Trailing 1h USD volume for a token, used by riskManager's volume-drop hard-exit check. */
@@ -492,6 +497,9 @@ export async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
         const mint = nonSolToken(pair)!.address;
         const dexPair = byMintMeteora.get(mint) ?? highestLiquidityPair(allByMint.get(mint));
         if (dexPair) applyDexScreenerFields(pair, dexPair);
+        // boosts attach to whichever pair the promoter boosted, so look at every pair of the token, not just the one used for the other fields
+        const boost = activeBoosts(allByMint.get(mint));
+        if (boost !== undefined) pair.dexBoostsActive = boost;
       }
     } catch (err) {
       logger.debug('[scanner] dexscreener batch hydration failed', {

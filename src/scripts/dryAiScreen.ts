@@ -35,6 +35,7 @@ for (const c of found) {
     freezeAuthorityDisabled: tok?.freezeAuthorityDisabled ?? null, mintAuthorityRevoked: tok?.mintAuthorityRevoked ?? null,
     buyRatio1hByTxCount: c.buyRatio1h ?? null, dollarFlowBuyRatio: null, dollarFlowTxSampled: null,
     poolAgeHours: Math.round((Date.now() - c.createdAtMs) / 3_600_000),
+    dexBoostsActive: c.dexBoostsActive ?? null,
     priorOutcomes: priorFor(loadOutcomes(), c.address, mint).map(outcomeLine),
   });
 }

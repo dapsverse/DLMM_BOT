@@ -179,6 +179,7 @@ async function toAiCandidate(e: EligibleCandidate): Promise<AiCandidate> {
     dollarFlowBuyRatio: e.dollarFlow ? +e.dollarFlow.buyRatioUsd.toFixed(3) : null,
     dollarFlowTxSampled: e.dollarFlow?.txSampled ?? null,
     poolAgeHours: Math.round((Date.now() - c.createdAtMs) / 3_600_000),
+    dexBoostsActive: c.dexBoostsActive ?? null,
     priorOutcomes: priorFor(loadOutcomes(), c.address, e.xIsSol ? c.mint_y : c.mint_x).map(outcomeLine),
   };
 }
