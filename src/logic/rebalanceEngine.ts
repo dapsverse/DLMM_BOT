@@ -1083,6 +1083,15 @@ export function getLastClose(): { pool: string; receivedSol: number | null } | n
 }
 
 /**
+ * Why the bot is about to close (set by index.ts noteExit right before an exit, same string as the outcome record). Only shown in the closing/complete
+ * logs and so in Telegram: the exit kinds share the "TAKE_PROFIT" execution path, so the prefix alone says nothing about the trigger. Cleared when the exit completes.
+ */
+let exitReason: string | null = null;
+export function setExitReason(reason: string | null): void {
+  exitReason = reason;
+}
+
+/**
  * Closes the current position (claim fees + reclaim rent) and converts
  * everything to SOL. Shared by executeHardExit (adds a blacklist after)
  * and executeCleanExit (no blacklist - used by SWITCH and TAKE_PROFIT,
@@ -1109,7 +1118,7 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
     const realFeeOther = new BN(ctx.xIsSol ? feeY : feeX);
     feeOtherRaw = sellAll ? new BN(0) : realFeeOther;
     expectedOtherAmount = new BN(ctx.xIsSol ? totalYAmount : totalXAmount).add(realFeeOther);
-    logger.warn(`[rebalanceEngine] ${logPrefix}: closing position`, { pool: ctx.poolAddress });
+    logger.warn(`[rebalanceEngine] ${logPrefix}: closing position`, { pool: ctx.poolAddress, ...(exitReason ? { reason: exitReason } : {}) });
     solBeforeClose = await getWalletSolBalance();
     await closePositionFull(ctx.pool, position);
   }
@@ -1172,7 +1181,8 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
   lastClose = { pool: ctx.poolAddress, receivedSol };
   // same inputs as the [index] outcome line (flushOutcome in index.ts), so Telegram and state/ai-outcomes.jsonl show identical numbers
   const real = realizedPnl(ctx.openSpentSol, receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol);
-  logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital, depositSol: ctx.initialDepositSol, realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null, realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null });
+  logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital, depositSol: ctx.initialDepositSol, realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null, realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null, ...(exitReason ? { reason: exitReason } : {}) });
+  exitReason = null;
   return nextCapital;
 }
 

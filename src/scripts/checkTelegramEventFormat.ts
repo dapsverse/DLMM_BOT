@@ -31,6 +31,20 @@ assert.equal(
 assert.match(formatEvent('2026-10-26T00:16:09.652Z [warn] [rebalanceEngine] STOP_LOSS complete {"pool":"P1","solBalance":0.3,"nextCapital":0.27,"depositSol":0.4,"realizedPnlSol":-0.1,"realizedPnlPct":-25}')!, /PnL realized -0\.1000 SOL \(-25\.00% dari modal deploy 0\.400 SOL\)/);
 // legs not measured reliably (null): said so, no number invented
 assert.match(formatEvent('2026-10-26T00:16:09.652Z [warn] [rebalanceEngine] TAKE_PROFIT complete {"pool":"P1","solBalance":0.3,"nextCapital":0.27,"depositSol":0.4,"realizedPnlSol":null,"realizedPnlPct":null}')!, /PnL realized: tidak terukur/);
+// exit reason (5A15QU low-yield close of 2026-10-28: the AI manager said hold, the deterministic meridian rule closed): shown in both messages
+assert.equal(
+  formatEvent('2026-10-28T03:56:36.864Z [warn] [rebalanceEngine] TAKE_PROFIT: closing position {"pool":"5A15QUc6kMxw9dsVpVUv6ZdTTBeyWBN2scyy1MEQJFQs","reason":"MERIDIAN: low yield: fee/TVL 5.02% < 7%"}'),
+  '🔻 TAKE_PROFIT: menutup posisi 5A15QU…JFQs\nAlasan: MERIDIAN: low yield: fee/TVL 5.02% < 7%\nPnL realized menyusul\n10:56 WIB',
+);
+assert.equal(
+  formatEvent('2026-10-28T03:56:47.770Z [warn] [rebalanceEngine] TAKE_PROFIT complete {"pool":"5A15QUc6kMxw9dsVpVUv6ZdTTBeyWBN2scyy1MEQJFQs","solBalance":1.332625415,"nextCapital":1.29264665255,"depositSol":1.22967119758,"realizedPnlSol":-0.00724,"realizedPnlPct":-0.59,"reason":"MERIDIAN: low yield: fee/TVL 5.02% < 7%"}'),
+  '✅ TAKE_PROFIT selesai · pool 5A15QU…JFQs\nsaldo wallet 1.333 SOL · modal berikut 1.293 SOL\nPnL realized -0.0072 SOL (-0.59% dari modal deploy 1.230 SOL)\nAlasan: MERIDIAN: low yield: fee/TVL 5.02% < 7%\n10:56 WIB',
+);
+// other exit kinds get it too; blank or non-string reasons add nothing; very long ones are cut
+assert.match(formatEvent('2026-10-28T03:56:36.864Z [warn] [rebalanceEngine] HARD_EXIT: closing position {"pool":"P1","reason":"HARD_EXIT: stop loss 25%"}')!, /\nAlasan: HARD_EXIT: stop loss 25%\n/);
+assert.doesNotMatch(formatEvent('2026-10-28T03:56:36.864Z [warn] [rebalanceEngine] TAKE_PROFIT: closing position {"pool":"P1","reason":"  "}')!, /Alasan/);
+assert.doesNotMatch(formatEvent('2026-10-28T03:56:36.864Z [warn] [rebalanceEngine] TAKE_PROFIT: closing position {"pool":"P1","reason":42}')!, /Alasan/);
+assert.ok(formatEvent(`2026-10-28T03:56:36.864Z [warn] [rebalanceEngine] TAKE_PROFIT: closing position {"pool":"P1","reason":"${'x'.repeat(500)}"}`)!.length < 400);
 // deposit missing: still prints the PnL, without the deploy amount
 assert.match(formatEvent('2026-10-26T00:16:09.652Z [warn] [rebalanceEngine] TAKE_PROFIT complete {"pool":"P1","realizedPnlSol":0.01,"realizedPnlPct":2}')!, /PnL realized \+0\.0100 SOL \(\+2\.00% dari modal deploy\)/);
 

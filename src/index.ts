@@ -50,7 +50,7 @@ import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, o
 import { ladderBounds } from './logic/ladderRange.js';
 import { closeKindFromReason, recordClose, cooldownBlacklistAdds, type CloseRec } from './logic/meridianCooldown.js';
 import { recoverOnBoot } from './logic/bootRecovery.js';
-import { positionToPersisted } from './logic/rebalanceEngine.js';
+import { positionToPersisted, setExitReason } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, sanitizeCloseHistory, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
 import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, flipTakeProfitSignal, selectExitSignal, aiExitAllowed } from './logic/flip.js';
@@ -86,6 +86,7 @@ let pendingExit: { ctx: PoolContext; reason: string; snap: typeof lastSnap } | n
 /** Remember why the position is about to be closed; the outcome is written once the position is really gone (next tick). */
 function noteExit(ctx: PoolContext, reason: string): void {
   pendingExit = { ctx, reason, snap: { ...lastSnap } };
+  setExitReason(reason); // shown in the Telegram closing/complete messages
 }
 function flushOutcome(now: number): void {
   if (!pendingExit) return;
