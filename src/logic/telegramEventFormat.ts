@@ -100,12 +100,14 @@ export function formatEvent(line: string): string | null | undefined {
   if (mod === 'rebalanceEngine' && cl && d) {
     const pool = typeof d.pool === 'string' ? shortPool(d.pool) : '';
     // realized PnL only exists once the close and the token swap are done, so the closing message just announces it
-    if (cl[2] === ': closing position') return [`🔻 ${cl[1]}: menutup posisi${pool ? ` ${pool}` : ''}`, 'PnL realized menyusul', time].filter(Boolean).join('\n');
+    // why the bot closed (the exit kinds share the TAKE_PROFIT execution path, so the prefix alone does not say); old log lines have no reason
+    const why = typeof d.reason === 'string' && d.reason.trim() ? `Alasan: ${d.reason.trim().slice(0, 200)}` : '';
+    if (cl[2] === ': closing position') return [`🔻 ${cl[1]}: menutup posisi${pool ? ` ${pool}` : ''}`, why, 'PnL realized menyusul', time].filter(Boolean).join('\n');
     const bal = num(d.solBalance);
     const next = num(d.nextCapital);
     // old log lines (no realizedPnlSol key at all) keep the old format
     const pnl = 'realizedPnlSol' in d ? realizedLine(num(d.realizedPnlSol), num(d.realizedPnlPct), num(d.depositSol)) : '';
-    return [`✅ ${cl[1]} selesai${pool ? ` · pool ${pool}` : ''}`, [bal !== null ? `saldo wallet ${sol(bal)}` : '', next !== null ? `modal berikut ${sol(next)}` : ''].filter(Boolean).join(' · '), pnl, time].filter(Boolean).join('\n');
+    return [`✅ ${cl[1]} selesai${pool ? ` · pool ${pool}` : ''}`, [bal !== null ? `saldo wallet ${sol(bal)}` : '', next !== null ? `modal berikut ${sol(next)}` : ''].filter(Boolean).join(' · '), pnl, why, time].filter(Boolean).join('\n');
   }
   return generic(level, mod, msg, d, time);
 }
