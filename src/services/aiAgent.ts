@@ -9,6 +9,7 @@ import { memoryBlock } from '../logic/aiMemory.js';
 import { flipPromptInfo } from '../logic/flip.js';
 import { loadOutcomes } from './aiOutcomes.js';
 import { reactManage, reactScreen } from './aiReact.js';
+import { pickManagerModel } from '../logic/aiTriggers.js';
 import { logger } from '../utils/logger.js';
 
 const DECISION_LOG = 'logs/ai-decisions.jsonl';
@@ -65,7 +66,7 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
     try {
       const r = await reactScreen(candidates, capitalSol, recentLines('screen', 5));
       decision = r.decision;
-      extra = { react: true, turns: r.turns, costUsd: r.costUsd, tools: r.toolCalls };
+      extra = { react: true, turns: r.turns, costUsd: r.costUsd, tools: r.toolCalls, ...(env.AI_SCREEN_MODEL ? { model: env.AI_SCREEN_MODEL } : {}) };
     } catch (err) {
       decision = { action: 'skip', reason: `react agent failed: ${err instanceof Error ? err.message : String(err)}` };
     }
@@ -87,14 +88,16 @@ export async function aiScreen(candidates: AiCandidate[], capitalSol: number, no
 }
 
 /** Manager: hold or close. Any failure = hold (the automatic exits keep protecting the position). */
-export async function aiManage(snapshot: AiPositionSnapshot, rules: AiRules): Promise<ManagerDecision> {
+export async function aiManage(snapshot: AiPositionSnapshot, rules: AiRules, trigger?: string): Promise<ManagerDecision> {
   let decision: ManagerDecision;
   if (env.AI_REACT_MANAGER) {
     let extra: Record<string, unknown> = {};
     try {
-      const r = await reactManage(snapshot, rules, recentLines('manage', 5));
+      // event-triggered calls (a possible close) use AI_MANAGE_CLOSE_MODEL, the routine periodic check AI_MANAGE_MODEL
+      const model = pickManagerModel(trigger, { closeModel: env.AI_MANAGE_CLOSE_MODEL, periodicModel: env.AI_MANAGE_MODEL });
+      const r = await reactManage(snapshot, rules, recentLines('manage', 5), model);
       decision = r.decision;
-      extra = { react: true, turns: r.turns, costUsd: r.costUsd, tools: r.toolCalls };
+      extra = { react: true, turns: r.turns, costUsd: r.costUsd, tools: r.toolCalls, ...(model ? { model } : {}) };
     } catch (err) {
       decision = { action: 'hold', reason: `react manager failed: ${err instanceof Error ? err.message : String(err)}` };
     }

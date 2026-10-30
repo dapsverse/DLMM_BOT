@@ -511,6 +511,12 @@ export const env = {
   AI_SCREEN_TIMEOUT_S: num('AI_SCREEN_TIMEOUT_S', 300),
   AI_MANAGE_TIMEOUT_S: num('AI_MANAGE_TIMEOUT_S', 150),
   AI_CLAUDE_BIN: optionalStr('AI_CLAUDE_BIN', 'claude'),
+  // Model per ReAct decision type (Agent SDK `model`; empty string = the SDK/CLI default, i.e. what ran before these keys existed).
+  // Opus for the calls that can open or close a position: the screener (open) and the event-triggered manager (a possible close).
+  // The slow periodic manager health check stays on the default model. The one-shot (non-ReAct) `claude -p` paths and the Telegram reports are not affected.
+  AI_SCREEN_MODEL: optionalStr('AI_SCREEN_MODEL', 'claude-opus-5-5'),
+  AI_MANAGE_CLOSE_MODEL: optionalStr('AI_MANAGE_CLOSE_MODEL', 'claude-opus-5-5'),
+  AI_MANAGE_MODEL: optionalStr('AI_MANAGE_MODEL', ''),
   /** ReAct screener (Claude Agent SDK + tools) instead of the one-shot JSON screener. Off by default. */
   AI_REACT: bool('AI_REACT', false),
   /** ReAct manager (Agent SDK + tools) instead of the one-shot JSON manager. Off by default. */

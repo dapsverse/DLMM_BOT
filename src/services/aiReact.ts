@@ -143,9 +143,16 @@ export async function fetchTokenNarrative(mint: string, ticker = ''): Promise<un
   }
 }
 
+/** Pure: the SDK `model` option, or nothing for an empty model so the SDK default stays in force. */
+export function modelOption(model: string | undefined): { model?: string } {
+  const m = model?.trim();
+  return m ? { model: m } : {};
+}
+
 /** Common Agent SDK options: only our MCP server + WebSearch, no settings, no secrets in the subprocess env. */
-function sdkOptions(server: ReturnType<typeof createSdkMcpServer>, toolNames: string[], system: string) {
+function sdkOptions(server: ReturnType<typeof createSdkMcpServer>, toolNames: string[], system: string, model?: string) {
   return {
+    ...modelOption(model),
     mcpServers: { dlmm: server },
     tools: ['WebSearch'],
     allowedTools: [...toolNames.map((n) => `mcp__dlmm__${n}`), 'WebSearch'],
@@ -244,7 +251,7 @@ export async function reactScreen(candidates: AiCandidate[], capitalSol: number,
 
   const q = query({
     prompt: buildReactScreenerPrompt(capitalSol, memoryBlock(loadOutcomes()), recentDecisions, flipPromptInfo(env)),
-    options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'get_token_narrative', 'get_token_intel', 'get_price_action', 'check_smart_wallets_on_pool', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
+    options: sdkOptions(server, ['get_candidates', 'get_pool_detail', 'get_token_info', 'get_token_narrative', 'get_token_intel', 'get_price_action', 'check_smart_wallets_on_pool', 'submit_decision'], 'You are an autonomous DLMM LP screener agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.', env.AI_SCREEN_MODEL),
   });
   let costUsd: number | null = null;
   let turns = 0;
@@ -277,7 +284,7 @@ export interface ReactManageResult {
 }
 
 /** ReAct manager: reads the live position and may pull pool/token context, then submits hold|close. No submit / error / timeout = hold. */
-export async function reactManage(snapshot: AiPositionSnapshot, rules: AiRules, recentDecisions: string[]): Promise<ReactManageResult> {
+export async function reactManage(snapshot: AiPositionSnapshot, rules: AiRules, recentDecisions: string[], model?: string): Promise<ReactManageResult> {
   const toolCalls: string[] = [];
   let submitted: ManagerDecision | null = null;
   const note = (n: string, a: unknown) => toolCalls.push(`${n} ${JSON.stringify(a)}`.slice(0, 160));
@@ -304,7 +311,7 @@ export async function reactManage(snapshot: AiPositionSnapshot, rules: AiRules, 
 
   const q = query({
     prompt: buildReactManagerPrompt(rules, memoryBlock(loadOutcomes(), 5), recentDecisions, flipPromptInfo(env)),
-    options: sdkOptions(server, ['get_position', 'get_pool_detail', 'get_token_info', 'submit_decision'], 'You are an autonomous DLMM LP position manager agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.'),
+    options: sdkOptions(server, ['get_position', 'get_pool_detail', 'get_token_info', 'submit_decision'], 'You are an autonomous DLMM LP position manager agent. Reply in English. Use only the provided tools. Finish by calling submit_decision.', model),
   });
   let costUsd: number | null = null;
   let turns = 0;
