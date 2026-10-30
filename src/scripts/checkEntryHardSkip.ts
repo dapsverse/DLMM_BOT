@@ -1,5 +1,16 @@
 import assert from 'node:assert/strict';
 import { fallingKnifeReject, distributionReject } from '../logic/entryHardSkip.js';
+import { buildReactScreenerPrompt } from '../logic/aiPrompts.js';
+import { env } from '../config/env.js';
+
+// early buyers sold is a weak supporting signal, not a hard block: off by default (unless the environment turns it on), gone from the prompt's HARD RULE, weighed softly in RISK SIGNALS
+if (process.env.ENTRY_HARD_SKIP_DISTRIBUTION === undefined) assert.equal(env.ENTRY_HARD_SKIP_DISTRIBUTION, false);
+const screenerPrompt = buildReactScreenerPrompt(0.9, '', []);
+const hardRule = screenerPrompt.slice(screenerPrompt.indexOf('HARD RULE'), screenerPrompt.indexOf('RISK SIGNALS'));
+assert.ok(hardRule.length > 0 && !/early buyer/i.test(hardRule));
+assert.doesNotMatch(screenerPrompt, /early buyer already sold → SKIP/);
+assert.match(screenerPrompt, /WEAK supporting signal, never the main reason to skip/);
+assert.match(screenerPrompt, /early-buyer wallet addresses/);
 
 const L = { minDrop24hPct: 50, maxSpikeRatio: 0.2 };
 

@@ -4,6 +4,27 @@ import { logger } from '../utils/logger.js';
 const r = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {});
 const pick = (o: Record<string, unknown>, keys: string[]): Record<string, unknown> => Object.fromEntries(keys.filter((k) => o[k] !== undefined && o[k] !== null).map((k) => [k, o[k]]));
 
+const WALLET_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/**
+ * Pure: early-buyer wallet addresses if the snapshot carries them (an array of strings, or of objects with wallet/address/pubkey and optionally a sold/still_holding flag),
+ * tagged `:sold` or `:holding` when the status is known. Capped at 10; only valid base58 addresses pass (the text reaches the AI prompt). Counts-only snapshots give [].
+ */
+export function earlyBuyerWallets(ebe: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const v of Object.values(ebe)) {
+    if (!Array.isArray(v)) continue;
+    for (const it of v) {
+      const o = r(it);
+      const addr = typeof it === 'string' ? it : [o.wallet, o.address, o.pubkey].find((x) => typeof x === 'string');
+      if (typeof addr !== 'string' || !WALLET_RE.test(addr)) continue;
+      const status = o.sold === true || o.still_holding === false ? ':sold' : o.sold === false || o.still_holding === true ? ':holding' : '';
+      if (!out.some((x) => x.startsWith(addr))) out.push(addr + status);
+    }
+  }
+  return out.slice(0, 10);
+}
+
 /** Pure: compact the MadeOnSol /token/{mint} snapshot (deployer record, early-buyer exit, KOL flow, twitter reuse, blacklist). null when the response has no token. */
 export function summarizeToken(raw: unknown): Record<string, unknown> | null {
   const t = r(r(raw).token);
@@ -13,7 +34,7 @@ export function summarizeToken(raw: unknown): Record<string, unknown> | null {
   const tw = r(t.twitter_reuse);
   return {
     deployer: pick(r(t.deployer), ['wallet', 'tier', 'total_deployed', 'total_bonded', 'bonding_rate', 'recent_bond_rate', 'history_status', 'resolved_outcome_count']),
-    earlyBuyers: pick(ebe, ['cohort', 'still_holding', 'sold', 'still_holding_pct']),
+    earlyBuyers: { ...pick(ebe, ['cohort', 'still_holding', 'sold', 'still_holding_pct']), ...(earlyBuyerWallets(ebe).length ? { wallets: earlyBuyerWallets(ebe) } : {}) },
     launchCohortSol: t.launch_cohort_sol ?? null,
     kols: pick(kol, ['unique_kols', 'buying_kols', 'selling_kols', 'buy_sol', 'sell_sol', 'net_flow_sol', 'signal', 'window_hours']),
     topKolBuyers: (Array.isArray(kol.top_buyers) ? kol.top_buyers : []).slice(0, 3).map((b) => `${r(b).name}:${Math.round(Number(r(b).sol_amount) || 0)}SOL`),
