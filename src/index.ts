@@ -820,6 +820,7 @@ async function tick(): Promise<void> {
           entryReason: ctx.aiEntryReason ?? null,
         },
         { stopLossPct: env.STOP_LOSS_PCT, ladderOorExitMin: env.LADDER_OOR_EXIT_MIN, idleOutOfRangeMin: env.MAX_IDLE_OUT_OF_RANGE_MINUTES, volumeDropExitPct: env.VOLUME_DROP_HARD_EXIT_PCT },
+        trigger, // picks the model: event triggers (a possible close) vs the routine periodic check
       )
         .then((d) => {
           if (d.action === 'close') aiManagerClose = { pool: ctx.poolAddress, reason: d.reason };
