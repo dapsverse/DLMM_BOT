@@ -483,8 +483,9 @@ export const env = {
   // Moustache-SOL entry (-67% 24h, spike 0.07x) was a loss, and 0.2 is the existing low end (MIN_RECENT_ACTIVITY_RATIO 0.15 is the 1h floor).
   ENTRY_HARD_SKIP_DROP24H_PCT: num('ENTRY_HARD_SKIP_DROP24H_PCT', 50),
   ENTRY_HARD_SKIP_MAX_SPIKE: num('ENTRY_HARD_SKIP_MAX_SPIKE', 0.2),
-  // Distribution: deploy refused when KOLs net sell AND every early buyer already sold (MadeOnSol intel; missing data never blocks).
-  ENTRY_HARD_SKIP_DISTRIBUTION: bool('ENTRY_HARD_SKIP_DISTRIBUTION', true),
+  // Distribution hard skip (opt-in, OFF by default since 2026-10-30): deploy refused when KOLs net sell AND every early buyer already sold (MadeOnSol intel;
+  // missing data never blocks). Off because "early buyers sold" is ambiguous (the bundlers may simply have exited), so the AI weighs it as a weak signal in the prompt instead.
+  ENTRY_HARD_SKIP_DISTRIBUTION: bool('ENTRY_HARD_SKIP_DISTRIBUTION', false),
   // 'meridian' entry mode (SOL-only bid-ask ladder below price, from yunus-0x/meridian) — size window + ladder shape.
   MERIDIAN_MIN_MCAP_USD: num('MERIDIAN_MIN_MCAP_USD', 150_000),
   MERIDIAN_MAX_MCAP_USD: num('MERIDIAN_MAX_MCAP_USD', 10_000_000),
