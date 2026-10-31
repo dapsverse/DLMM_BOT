@@ -486,6 +486,12 @@ export const env = {
   // Distribution hard skip (opt-in, OFF by default since 2026-10-30): deploy refused when KOLs net sell AND every early buyer already sold (MadeOnSol intel;
   // missing data never blocks). Off because "early buyers sold" is ambiguous (the bundlers may simply have exited), so the AI weighs it as a weak signal in the prompt instead.
   ENTRY_HARD_SKIP_DISTRIBUTION: bool('ENTRY_HARD_SKIP_DISTRIBUTION', false),
+  // Entry hard skip: volumeSpikeRatio (1h volume pace vs the preceding hours) under this = the pool is going quiet, skip it (0 = off; unhydrated volume data never blocks).
+  // 0.15: PURR 2026-10-30 entered at 0.025 and the SOL-only ladder never filled (price drifted up, fees ~0); 0.15 sits just above the existing 0.15 1h activity floor logic.
+  ENTRY_MIN_VOLUME_SPIKE_RATIO: num('ENTRY_MIN_VOLUME_SPIKE_RATIO', 0.15),
+  // Per-pool re-entry cooldown (minutes) after an exit while the price was ABOVE the ladder (out of range above / pumped far above range): the pool is blacklisted
+  // that long (persisted with the blacklist in state/live-state.json, never shortens a longer blacklist). 0 = off. NIO-SOL 2026-10-30 was re-entered 3 times in 2 h.
+  REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN: num('REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN', 60),
   // 'meridian' entry mode (SOL-only bid-ask ladder below price, from yunus-0x/meridian) — size window + ladder shape.
   MERIDIAN_MIN_MCAP_USD: num('MERIDIAN_MIN_MCAP_USD', 150_000),
   MERIDIAN_MAX_MCAP_USD: num('MERIDIAN_MAX_MCAP_USD', 10_000_000),
