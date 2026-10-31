@@ -19,6 +19,10 @@ export interface EntryPriceContext {
   belowHigh48hPct: number;
   chg15mPct: number;
   chg1hPct: number;
+  /** log-only pullback metrics: % the last close sits below the 1h / 4h high (<= 0), and the last 5m candle's change */
+  belowHigh1hPct: number;
+  belowHigh4hPct: number;
+  chg5mPct: number;
   /** min low of last 3 5m candles >= min low of the 9 before them. */
   higherLow: boolean;
 }
@@ -36,6 +40,7 @@ export function computeEntryPriceContext(c5: Candle[], c1h: Candle[]): EntryPric
   const lows = c5.map((c) => c.low);
   const recent = Math.min(...lows.slice(-3));
   const prior = Math.min(...lows.slice(-12, -3));
+  const highOf = (n: number) => Math.max(...c5.slice(-n).map((c) => c.high));
   return {
     aboveLow6hPct: pct(last, low6),
     belowHigh6hPct: pct(last, high6),
@@ -43,6 +48,9 @@ export function computeEntryPriceContext(c5: Candle[], c1h: Candle[]): EntryPric
     belowHigh48hPct: pct(last, high48),
     chg15mPct: pct(last, c5[c5.length - 4]!.close),
     chg1hPct: pct(last, c5[c5.length - 13]!.close),
+    belowHigh1hPct: pct(last, highOf(12)),
+    belowHigh4hPct: pct(last, highOf(48)),
+    chg5mPct: pct(last, c5[c5.length - 2]!.close),
     higherLow: recent >= prior,
   };
 }

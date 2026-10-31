@@ -194,6 +194,8 @@ export function updateOutOfRangeTracking(ctx: PoolContext, isOutOfRange: boolean
 }
 
 export interface PositionHealthSnapshot {
+  /** false = getUserPositions returned nothing: the zero values below are NOT a measured value (see logic/missingPosition.ts) */
+  found: boolean;
   currentValueSol: number;
   unclaimedFeesSol: number;
   /** principal of the non-SOL side priced in SOL (0 once the token is fully sold into SOL) */
@@ -203,7 +205,7 @@ export interface PositionHealthSnapshot {
 /** Reads the live open position and prices principal + unclaimed fees in SOL. */
 export async function getPositionHealthSnapshot(ctx: PoolContext): Promise<PositionHealthSnapshot> {
   const [position] = await getUserPositions(ctx.pool);
-  if (!position) return { currentValueSol: 0, unclaimedFeesSol: 0, otherPrincipalSol: 0 };
+  if (!position) return { found: false, currentValueSol: 0, unclaimedFeesSol: 0, otherPrincipalSol: 0 };
 
   const { totalXAmount, totalYAmount, feeX, feeY } = position.positionData;
   const principalSolSide = new BN(ctx.xIsSol ? totalXAmount : totalYAmount);
@@ -219,7 +221,7 @@ export async function getPositionHealthSnapshot(ctx: PoolContext): Promise<Posit
   const currentValueSol = Number(principalSolSide.toString()) / LAMPORTS_PER_SOL + principalOtherSol;
   const unclaimedFeesSol = Number(feeSolSide.toString()) / LAMPORTS_PER_SOL + feeOtherSol;
 
-  return { currentValueSol, unclaimedFeesSol, otherPrincipalSol: principalOtherSol };
+  return { found: true, currentValueSol, unclaimedFeesSol, otherPrincipalSol: principalOtherSol };
 }
 
 

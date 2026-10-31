@@ -492,6 +492,9 @@ export const env = {
   // Per-pool re-entry cooldown (minutes) after an exit while the price was ABOVE the ladder (out of range above / pumped far above range): the pool is blacklisted
   // that long (persisted with the blacklist in state/live-state.json, never shortens a longer blacklist). 0 = off. NIO-SOL 2026-10-30 was re-entered 3 times in 2 h.
   REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN: num('REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN', 60),
+  // Consecutive ticks (15 s each) the open position must read as MISSING (getUserPositions empty) before the bot believes it is gone and reconciles with the chain.
+  // Until then the health check / stop loss is skipped: an empty RPC read used to be priced as value 0 = "-100% loss" (live 2026-10-27, 10-28). 0 = off (old behaviour).
+  POSITION_MISSING_CONFIRM_TICKS: num('POSITION_MISSING_CONFIRM_TICKS', 8),
   // 'meridian' entry mode (SOL-only bid-ask ladder below price, from yunus-0x/meridian) — size window + ladder shape.
   MERIDIAN_MIN_MCAP_USD: num('MERIDIAN_MIN_MCAP_USD', 150_000),
   MERIDIAN_MAX_MCAP_USD: num('MERIDIAN_MAX_MCAP_USD', 10_000_000),

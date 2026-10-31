@@ -29,6 +29,7 @@ import {
   POSITION_RENT_BUFFER_SOL,
   type PoolContext,
 } from './logic/rebalanceEngine.js';
+import { trackMissingPosition } from './logic/missingPosition.js';
 import { evaluatePosition, evaluateSwitchOpportunity, addToBlacklist, trailingTakeProfitFloorPct } from './logic/riskManager.js';
 import { WSOL_MINT, emergencySwapAllToSol } from './services/jupiterSwap.js';
 import { getDollarVolumeBuyRatio, type DollarFlowResult } from './services/flowAnalysis.js';
@@ -230,6 +231,8 @@ async function guarded<T>(fn: () => Promise<T>): Promise<T> {
     inFlight = false;
   }
 }
+
+let missingPositionTicks = 0; // consecutive ticks the tracked position read as missing (logic/missingPosition.ts)
 
 /**
  * Found live 2026-10-07/08 (twice, via two different call sites): every
@@ -507,17 +510,30 @@ async function tryEnterPool(): Promise<void> {
 async function tick(): Promise<void> {
   flushOutcome(Date.now());
   if (!currentPool) {
+    missingPositionTicks = 0;
     await tryEnterPool();
     return;
   }
 
   const ctx = currentPool;
   const now = Date.now();
-  const [{ currentValueSol, unclaimedFeesSol, otherPrincipalSol }, volume1hNowUsd, binStatus] = await Promise.all([
+  const [{ found, currentValueSol, unclaimedFeesSol, otherPrincipalSol }, volume1hNowUsd, binStatus] = await Promise.all([
     getPositionHealthSnapshot(ctx),
     getVolume1hUsd(ctx.xIsSol ? ctx.mintY : ctx.mintX),
     getBinRangeStatus(ctx),
   ]);
+  // An empty position read is not a value of 0 (live 2026-10-27/28: fake "-100% loss" stop loss on healthy ladders): wait, then reconcile with the chain.
+  const missing = trackMissingPosition(found, missingPositionTicks, env.POSITION_MISSING_CONFIRM_TICKS);
+  missingPositionTicks = missing.misses;
+  if (missing.action === 'wait') {
+    logger.warn('[index] position not found on-chain this tick: skipping the health check (no stop loss on an unmeasured value)', { pool: ctx.poolAddress, misses: missing.misses, confirmTicks: env.POSITION_MISSING_CONFIRM_TICKS });
+    return;
+  }
+  if (missing.action === 'reconcile') {
+    logger.error('[index] position missing for the whole confirmation window: reconciling with the chain (no stop loss, no blacklist)', { pool: ctx.poolAddress, confirmTicks: env.POSITION_MISSING_CONFIRM_TICKS });
+    currentPool = await reconcilePoolStateAfterFailure(ctx);
+    return;
+  }
   updateOutOfRangeTracking(ctx, binStatus.isOutOfRange);
   lastOorAbove = binStatus.isOutOfRange && !binStatus.tokenBelowRange;
   // token_spot: out of range BELOW = still all token (not reached); inside, or above (sold out into SOL), counts as reached
