@@ -40,3 +40,22 @@ export function distributionReject(intel: Record<string, unknown> | null | undef
   if (!allSold) return null;
   return `distribution: KOLs net selling (${net.toFixed(1)} SOL, ${selling} sellers vs ${buying} buyers) and all ${cohort} early buyers already sold`;
 }
+
+/**
+ * Rule 3 (hard skip): the 1h volume pace vs the preceding hours (volumeSpikeRatio) is under `minRatio`: the pool is going quiet, so a SOL-only ladder just sits
+ * below a price that drifts away (PURR 2026-10-30: spike 0.025, ladder out of range within minutes, fees ~0). Unknown (null) never blocks; minRatio <= 0 = off.
+ */
+export function lowVolumeSpikeReject(spikeRatio: number | null | undefined, minRatio: number): string | null {
+  if (minRatio <= 0 || typeof spikeRatio !== 'number' || !Number.isFinite(spikeRatio)) return null;
+  return spikeRatio < minRatio ? `low volume spike: ${spikeRatio.toFixed(2)}x < ${minRatio}x (volume pace fading)` : null;
+}
+
+/**
+ * Re-entry cooldown after an exit while the price was ABOVE the ladder (out of range above / pumped far above range): milliseconds to keep the pool blacklisted
+ * from `nowMs`, never shortening an existing longer blacklist. 0 = nothing to add (disabled or an existing blacklist already outlasts it).
+ */
+export function reentryCooldownMs(existingUntilMs: number | undefined, nowMs: number, minutes: number): number {
+  if (!(minutes > 0)) return 0;
+  const ms = minutes * 60_000;
+  return typeof existingUntilMs === 'number' && existingUntilMs - nowMs >= ms ? 0 : ms;
+}

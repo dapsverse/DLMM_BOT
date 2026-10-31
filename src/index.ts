@@ -42,7 +42,7 @@ import type { TokenAudit } from './logic/tokenAudit.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
 import { getTokenAudit } from './services/tokenAudit.js';
 import { auditRejectReason } from './logic/tokenAudit.js';
-import { fallingKnifeReject } from './logic/entryHardSkip.js';
+import { fallingKnifeReject, lowVolumeSpikeReject, reentryCooldownMs } from './logic/entryHardSkip.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
@@ -82,15 +82,18 @@ let lastDollarFlowCheckAtMs = 0;
 let lastDollarFlowBuyRatio: number | null = null;
 // AI manager: one in-flight `claude -p` call at a time, never awaited by the tick (deterministic exits keep running).
 let lastSnap = { valueSol: 0, profitPct: 0, peakPct: 0, feesSol: 0 };
-let pendingExit: { ctx: PoolContext; reason: string; snap: typeof lastSnap } | null = null;
+let pendingExit: { ctx: PoolContext; reason: string; snap: typeof lastSnap; oorAbove: boolean } | null = null;
 /** Remember why the position is about to be closed; the outcome is written once the position is really gone (next tick). */
+/** True while the open SOL ladder is out of range with the price ABOVE it (set every tick in the position check; used by noteExit). */
+let lastOorAbove = false;
 function noteExit(ctx: PoolContext, reason: string): void {
-  pendingExit = { ctx, reason, snap: { ...lastSnap } };
+  // an exit while the price sits above a (non-flip) ladder: the pool got a re-entry cooldown in flushOutcome (REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN)
+  pendingExit = { ctx, reason, snap: { ...lastSnap }, oorAbove: lastOorAbove && !ctx.flipPhase && !ctx.tokenSpot && ctx.ladderBins !== undefined };
   setExitReason(reason); // shown in the Telegram closing/complete messages
 }
 function flushOutcome(now: number): void {
   if (!pendingExit) return;
-  const { ctx, reason, snap } = pendingExit;
+  const { ctx, reason, snap, oorAbove } = pendingExit;
   pendingExit = null;
   if (currentPool) return; // exit failed or reopened: the position lives on
   if (env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined) {
@@ -99,6 +102,15 @@ function flushOutcome(now: number): void {
     // meridian cools the pool and its base mint (3 OOR / 3 fee-earning / low yield); a stop loss cools this pool only (SL_POOL_COOLDOWN_HOURS)
     for (const [addr, until] of cooldownBlacklistAdds(u, ctx.poolAddress, ctx.xIsSol ? ctx.mintY : ctx.mintX, now)) addToBlacklist(blacklistPools, addr, now, until - now);
     persist(); // written at once (history + blacklist): a restart right after the close must not lose them
+  }
+  if (oorAbove) {
+    // after the meridian cooldown above so it never shortens it (reentryCooldownMs keeps a longer blacklist); persisted with the blacklist in the state
+    const ms = reentryCooldownMs(blacklistPools.get(ctx.poolAddress), now, env.REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN);
+    if (ms > 0) {
+      addToBlacklist(blacklistPools, ctx.poolAddress, now, ms);
+      logger.info('[index] re-entry cooldown after an exit above the ladder', { pool: ctx.poolAddress, minutes: env.REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN, exit: reason.slice(0, 80) });
+      persist();
+    }
   }
   const lc = getLastClose();
   const real = lc && lc.pool === ctx.poolAddress ? realizedPnl(ctx.openSpentSol, lc.receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol) : null;
@@ -379,6 +391,12 @@ async function tryEnterPool(): Promise<void> {
       logger.info(`[index] skipping pool ${candidate.address} — ${knifeReject}`);
       continue;
     }
+    // volumeSpikeRatio() reads 0 when the 6h volume never hydrated, so only a hydrated candidate is checked (unknown must not block)
+    const spikeReject = candidate.volumeH6Usd !== undefined ? lowVolumeSpikeReject(volumeSpikeRatio(candidate), env.ENTRY_MIN_VOLUME_SPIKE_RATIO) : null;
+    if (spikeReject) {
+      logger.info(`[index] skipping pool ${candidate.address} — ${spikeReject}`);
+      continue;
+    }
     logger.info('[index] token audit ok', { pool: candidate.address, audit });
     const dollarFlow = env.DOLLAR_FLOW_ENABLED ? await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd) : null;
     if (env.DOLLAR_FLOW_ENABLED) {
@@ -501,6 +519,7 @@ async function tick(): Promise<void> {
     getBinRangeStatus(ctx),
   ]);
   updateOutOfRangeTracking(ctx, binStatus.isOutOfRange);
+  lastOorAbove = binStatus.isOutOfRange && !binStatus.tokenBelowRange;
   // token_spot: out of range BELOW = still all token (not reached); inside, or above (sold out into SOL), counts as reached
   if (ctx.tokenSpot && !ctx.tokenSpotReached && (!binStatus.isOutOfRange || !binStatus.tokenBelowRange)) ctx.tokenSpotReached = true;
 
