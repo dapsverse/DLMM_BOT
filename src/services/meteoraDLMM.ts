@@ -1,8 +1,9 @@
 import { createRequire } from 'node:module';
-import { Keypair, PublicKey, Transaction, ComputeBudgetProgram } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, Transaction, ComputeBudgetProgram } from '@solana/web3.js';
 import BN from 'bn.js';
 import { connection, wallet, getDynamicPriorityFeeMicroLamports } from './solana.js';
 import { COMPUTE_UNIT_LIMIT } from '../config/constants.js';
+import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
 import { orderSpec, spreadBins, filledFraction, type OrderGoal } from '../logic/limitOrderMath.js';
@@ -250,8 +251,10 @@ export async function getAllPositionPoolAddresses(): Promise<string[]> {
 }
 
 /** Pool addresses where an arbitrary wallet (not ours) holds open positions. Read-only. */
+// Own Connection for other wallets' lookups: no web3.js 429 retry storm and no websocket, so a burst here cannot starve the trading connection's retries.
+const lookupConnection = new Connection(env.RPC_URL, { commitment: 'confirmed', disableRetryOnRateLimit: true });
 export async function getWalletPoolAddresses(walletAddress: string): Promise<string[]> {
-  const map = await withRetry(() => DLMM.getAllLbPairPositionsByUser(connection, new PublicKey(walletAddress)), { maxRetries: 2, baseDelayMs: 2_000, label: 'getWalletPoolAddresses' });
+  const map = await DLMM.getAllLbPairPositionsByUser(lookupConnection, new PublicKey(walletAddress));
   return [...map.keys()];
 }
 
