@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { getWalletPoolAddresses } from './meteoraDLMM.js';
 import { logger } from '../utils/logger.js';
-import { createWalletPoolLookup, fetchPoolsViaApi, smartWalletSignal } from '../logic/smartWalletLookup.js';
+import { buildSmartWalletSnapshot, createWalletPoolLookup, fetchPoolsViaApi, shouldLogSmartWallets, smartWalletLogFile, smartWalletSignal } from '../logic/smartWalletLookup.js';
+import { env } from '../config/env.js';
 
 /** Same format as meridian's smart-wallets.json: { "wallets": [{ "name", "address", "category", "type": "lp" }] } (repo root, gitignored). */
 const WALLETS_PATH = process.env.SMART_WALLETS_FILE ?? 'smart-wallets.json';
@@ -52,4 +53,25 @@ export async function checkSmartWalletsOnPool(poolAddress: string) {
     unknown_lookups: failed,
     signal: smartWalletSignal(wallets.length, inPool.length, failed, inPool.map((w) => w.name)),
   };
+}
+
+let lastSnapshotMs: number | null = null;
+let snapshotRunning = false;
+
+/** Appends one snapshot (pool -> tracked wallets holding it) to logs/smart-wallets-<UTC date>.jsonl every SMART_WALLET_LOG_INTERVAL_MIN. Never throws. */
+export async function maybeLogSmartWalletSnapshot(nowMs = Date.now()): Promise<void> {
+  if (snapshotRunning || !shouldLogSmartWallets(nowMs, lastSnapshotMs, env.SMART_WALLET_LOG_INTERVAL_MIN)) return;
+  snapshotRunning = true;
+  try {
+    const wallets = loadWallets();
+    if (wallets.length === 0) return;
+    const res = await lookup.lookupMany(wallets.map((w) => w.address));
+    const snap = buildSmartWalletSnapshot(res.map((r, i) => ({ name: wallets[i]!.name.split(' ')[0]!, pools: r.pools })), nowMs);
+    appendFileSync(smartWalletLogFile(nowMs), JSON.stringify(snap) + '\n');
+    lastSnapshotMs = nowMs;
+  } catch (err) {
+    logger.warn('[smartWallets] snapshot log failed', { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    snapshotRunning = false;
+  }
 }

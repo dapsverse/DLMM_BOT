@@ -45,7 +45,9 @@ import { getTokenAudit } from './services/tokenAudit.js';
 import { auditRejectReason } from './logic/tokenAudit.js';
 import { fallingKnifeReject, lowVolumeSpikeReject, reentryCooldownMs } from './logic/entryHardSkip.js';
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
-import { getEntryPriceContext, getDrawdownFromHighPct } from './services/candleContext.js';
+import { getEntryPriceContext, getDrawdownFromHighPct, getBelowHigh4hPct } from './services/candleContext.js';
+import { dipEntryReject } from './logic/dipEntry.js';
+import { maybeLogSmartWalletSnapshot } from './services/smartWallets.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
 import { ladderBounds } from './logic/ladderRange.js';
@@ -400,6 +402,14 @@ async function tryEnterPool(): Promise<void> {
       logger.info(`[index] skipping pool ${candidate.address} — ${spikeReject}`);
       continue;
     }
+    // Dip-entry gate (2026-11-01): last, so the 5m-candle request only goes out for a pool that passed everything else (cached 60 s per pool)
+    if (env.DIP_ENTRY_GATE) {
+      const dipReject = dipEntryReject(await getBelowHigh4hPct(candidate.address), env.DIP_ENTRY_MIN_PCT, env.DIP_ENTRY_MAX_PCT);
+      if (dipReject) {
+        logger.info(`[index] skipping pool ${candidate.address} — ${dipReject}`);
+        continue;
+      }
+    }
     logger.info('[index] token audit ok', { pool: candidate.address, audit });
     const dollarFlow = env.DOLLAR_FLOW_ENABLED ? await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd) : null;
     if (env.DOLLAR_FLOW_ENABLED) {
@@ -509,6 +519,7 @@ async function tryEnterPool(): Promise<void> {
 
 async function tick(): Promise<void> {
   flushOutcome(Date.now());
+  void maybeLogSmartWalletSnapshot(); // fire and forget: a log for a later accumulation backtest, never blocks or throws into the tick
   if (!currentPool) {
     missingPositionTicks = 0;
     await tryEnterPool();

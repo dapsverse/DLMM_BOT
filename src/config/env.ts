@@ -495,6 +495,12 @@ export const env = {
   // Consecutive ticks (15 s each) the open position must read as MISSING (getUserPositions empty) before the bot believes it is gone and reconciles with the chain.
   // Until then the health check / stop loss is skipped: an empty RPC read used to be priced as value 0 = "-100% loss" (live 2026-10-27, 10-28). 0 = off (old behaviour).
   POSITION_MISSING_CONFIRM_TICKS: num('POSITION_MISSING_CONFIRM_TICKS', 8),
+  // Dip-entry gate (user decision 2026-11-01): a pool must sit DIP_ENTRY_MIN_PCT..DIP_ENTRY_MAX_PCT below its 4h high (5m candles) on top of the other entry gates. Unknown = skip.
+  DIP_ENTRY_GATE: bool('DIP_ENTRY_GATE', true),
+  DIP_ENTRY_MIN_PCT: num('DIP_ENTRY_MIN_PCT', 10),
+  DIP_ENTRY_MAX_PCT: num('DIP_ENTRY_MAX_PCT', 30),
+  // Minutes between snapshots of which pools the tracked smart wallets hold, appended to logs/smart-wallets-<UTC date>.jsonl (datapi, no RPC). 0 = off.
+  SMART_WALLET_LOG_INTERVAL_MIN: num('SMART_WALLET_LOG_INTERVAL_MIN', 30),
   // 'meridian' entry mode (SOL-only bid-ask ladder below price, from yunus-0x/meridian) — size window + ladder shape.
   MERIDIAN_MIN_MCAP_USD: num('MERIDIAN_MIN_MCAP_USD', 150_000),
   MERIDIAN_MAX_MCAP_USD: num('MERIDIAN_MAX_MCAP_USD', 10_000_000),

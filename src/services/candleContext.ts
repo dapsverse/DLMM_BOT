@@ -97,3 +97,32 @@ export async function getDrawdownFromHighPct(pool: string, days: number): Promis
     return null;
   }
 }
+
+/** Pure: % the last close sits below the highest high of the last `n` candles (<= 0). Null with fewer than `minCandles` candles. */
+export function drawdownFromRecentHighPct(candles: Candle[], n: number, minCandles: number): number | null {
+  const w = candles.slice(-n);
+  if (w.length < minCandles || w.length === 0) return null;
+  const high = Math.max(...w.map((c) => c.high));
+  const last = w[w.length - 1]!.close;
+  return high > 0 ? pct(last, high) : null;
+}
+
+const dipCache = new Map<string, { at: number; v: number | null }>();
+const DIP_CACHE_MS = 60_000;
+
+/**
+ * Entry GATE input (2026-11-01): % below the 4h high from the last ~4.5h of 5m candles (one Meteora OHLCV request per pool, cached 60 s so the 15 s tick loop
+ * does not hammer it). Null on any failure or too little data (the dip gate fails closed).
+ */
+export async function getBelowHigh4hPct(pool: string, nowMs = Date.now()): Promise<number | null> {
+  const hit = dipCache.get(pool);
+  if (hit && nowMs - hit.at < DIP_CACHE_MS) return hit.v;
+  let v: number | null = null;
+  try {
+    v = drawdownFromRecentHighPct(await fetchCandles(pool, '5m', 4.5), 48, 24);
+  } catch (err) {
+    logger.warn('[candleContext] 4h-high fetch failed', { pool, error: err instanceof Error ? err.message : String(err) });
+  }
+  dipCache.set(pool, { at: nowMs, v });
+  return v;
+}
