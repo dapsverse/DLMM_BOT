@@ -91,6 +91,8 @@ export interface MeteoraPair {
   feeTvlRatio24h: number;
   /** fee_tvl_ratio['4h'] — recent yield. A pool whose 24h ratio is front-loaded (volume decayed) shows 4h*6 far below 24h; ranking/floor use the lower of the two (2026-10-09, EMBER-SOL: 24h 2.6% vs 4h*6 0.37%). */
   feeTvlRatio4h?: number;
+  /** fee_tvl_ratio['30m'] when the response carries it: the "right now" yield. RANKING ONLY (rangeYieldScore), never a gate; undefined = unknown. */
+  feeTvlRatio30m?: number;
   tokenX: TokenMeta;
   tokenY: TokenMeta;
   /** Not part of the raw API — hydrated from DexScreener if available. */
@@ -146,7 +148,7 @@ interface RawMeteoraPool {
   pool_config: { bin_step: number; base_fee_pct: number };
   volume: { '1h': number; '24h': number };
   fees: { '1h': number; '24h': number };
-  fee_tvl_ratio: { '24h': number; '4h'?: number };
+  fee_tvl_ratio: { '24h': number; '4h'?: number; '30m'?: number };
   created_at: number; // epoch ms
 }
 
@@ -186,6 +188,7 @@ function normalizePool(raw: RawMeteoraPool): MeteoraPair {
     baseFeePct: raw.pool_config.base_fee_pct,
     feeTvlRatio24h: raw.fee_tvl_ratio['24h'],
     feeTvlRatio4h: raw.fee_tvl_ratio['4h'],
+    feeTvlRatio30m: raw.fee_tvl_ratio['30m'],
     tokenX: normalizeTokenMeta(raw.token_x),
     tokenY: normalizeTokenMeta(raw.token_y),
   };
@@ -809,14 +812,25 @@ export function recentFeeTvl24hEq(pair: MeteoraPair): number {
   return pair.feeTvlRatio4h == null ? -Infinity : pair.feeTvlRatio4h * 6;
 }
 
+/** 30m fee/TVL scaled to a 24h equivalent (x48). null when the field is missing, non-numeric or negative; 0 is a real "dead right now". */
+export function recentFeeTvl30mEq(pair: MeteoraPair): number | null {
+  const v = Number(pair.feeTvlRatio30m);
+  return pair.feeTvlRatio30m == null || !Number.isFinite(v) || v < 0 ? null : v * 48;
+}
+
+/**
+ * Yield used only to ORDER range/meridian candidates (never a gate): the lowest of the 24h ratio, the 4h ratio x 6 and the 30m ratio x 48, so neither a
+ * front-loaded 24h number nor a pool whose volume just died can win. A missing part is skipped (without the 30m field this is the old min(24h, 4h x 6)).
+ */
+export function rangeYieldScore(pair: MeteoraPair): number {
+  const r24 = pair.feeTvlRatio24h ?? Number(pair.trade_volume_24h) / Number(pair.liquidity);
+  const recent4h = recentFeeTvl24hEq(pair);
+  const recent30m = recentFeeTvl30mEq(pair);
+  return Math.min(r24, recent4h === -Infinity ? r24 : recent4h, recent30m ?? r24);
+}
+
 export function rankRangeCandidates(candidates: MeteoraPair[]): MeteoraPair[] {
-  // Lower of 24h and recent (4h x6): a decayed pool can't win on a front-loaded 24h number.
-  const yieldScore = (pair: MeteoraPair): number => {
-    const r24 = pair.feeTvlRatio24h ?? Number(pair.trade_volume_24h) / Number(pair.liquidity);
-    const recent = recentFeeTvl24hEq(pair);
-    return recent === -Infinity ? r24 : Math.min(r24, recent);
-  };
-  return [...candidates].sort((a, b) => yieldScore(b) - yieldScore(a));
+  return [...candidates].sort((a, b) => rangeYieldScore(b) - rangeYieldScore(a));
 }
 
 /**
