@@ -1,5 +1,6 @@
 /** Prompts for the Claude agent (meridian-style screener + manager). Pure string builders. */
 import type { FlipPromptInfo } from './flip.js';
+import { standingLessonsBlock } from './aiLessons.js';
 
 export interface AiCandidate {
   pool: string;
@@ -72,7 +73,8 @@ export interface AiRules {
 /*
  * Prompts mirror yunus-0x/meridian's prompt.js (SCREENER and lean MANAGER roles) verbatim. Only the tool plumbing is adapted:
  * meridian's deploy_position / close_position become our submit_decision, and the deploy size and bin count are fixed by the bot.
- * Nothing of our own strategy text, lessons or guidance is added.
+ * The base text adds nothing of our own; our additions are explicit, separate sections: the flip context, the RISK SIGNALS and, for the MANAGER only,
+ * the STANDING LESSONS from logic/aiLessons.ts.
  */
 
 const TIMEFRAME_SCALING = `TIMEFRAME SCALING — volume, fee_active_tvl_ratio, fee_24h, price change, and activity metrics are measured over the active timeframe window.
@@ -175,6 +177,7 @@ BEHAVIORAL CORE:
 NOTE: profitPct in the position data already includes unclaimed fees and subtracts the estimated cost of selling the token side, so it is what a close would return, not the raw mark.`,
     flipManagerText(flip),
     memory ? `LESSONS LEARNED:\n${memory}` : '',
+    standingLessonsBlock(),
     recentDecisions.length ? `RECENT DECISIONS:\n${recentDecisions.join('\n')}` : '',
   ]
     .filter(Boolean)
