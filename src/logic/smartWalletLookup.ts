@@ -82,3 +82,26 @@ export function smartWalletSignal(tracked: number, inPoolCount: number, failed: 
   if (failed > 0) return `no smart wallet found in this pool, but ${failed} of ${tracked} lookups failed — unknown for those, treat as neutral`;
   return `0/${tracked} smart wallets in this pool — neutral, rely on fundamentals`;
 }
+
+/** One line of the smart-wallet position log: pool -> names of the tracked wallets holding it. A failed lookup is counted in `failed`, never read as "holds nothing". */
+export function buildSmartWalletSnapshot(results: { name: string; pools: string[] | null }[], nowMs: number) {
+  const byPool: Record<string, string[]> = {};
+  let failed = 0;
+  for (const r of results) {
+    if (r.pools === null) {
+      failed++;
+      continue;
+    }
+    for (const p of r.pools) (byPool[p] ??= []).push(r.name);
+  }
+  return { ts: new Date(nowMs).toISOString(), wallets: results.length, failed, byPool };
+}
+
+/** One file per UTC day (for a later accumulation backtest). */
+export const smartWalletLogFile = (nowMs: number): string => `logs/smart-wallets-${new Date(nowMs).toISOString().slice(0, 10)}.jsonl`;
+
+/** Due when never logged or `intervalMin` passed since the last snapshot; 0 / NaN = off. */
+export function shouldLogSmartWallets(nowMs: number, lastMs: number | null, intervalMin: number): boolean {
+  if (!(intervalMin > 0)) return false;
+  return lastMs === null || nowMs - lastMs >= intervalMin * 60_000;
+}
