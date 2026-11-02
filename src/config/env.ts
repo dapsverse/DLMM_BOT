@@ -492,6 +492,14 @@ export const env = {
   // Per-pool re-entry cooldown (minutes) after an exit while the price was ABOVE the ladder (out of range above / pumped far above range): the pool is blacklisted
   // that long (persisted with the blacklist in state/live-state.json, never shortens a longer blacklist). 0 = off. NIO-SOL 2026-10-30 was re-entered 3 times in 2 h.
   REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN: num('REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN', 60),
+  // Entry risk gates (after the Anakin-SOL stop loss 2026-11-02; logic/entryRiskGates.ts, audit-loop in index.ts). Unknown data never blocks; 0 = rule off.
+  // (1) active DexScreener boost >= this with no website AND no X account on its profile.
+  ENTRY_BOOST_MIN_NO_PRESENCE: num('ENTRY_BOOST_MIN_NO_PRESENCE', 100),
+  // (2) price more than ENTRY_DIPFADE_MAX_BELOW_PCT % under its 4h high while the volume spike is under ENTRY_DIPFADE_MIN_SPIKE (a fading sell-off).
+  ENTRY_DIPFADE_MAX_BELOW_PCT: num('ENTRY_DIPFADE_MAX_BELOW_PCT', 15),
+  ENTRY_DIPFADE_MIN_SPIKE: num('ENTRY_DIPFADE_MIN_SPIKE', 1),
+  // (3) 1h sells per buy above this (DexScreener txn counts).
+  ENTRY_MAX_SELL_BUY_1H: num('ENTRY_MAX_SELL_BUY_1H', 1.5),
   // Consecutive ticks (15 s each) the open position must read as MISSING (getUserPositions empty) before the bot believes it is gone and reconciles with the chain.
   // Until then the health check / stop loss is skipped: an empty RPC read used to be priced as value 0 = "-100% loss" (live 2026-10-27, 10-28). 0 = off (old behaviour).
   POSITION_MISSING_CONFIRM_TICKS: num('POSITION_MISSING_CONFIRM_TICKS', 8),
