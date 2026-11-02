@@ -47,6 +47,7 @@ import { fallingKnifeReject, lowVolumeSpikeReject, reentryCooldownMs } from './l
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct, getBelowHigh4hPct } from './services/candleContext.js';
 import { dipEntryReject } from './logic/dipEntry.js';
+import { boostNoPresenceReject, dipFadingReject, sellBuyReject } from './logic/entryRiskGates.js';
 import { maybeLogSmartWalletSnapshot } from './services/smartWallets.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
@@ -402,13 +403,28 @@ async function tryEnterPool(): Promise<void> {
       logger.info(`[index] skipping pool ${candidate.address} — ${spikeReject}`);
       continue;
     }
-    // Dip-entry gate (2026-11-01): last, so the 5m-candle request only goes out for a pool that passed everything else (cached 60 s per pool)
+    // Entry risk gates (2026-11-02, after the Anakin-SOL stop loss): flow and profile checks first, they need no extra request; unknown data never blocks
+    const riskReject =
+      sellBuyReject(candidate.buyRatio1h, env.ENTRY_MAX_SELL_BUY_1H) ??
+      boostNoPresenceReject(candidate.dexBoostsActive, candidate.dexHasWebsite, candidate.dexHasX, env.ENTRY_BOOST_MIN_NO_PRESENCE);
+    if (riskReject) {
+      logger.info(`[index] skipping pool ${candidate.address} — ${riskReject}`);
+      continue;
+    }
+    // Dip-entry gate (2026-11-01) and the fading-dip rule share one 4h-high read: last, so the 5m-candle request only goes out for a pool that passed everything else (cached 60 s per pool)
+    const drop4hPct = env.DIP_ENTRY_GATE || env.ENTRY_DIPFADE_MAX_BELOW_PCT > 0 ? await getBelowHigh4hPct(candidate.address) : null;
     if (env.DIP_ENTRY_GATE) {
-      const dipReject = dipEntryReject(await getBelowHigh4hPct(candidate.address), env.DIP_ENTRY_MIN_PCT, env.DIP_ENTRY_MAX_PCT);
+      const dipReject = dipEntryReject(drop4hPct, env.DIP_ENTRY_MIN_PCT, env.DIP_ENTRY_MAX_PCT);
       if (dipReject) {
         logger.info(`[index] skipping pool ${candidate.address} — ${dipReject}`);
         continue;
       }
+    }
+    // volumeSpikeRatio() reads 0 without the 6h volume, so only a hydrated candidate is judged here too
+    const fadeReject = candidate.volumeH6Usd !== undefined ? dipFadingReject(drop4hPct, volumeSpikeRatio(candidate), env.ENTRY_DIPFADE_MAX_BELOW_PCT, env.ENTRY_DIPFADE_MIN_SPIKE) : null;
+    if (fadeReject) {
+      logger.info(`[index] skipping pool ${candidate.address} — ${fadeReject}`);
+      continue;
     }
     logger.info('[index] token audit ok', { pool: candidate.address, audit });
     const dollarFlow = env.DOLLAR_FLOW_ENABLED ? await getDollarVolumeBuyRatio(reserveSolAccount, solPriceUsd) : null;

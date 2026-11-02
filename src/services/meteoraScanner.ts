@@ -1,5 +1,5 @@
 import { meridianPoolReject, type MeridianLimits } from '../logic/meridianFilter.js';
-import { activeBoosts } from '../logic/dexBoost.js';
+import { activeBoosts, socialPresence } from '../logic/dexBoost.js';
 import axios from 'axios';
 import { env } from '../config/env.js';
 import {
@@ -110,6 +110,9 @@ export interface MeteoraPair {
   buyRatio1h?: number;
   /** Active paid DexScreener boost points over the token's pairs (0 = none; undefined = unknown). Context for the AI screener only, never a filter. */
   dexBoostsActive?: number;
+  /** DexScreener profile of the token (any pair): a website / an X account is listed. undefined = no pair data (unknown). Used by the boost-without-presence entry gate. */
+  dexHasWebsite?: boolean;
+  dexHasX?: boolean;
   /**
    * True when this pool's whole DexScreener batch call failed (429/timeout/etc) —
    * distinct from a pool that DexScreener simply has no data for. Every
@@ -393,6 +396,8 @@ interface DexScreenerPair {
   liquidity?: { usd?: number };
   /** present while a paid DexScreener boost is running (see logic/dexBoost.ts) */
   boosts?: { active?: number };
+  /** token profile, only present when the token has one on DexScreener */
+  info?: { websites?: { url?: string }[]; socials?: { type?: string; url?: string }[] };
 }
 
 /** Trailing 1h USD volume for a token, used by riskManager's volume-drop hard-exit check. */
@@ -503,6 +508,11 @@ export async function hydrateTrendData(pairs: MeteoraPair[]): Promise<void> {
         // boosts attach to whichever pair the promoter boosted, so look at every pair of the token, not just the one used for the other fields
         const boost = activeBoosts(allByMint.get(mint));
         if (boost !== undefined) pair.dexBoostsActive = boost;
+        const presence = socialPresence(allByMint.get(mint));
+        if (presence) {
+          pair.dexHasWebsite = presence.hasWebsite;
+          pair.dexHasX = presence.hasX;
+        }
       }
     } catch (err) {
       logger.debug('[scanner] dexscreener batch hydration failed', {
