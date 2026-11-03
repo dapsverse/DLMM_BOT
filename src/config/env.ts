@@ -600,7 +600,12 @@ export const env = {
   SHADOW_SIM_MAX_HOURS: num('SHADOW_SIM_MAX_HOURS', 48),
   SHADOW_SIM_FEE_FACTOR: num('SHADOW_SIM_FEE_FACTOR', 1),
   // Bid-ask flip (meridian strategy 1): off until the first supervised live run. See docs/superpowers/specs/2026-10-18-bid-ask-flip-design.md.
-  FLIP_ENABLED: bool('FLIP_ENABLED', false),
+  // MASTER SWITCH (owner decision 2026-11-03, after the closed-trade audit: 5 of the 6 losses >= 10% were flipped positions, 7 flips avg -13.6%): the flip only runs when
+  // ENABLE_BID_ASK_FLIP (default false) AND FLIP_ENABLED are both true, so an old FLIP_ENABLED=true in the environment no longer enables it. Off = a ladder whose price falls
+  // below its lowest bin is handled by the ordinary meridian rules (out-of-range wait / stop loss / AI manager) and the flip text is dropped from the AI prompts. The flip code is kept;
+  // a position that is ALREADY in the flip phase (resumed at boot) keeps being managed by its own exit rules either way.
+  ENABLE_BID_ASK_FLIP: bool('ENABLE_BID_ASK_FLIP', false),
+  FLIP_ENABLED: bool('ENABLE_BID_ASK_FLIP', false) && bool('FLIP_ENABLED', false),
   // Flip trigger: price below the lowest bin of the SOL ladder (100% token), confirmed over FLIP_CONFIRM_TICKS ticks (1 = immediately). Flip phase: no AI exit,
   // no trailing/TP; exits are only the cycle stop loss, a pool TVL collapse (< FLIP_TVL_COLLAPSE_PCT % of the TVL at the flip) and the ladder sold out above the range for FLIP_OOR_ABOVE_EXIT_MIN minutes.
   FLIP_CONFIRM_TICKS: num('FLIP_CONFIRM_TICKS', 1),
