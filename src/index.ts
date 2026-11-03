@@ -597,6 +597,7 @@ async function tick(): Promise<void> {
     isOutOfRange: binStatus.isOutOfRange,
     outOfRangeSinceMs: ctx.outOfRangeSinceMs,
     peakProfitPct: ctx.peakProfitPct,
+    flipPhase: !!ctx.flipPhase,
   }, now);
   // Meridian mode: its deterministic close rules replace our own exit heuristics (volume drop, tiered TP, idle rebalance, upside break).
   // Only the stop loss (STOP_LOSS_PCT) is kept from evaluatePosition.

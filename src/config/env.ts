@@ -342,6 +342,9 @@ export const env = {
 
   // Risk management
   STOP_LOSS_PCT: num('STOP_LOSS_PCT', 25),
+  // Cycle stop loss of a position in the bid-ask FLIP phase (logic/flip.ts stopLossPctFor): measured like STOP_LOSS_PCT (deposit basis, banked SOL and fees counted, net of exit cost).
+  // Default 15 from the 2026-11-03 simulation on the 7 real flips (see PR); 0 = use STOP_LOSS_PCT. Other phases keep STOP_LOSS_PCT.
+  FLIP_STOP_LOSS_PCT: num('FLIP_STOP_LOSS_PCT', 15),
   // Hours the SAME pool is kept out of entry after a close by the stop loss (meridian mode; persisted in the state's blacklist). 0 disables it.
   SL_POOL_COOLDOWN_HOURS: num('SL_POOL_COOLDOWN_HOURS', 4),
   MAX_REBALANCE_PER_HOUR: num('MAX_REBALANCE_PER_HOUR', 3),
@@ -640,6 +643,9 @@ if (env.MIN_GAS_RESERVE_PCT <= 0 || env.MIN_GAS_RESERVE_PCT >= 100) {
 }
 if (env.INITIAL_LP_CAPITAL_SOL <= 0) {
   throw new Error('[env] INITIAL_LP_CAPITAL_SOL must be > 0');
+}
+if (env.FLIP_STOP_LOSS_PCT < 0 || env.FLIP_STOP_LOSS_PCT > 100) {
+  throw new Error('[env] FLIP_STOP_LOSS_PCT must be in [0, 100] (0 = use STOP_LOSS_PCT)');
 }
 if (env.STOP_LOSS_PCT <= 0 || env.STOP_LOSS_PCT > 100) {
   throw new Error('[env] STOP_LOSS_PCT must be in (0, 100]');

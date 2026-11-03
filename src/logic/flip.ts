@@ -101,6 +101,15 @@ export function selectExitSignal(i: ExitSignalInput): string | null {
   return i.meridianSignal;
 }
 
+/**
+ * Cycle stop-loss level: the flip phase has its own (FLIP_STOP_LOSS_PCT, default 15), every other phase keeps STOP_LOSS_PCT. A flip-phase level <= 0 or not a number
+ * falls back to STOP_LOSS_PCT. Chosen from the 7 real flips (2026-11-03 simulation on the post-flip health-check paths): 15% saved mint-SOL (low -12.65%, then +23.9%)
+ * and cut the other losers a few points; 8-12% would have sold every flip right after it opened.
+ */
+export function stopLossPctFor(flipPhase: boolean | undefined, stopLossPct: number, flipStopLossPct: number): number {
+  return flipPhase && Number.isFinite(flipStopLossPct) && flipStopLossPct > 0 ? flipStopLossPct : stopLossPct;
+}
+
 /** An AI manager close is never carried out in the flip phase (waiting for the bounce); the manager is not even consulted there. */
 export const aiExitAllowed = (c: SideFlags): boolean => !c.flipPhase;
 

@@ -1,6 +1,7 @@
 import { env } from '../config/env.js';
 import { TAKE_PROFIT_TIERS } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
+import { stopLossPctFor } from './flip.js';
 
 export type RiskDecision = 'HOLD' | 'REBALANCE' | 'HARD_EXIT' | 'TAKE_PROFIT';
 
@@ -60,6 +61,8 @@ export interface PositionHealthInput {
   outOfRangeSinceMs?: number | null;
   /** Highest unrealized profit % this position has ever reached (caller-tracked, updated with THIS tick's profit before calling evaluatePosition — see rebalanceEngine.ts/paperTrade.ts). 0 for a fresh position. */
   peakProfitPct: number;
+  /** the position is in the bid-ask flip phase: the stop loss uses FLIP_STOP_LOSS_PCT instead of STOP_LOSS_PCT */
+  flipPhase?: boolean;
 }
 
 export interface RiskEvaluation {
@@ -89,8 +92,10 @@ export function evaluatePosition(input: PositionHealthInput, now = Date.now()): 
     input.initialDepositUsd > 0
       ? ((input.initialDepositUsd - input.currentValueUsd) / input.initialDepositUsd) * 100
       : 0;
-  if (lossPct >= env.STOP_LOSS_PCT) {
-    reasons.push(`unrealized loss ${lossPct.toFixed(2)}% >= STOP_LOSS_PCT ${env.STOP_LOSS_PCT}%`);
+  // flip phase: its own level; the text keeps the "STOP_LOSS_PCT" token that index.ts (slHit) and the cooldown parser match on
+  const slPct = stopLossPctFor(input.flipPhase, env.STOP_LOSS_PCT, env.FLIP_STOP_LOSS_PCT);
+  if (lossPct >= slPct) {
+    reasons.push(`unrealized loss ${lossPct.toFixed(2)}% >= ${input.flipPhase && slPct !== env.STOP_LOSS_PCT ? 'FLIP_STOP_LOSS_PCT' : 'STOP_LOSS_PCT'} ${slPct}%`);
   }
   const profitPct = -lossPct;
 
