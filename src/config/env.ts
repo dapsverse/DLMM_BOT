@@ -503,6 +503,8 @@ export const env = {
   ENTRY_DIPFADE_MIN_SPIKE: num('ENTRY_DIPFADE_MIN_SPIKE', 1),
   // (3) 1h sells per buy above this (DexScreener txn counts).
   ENTRY_MAX_SELL_BUY_1H: num('ENTRY_MAX_SELL_BUY_1H', 1.5),
+  // (4) post-pump bag: skip the entry when the price is this many % above its 48h low (candle context, read after the AI decision; unknown never blocks; 0 = off).
+  ENTRY_MAX_ABOVE_LOW_48H_PCT: num('ENTRY_MAX_ABOVE_LOW_48H_PCT', 800),
   // Consecutive ticks (15 s each) the open position must read as MISSING (getUserPositions empty) before the bot believes it is gone and reconciles with the chain.
   // Until then the health check / stop loss is skipped: an empty RPC read used to be priced as value 0 = "-100% loss" (live 2026-10-27, 10-28). 0 = off (old behaviour).
   POSITION_MISSING_CONFIRM_TICKS: num('POSITION_MISSING_CONFIRM_TICKS', 8),

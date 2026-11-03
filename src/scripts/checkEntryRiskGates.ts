@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { boostNoPresenceReject, dipFadingReject, sellBuyReject } from '../logic/entryRiskGates.js';
+import { boostNoPresenceReject, dipFadingReject, pumpedBagReject, sellBuyReject } from '../logic/entryRiskGates.js';
 import { socialPresence } from '../logic/dexBoost.js';
 import { env } from '../config/env.js';
 
@@ -40,6 +40,17 @@ assert.equal(sellBuyReject(undefined, 1.5), null); // unknown never blocks
 assert.equal(sellBuyReject(Number.NaN, 1.5), null);
 assert.equal(sellBuyReject(0.1, 0), null); // 0 = off
 
+// ---- post-pump bag: price already far above its 48h low (real closed trades 16 Oct-2 Nov: FTR 4892%, ヤギ 978%, Anakin-SOL 906% all lost >= 14%)
+assert.match(pumpedBagReject(905.91, 800) ?? '', /905\.9% above its 48h low >= 800%/); // Anakin-SOL
+assert.ok(pumpedBagReject(800, 800)); // boundary rejects
+assert.equal(pumpedBagReject(799.9, 800), null);
+assert.equal(pumpedBagReject(128, 800), null); // typical entry (median 128%)
+assert.equal(pumpedBagReject(-5, 800), null);
+assert.equal(pumpedBagReject(null, 800), null); // unknown never blocks (the candle context can fail)
+assert.equal(pumpedBagReject(undefined, 800), null);
+assert.equal(pumpedBagReject(Number.NaN, 800), null);
+assert.equal(pumpedBagReject(5000, 0), null); // 0 = off
+
 // ---- social presence from the DexScreener pairs of a token
 const withInfo = (websites: { url?: unknown }[], socials: { type?: unknown; url?: unknown }[]) => [{ info: { websites, socials } }];
 assert.deepEqual(socialPresence(withInfo([{ url: 'https://anakin.xyz' }], [{ type: 'twitter', url: 'https://x.com/anakinsol' }])), { hasWebsite: true, hasX: true });
@@ -58,4 +69,5 @@ if (process.env.ENTRY_BOOST_MIN_NO_PRESENCE === undefined) assert.equal(env.ENTR
 if (process.env.ENTRY_DIPFADE_MAX_BELOW_PCT === undefined) assert.equal(env.ENTRY_DIPFADE_MAX_BELOW_PCT, 15);
 if (process.env.ENTRY_DIPFADE_MIN_SPIKE === undefined) assert.equal(env.ENTRY_DIPFADE_MIN_SPIKE, 1);
 if (process.env.ENTRY_MAX_SELL_BUY_1H === undefined) assert.equal(env.ENTRY_MAX_SELL_BUY_1H, 1.5);
+if (process.env.ENTRY_MAX_ABOVE_LOW_48H_PCT === undefined) assert.equal(env.ENTRY_MAX_ABOVE_LOW_48H_PCT, 800);
 console.log('OK: entry risk gates (boost without presence, fading dip, sell:buy) + social presence');

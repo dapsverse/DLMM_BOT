@@ -47,7 +47,7 @@ import { fallingKnifeReject, lowVolumeSpikeReject, reentryCooldownMs } from './l
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct, getBelowHigh4hPct } from './services/candleContext.js';
 import { dipEntryReject } from './logic/dipEntry.js';
-import { boostNoPresenceReject, dipFadingReject, sellBuyReject } from './logic/entryRiskGates.js';
+import { boostNoPresenceReject, dipFadingReject, pumpedBagReject, sellBuyReject } from './logic/entryRiskGates.js';
 import { maybeLogSmartWalletSnapshot } from './services/smartWallets.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
@@ -478,7 +478,12 @@ async function tryEnterPool(): Promise<void> {
       aiStrategy,
       aiConviction: aiConviction ?? null,
     }).catch(() => undefined);
-    const priceContext = await getEntryPriceContext(candidate.address); // observability only, never gates entry
+    const priceContext = await getEntryPriceContext(candidate.address); // logged at entry; only the post-pump rule below uses it (unknown never blocks)
+    const bagReject = pumpedBagReject(priceContext?.aboveLow48hPct, env.ENTRY_MAX_ABOVE_LOW_48H_PCT);
+    if (bagReject) {
+      logger.info(`[index] skipping pool ${candidate.address} — ${bagReject}`);
+      continue;
+    }
     try {
       const pool = await openPool(candidate.address);
       lastOtherMint = xIsSol ? candidate.mint_y : candidate.mint_x;

@@ -29,3 +29,14 @@ export function sellBuyReject(buyRatio1h: number | null | undefined, maxSellBuy:
   const ratio = buyRatio1h <= 0 ? Infinity : (1 - buyRatio1h) / buyRatio1h;
   return ratio > maxSellBuy ? `sell:buy 1h ${ratio.toFixed(2)} > ${maxSellBuy}` : null;
 }
+
+/**
+ * Post-pump bag: the price is already `maxPct` % or more above its 48h low (candle context `aboveLow48hPct`). Of the 6 real closed trades that lost >= 10% (16 Oct-2 Nov),
+ * 3 entered at 906-4892% above the 48h low (FTR, ヤギ, Anakin-SOL); the 6 other trades above 800% netted about 0. The context is read after the AI decision, so an unknown
+ * value (candle fetch failed) never blocks. 0 = off.
+ */
+export function pumpedBagReject(aboveLow48hPct: number | null | undefined, maxPct: number): string | null {
+  if (!(maxPct > 0)) return null;
+  if (typeof aboveLow48hPct !== 'number' || !Number.isFinite(aboveLow48hPct)) return null;
+  return aboveLow48hPct >= maxPct ? `post-pump: ${aboveLow48hPct.toFixed(1)}% above its 48h low >= ${maxPct}%` : null;
+}
