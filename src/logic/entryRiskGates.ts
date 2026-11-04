@@ -40,3 +40,14 @@ export function pumpedBagReject(aboveLow48hPct: number | null | undefined, maxPc
   if (typeof aboveLow48hPct !== 'number' || !Number.isFinite(aboveLow48hPct)) return null;
   return aboveLow48hPct >= maxPct ? `post-pump: ${aboveLow48hPct.toFixed(1)}% above its 48h low >= ${maxPct}%` : null;
 }
+
+/**
+ * Entry floor that matches the meridian low-yield EXIT (meridianExit.ts: pool fee/TVL 24h < MERIDIAN_MIN_FEE_TVL_24H_PCT after 60 min): the REAL 24h figure (feeTvlRatio24h, percent),
+ * not the 4h x 6 one. Before this, pools were entered at 24h 2-5.9% (SAPLING, GTA6, RETARDIO, CLAUDIA, CHOO, GATO) on a strong 4h x 6 and then closed by that exit at minute 61
+ * (13 of 95 closed trades, avg -0.16%: gas and churn for nothing). An unknown yield never blocks (the exit rule also skips an unknown yield); 0 = off.
+ */
+export function lowYieldEntryReject(feeTvl24hPct: number | null | undefined, minPct: number): string | null {
+  if (!(minPct > 0)) return null;
+  if (typeof feeTvl24hPct !== 'number' || !Number.isFinite(feeTvl24hPct)) return null;
+  return feeTvl24hPct < minPct ? `low yield: fee/TVL 24h ${feeTvl24hPct.toFixed(2)}% < ${minPct}% (the low-yield exit would close it after the first hour)` : null;
+}

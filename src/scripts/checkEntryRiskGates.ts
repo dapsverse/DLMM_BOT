@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { boostNoPresenceReject, dipFadingReject, pumpedBagReject, sellBuyReject } from '../logic/entryRiskGates.js';
+import { boostNoPresenceReject, dipFadingReject, lowYieldEntryReject, pumpedBagReject, sellBuyReject } from '../logic/entryRiskGates.js';
 import { socialPresence } from '../logic/dexBoost.js';
 import { env } from '../config/env.js';
 
@@ -51,6 +51,19 @@ assert.equal(pumpedBagReject(undefined, 800), null);
 assert.equal(pumpedBagReject(Number.NaN, 800), null);
 assert.equal(pumpedBagReject(5000, 0), null); // 0 = off
 
+// ---- entry floor on the REAL 24h fee/TVL, the same figure and threshold the meridian low-yield exit uses (13 of 95 closed trades exited by it at minute 61)
+assert.match(lowYieldEntryReject(3.98, 7) ?? '', /low yield: fee\/TVL 24h 3\.98% < 7% \(the low-yield exit would close it/); // GATO-SOL 4 Nov
+assert.ok(lowYieldEntryReject(6.99, 7));
+assert.equal(lowYieldEntryReject(7, 7), null); // exactly the threshold passes (the exit rule closes only BELOW it)
+assert.equal(lowYieldEntryReject(13.64, 7), null);
+// a strong 4h x 6 number does not rescue a weak 24h one: only the 24h figure is passed in, so 24h 4.56 is rejected whatever the 4h says
+assert.ok(lowYieldEntryReject(4.56, 7));
+assert.equal(lowYieldEntryReject(null, 7), null); // unknown never blocks (the exit rule also skips an unknown yield)
+assert.equal(lowYieldEntryReject(undefined, 7), null);
+assert.equal(lowYieldEntryReject(Number.NaN, 7), null);
+assert.equal(lowYieldEntryReject(1, 0), null); // threshold 0 = off
+assert.equal(lowYieldEntryReject(0, 7) !== null, true); // a real zero is a dead pool
+
 // ---- social presence from the DexScreener pairs of a token
 const withInfo = (websites: { url?: unknown }[], socials: { type?: unknown; url?: unknown }[]) => [{ info: { websites, socials } }];
 assert.deepEqual(socialPresence(withInfo([{ url: 'https://anakin.xyz' }], [{ type: 'twitter', url: 'https://x.com/anakinsol' }])), { hasWebsite: true, hasX: true });
@@ -69,5 +82,6 @@ if (process.env.ENTRY_BOOST_MIN_NO_PRESENCE === undefined) assert.equal(env.ENTR
 if (process.env.ENTRY_DIPFADE_MAX_BELOW_PCT === undefined) assert.equal(env.ENTRY_DIPFADE_MAX_BELOW_PCT, 15);
 if (process.env.ENTRY_DIPFADE_MIN_SPIKE === undefined) assert.equal(env.ENTRY_DIPFADE_MIN_SPIKE, 1);
 if (process.env.ENTRY_MAX_SELL_BUY_1H === undefined) assert.equal(env.ENTRY_MAX_SELL_BUY_1H, 1.5);
+if (process.env.ENTRY_ENFORCE_MIN_FEE_TVL === undefined) assert.equal(env.ENTRY_ENFORCE_MIN_FEE_TVL, true);
 if (process.env.ENTRY_MAX_ABOVE_LOW_48H_PCT === undefined) assert.equal(env.ENTRY_MAX_ABOVE_LOW_48H_PCT, 800);
 console.log('OK: entry risk gates (boost without presence, fading dip, sell:buy) + social presence');
