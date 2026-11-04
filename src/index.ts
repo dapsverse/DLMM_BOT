@@ -47,7 +47,7 @@ import { fallingKnifeReject, lowVolumeSpikeReject, reentryCooldownMs } from './l
 import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct, getBelowHigh4hPct } from './services/candleContext.js';
 import { dipEntryReject } from './logic/dipEntry.js';
-import { boostNoPresenceReject, dipFadingReject, pumpedBagReject, sellBuyReject } from './logic/entryRiskGates.js';
+import { boostNoPresenceReject, dipFadingReject, lowYieldEntryReject, pumpedBagReject, sellBuyReject } from './logic/entryRiskGates.js';
 import { maybeLogSmartWalletSnapshot } from './services/smartWallets.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
@@ -326,6 +326,14 @@ async function tryEnterPool(): Promise<void> {
     if (!xIsSol && !yIsSol) {
       // ponytail: engine only prices in SOL terms — skip non-SOL-quoted pools.
       continue;
+    }
+    // Hard yield floor (2026-11-04): the SAME figure and threshold as the meridian low-yield exit (real 24h fee/TVL vs MERIDIAN_MIN_FEE_TVL_24H_PCT), before any audit call is spent on the pool
+    if (env.ENTRY_ENFORCE_MIN_FEE_TVL && env.ENTRY_STRATEGY_MODE === 'meridian' && env.MERIDIAN_RULES) {
+      const lowYield = lowYieldEntryReject(candidate.feeTvlRatio24h, env.MERIDIAN_MIN_FEE_TVL_24H_PCT);
+      if (lowYield) {
+        logger.info(`[index] skipping pool ${candidate.address} — ${lowYield}`);
+        continue;
+      }
     }
 
     // Dollar-volume-weighted buy/sell check (flowAnalysis.ts) — a genuinely

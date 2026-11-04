@@ -505,6 +505,9 @@ export const env = {
   ENTRY_MAX_SELL_BUY_1H: num('ENTRY_MAX_SELL_BUY_1H', 1.5),
   // (4) post-pump bag: skip the entry when the price is this many % above its 48h low (candle context, read after the AI decision; unknown never blocks; 0 = off).
   ENTRY_MAX_ABOVE_LOW_48H_PCT: num('ENTRY_MAX_ABOVE_LOW_48H_PCT', 800),
+  // (5) hard entry floor on the pool's REAL 24h fee/TVL = MERIDIAN_MIN_FEE_TVL_24H_PCT (7), the same figure/threshold as the meridian low-yield exit; meridian mode with MERIDIAN_RULES only.
+  // false = old behaviour (the AI prompt alone weighs yield). Unknown yield never blocks.
+  ENTRY_ENFORCE_MIN_FEE_TVL: bool('ENTRY_ENFORCE_MIN_FEE_TVL', true),
   // Consecutive ticks (15 s each) the open position must read as MISSING (getUserPositions empty) before the bot believes it is gone and reconciles with the chain.
   // Until then the health check / stop loss is skipped: an empty RPC read used to be priced as value 0 = "-100% loss" (live 2026-10-27, 10-28). 0 = off (old behaviour).
   POSITION_MISSING_CONFIRM_TICKS: num('POSITION_MISSING_CONFIRM_TICKS', 8),
