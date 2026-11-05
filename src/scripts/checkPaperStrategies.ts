@@ -66,4 +66,12 @@ const rT2 = advancePaper(posPeak, [mk(300 * 25, 1)], T, costs);
 assert.ok(rT2.exit && /trailing/.test(rT2.exit.reason), rT2.exit?.reason);
 assert.ok(PAPER_STRATEGIES.dipladder!.bins === 69 && PAPER_STRATEGIES.hotyield!.bins === 69);
 
+// blitz: aggressive, concentrated, bigger size, tighter than every other strategy
+const Z = PAPER_STRATEGIES.blitz!;
+assert.ok(Z.kind === 'two_sided' && Z.bins === 6 && Z.capitalSol === 2 && Z.slPct <= 3 && Z.maxMinutes <= 60);
+assert.equal(entryReject(Z.entry, { ...cand, feeTvl24hPct: 35, spike: 2, change1hPct: 8 }), null);
+assert.match(entryReject(Z.entry, { ...cand, feeTvl24hPct: 35, spike: 2, change1hPct: 1 }) ?? '', /1h/); // needs positive momentum
+const zp = openPaper(Z, { id: 'z', pool: 'p', name: 'T', mint: 'm', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 30 }, costs);
+assert.ok(Math.abs(zp.solBins.reduce((a, b) => a + b.s, 0) - 1) < 1e-9 && zp.lo === -5 && zp.hi === 6); // half of 2 SOL in 6 bins below, token half above
+
 console.log('OK: paper strategies (entry rules, ladder open, net PnL accounting, exits, comparators)');

@@ -52,3 +52,12 @@ Net PnL per position = fees + (value at exit - deposit: IL and price move) - exi
 - Not carried by one trade: removing the best trade keeps NET >= 0.
 - The simulator pays pool-average fees (no concentration bonus, no slippage): a pass is a reason to go small-size live, not proof; a fail on A or C means the entry idea has no edge even under a fee-friendly model.
 - Expected time: depends on scan hits; calm and hotyield entry rules are strict and may take days to reach 30.
+
+## 5. Addendum 2026-11-05: strategy D `blitz` (aggressive, paper)
+Requested by Master: more aggressive than `dipladder`. Unit `dlmm-paper-blitz`, same runner/logging/accounting (net PnL = fees + value change - exit cost - gas; comparators hold SOL = 0 and hold the same token; target 30 closed).
+
+Parameters: concentrated TWO-sided position, 6 SOL-side bins + 6 token-side bins (range about +-6% at bin step 100) so it follows the token; capital 2 SOL (2x the others, paper); bin step 100-250 and TVL 20k-300k USD via unit env `MERIDIAN_MIN/MAX_BIN_STEP`, `MERIDIAN_MIN/MAX_TVL_USD`. Entry: fee/TVL 24h >= 30, volume spike >= 1.5, 1h change +3..+30%, 24h change <= +250% (positive momentum, no late parabola). Exit: TP net +2%, trailing (trigger +1.2%, drop 0.6%), SL net -3%, out of range 10 min, time stop 60 min. Max 3 open, cooldown 45 min.
+
+Reasons (FACTS): fees per trade at ~1 SOL are about gas, so size and concentration are the only levers for fee income per position; OOR-above exits earn ~0, so a short time stop cuts dead time; in the first 10 h of paper, `calm` (two-sided) was the only strategy that captured a token pump (+3.99% net while the token rose 9.2%) while the SOL-only `dipladder` earned fees only (+1.88% while the token rose 64%): a two-sided shape participates in upside.
+Assumptions / risks (NOT proven): the sim pays pool-average fees (no concentration bonus), so a narrow range is under-credited on fees but fully charged for IL, stops and the 1% swap cost on the token half; with TP 2% that friction is large. The backtest in 1c showed every narrow variant losing, so the expected result of `blitz` in this model is negative; a pass would mean real concentrated fees matter more than the model says. Sample at start: 0 closed. Pass criteria as section 4, and net per position must exceed the swap cost (about 0.5% of capital).
+Fix note: `reportPaperStrategies.ts` was committed empty by mistake (truncated while rewriting) and printed nothing until 2026-11-05; rewritten.
