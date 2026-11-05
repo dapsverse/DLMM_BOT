@@ -60,8 +60,8 @@ export const PAPER_STRATEGIES: Record<string, PaperStrategy> = {
   // B: calm mature pool, two-sided 12+12 bins, long hold on fees, small directional exposure (untested by backtest: no two-sided data)
   calm: { name: 'calm', kind: 'two_sided', bins: 12, capitalSol: 1, tpPct: 3, slPct: 6, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 720, oorMinutes: 30, maxOpen: 3, cooldownMin: 240, entry: { minFeeTvl24hPct: 7, minTvlUsd: 100_000, minMcapUsd: 5_000_000, minHolders: 5000, max6hAbsPct: 15, min24hPct: -30 } },
   // C: hot-yield momentum, wide ladder, short time stop (tight ladders lost in the backtest: 25 bins SL10 -4.1 SOL / 341 trades)
-  // D: high-frequency paper scalp (Master 2026-11-05: NOT selective): near-open entry filter, concentrated two-sided 6+6 bins, 0.5 SOL x up to 8 open (4 SOL max exposure), 5 min cooldown, tight TP/SL, 60 min time stop
-  blitz: { name: 'blitz', kind: 'two_sided', bins: 6, capitalSol: 0.5, tpPct: 2, slPct: 3, trailTriggerPct: 1.2, trailDropPct: 0.6, maxMinutes: 60, oorMinutes: 10, maxOpen: 8, cooldownMin: 5, entry: { minFeeTvl24hPct: 0, min1hPct: -30, max1hPct: 100, min24hPct: -70, max24hPct: 1000 } },
+  // D: high-frequency paper scalp (Master 2026-11-05: NOT selective): near-open entry filter, concentrated two-sided 6+6 bins, 0.25 SOL x up to 8 open (2 SOL max exposure), 5 min cooldown, tight TP/SL, 60 min time stop
+  blitz: { name: 'blitz', kind: 'two_sided', bins: 6, capitalSol: 0.25, tpPct: 2, slPct: 3, trailTriggerPct: 1.2, trailDropPct: 0.6, maxMinutes: 60, oorMinutes: 10, maxOpen: 8, cooldownMin: 5, entry: { minFeeTvl24hPct: 0, min1hPct: -30, max1hPct: 100, min24hPct: -70, max24hPct: 1000 } },
   hotyield: { name: 'hotyield', kind: 'sol_ladder', bins: 69, capitalSol: 1, tpPct: 3, slPct: 8, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 180, oorMinutes: 15, maxOpen: 3, cooldownMin: 60, entry: { minFeeTvl24hPct: 40, minSpike: 1.5, min1hPct: -5, max1hPct: 25, max24hPct: 300 } },
 };
 
