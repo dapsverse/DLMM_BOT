@@ -347,6 +347,8 @@ export const env = {
   FLIP_STOP_LOSS_PCT: num('FLIP_STOP_LOSS_PCT', 15),
   // Hours the SAME pool is kept out of entry after a close by the stop loss (meridian mode; persisted in the state's blacklist). 0 disables it.
   SL_POOL_COOLDOWN_HOURS: num('SL_POOL_COOLDOWN_HOURS', 4),
+  // Minutes between Telegram heartbeat lines (logic/heartbeat.ts); the notifier drops one when it sent anything else in that time. 0 = off.
+  HEARTBEAT_INTERVAL_MIN: num('HEARTBEAT_INTERVAL_MIN', 120),
   MAX_REBALANCE_PER_HOUR: num('MAX_REBALANCE_PER_HOUR', 3),
   REBALANCE_COOLDOWN_MS: num('REBALANCE_COOLDOWN_MS', 5 * 60_000),
   // FEE_GAS_MULTIPLIER removed 2026-09-26 along with the standalone
