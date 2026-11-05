@@ -68,7 +68,7 @@ assert.ok(PAPER_STRATEGIES.dipladder!.bins === 69 && PAPER_STRATEGIES.hotyield!.
 
 // blitz: aggressive, concentrated, bigger size, tighter than every other strategy
 const Z = PAPER_STRATEGIES.blitz!;
-assert.ok(Z.kind === 'two_sided' && Z.bins === 6 && Z.capitalSol === 0.25 &&Z.slPct <= 3 && Z.maxMinutes <= 60 && Z.maxOpen >= 8 && Z.cooldownMin <= 10);
+assert.ok(Z.kind === 'two_sided' && Z.bins === 6 && Z.capitalSol === 1 && Z.slPct <= 3 && Z.maxMinutes <= 60 && Z.maxOpen === 2 &&Z.cooldownMin <= 10);
 assert.ok(Z.capitalSol * Z.maxOpen <= 2); // total paper exposure stays bounded
 // near-open filter: weak yield, no spike, falling or pumping token all enter; absurd moves and unknown data still do not
 assert.equal(entryReject(Z.entry, { ...cand, feeTvl24hPct: 2, spike: 0.1, change1hPct: -20, change24hPct: -50 }), null);
@@ -76,6 +76,6 @@ assert.equal(entryReject(Z.entry, { ...cand, feeTvl24hPct: 5, spike: null, chang
 assert.match(entryReject(Z.entry, { ...cand, change24hPct: 2000 }) ?? '', /24h/);
 assert.match(entryReject(Z.entry, { ...cand, change1hPct: null }) ?? '', /unknown/);
 const zp = openPaper(Z, { id: 'z', pool: 'p', name: 'T', mint: 'm', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 30 }, costs);
-assert.ok(Math.abs(zp.solBins.reduce((a, b) => a + b.s, 0) - 0.125) < 1e-9 && zp.lo === -5 && zp.hi === 6); // half of 0.25 SOL in 6 bins below, token half above
+assert.ok(Math.abs(zp.solBins.reduce((a, b) => a + b.s, 0) - 0.5) < 1e-9 && zp.lo === -5 && zp.hi === 6); // half of 1 SOL in 6 bins below, token half above
 
 console.log('OK: paper strategies (entry rules, ladder open, net PnL accounting, exits, comparators)');
