@@ -57,6 +57,7 @@ import { recoverOnBoot } from './logic/bootRecovery.js';
 import { positionToPersisted, setExitReason } from './logic/rebalanceEngine.js';
 import { saveState, pruneExpired, sanitizeCloseHistory, STATE_VERSION } from './services/stateStore.js';
 import { logger } from './utils/logger.js';
+import { heartbeat } from './logic/heartbeat.js';
 import { isTokenSide, strategyLabel, shouldFlip, pnlBasisSol, flipExitSignal, flipTakeProfitSignal, selectExitSignal, aiExitAllowed } from './logic/flip.js';
 import { estimateExitCostSol, realizedPnl } from './logic/realizedPnl.js';
 
@@ -548,6 +549,10 @@ async function tryEnterPool(): Promise<void> {
 
 async function tick(): Promise<void> {
   flushOutcome(Date.now());
+  if (heartbeat.due(Date.now(), env.HEARTBEAT_INTERVAL_MIN)) {
+    // one line per interval; the notifier decides whether to send it (logic/heartbeat.ts)
+    logger.info('[heartbeat] bot heartbeat', { ...heartbeat.take(Date.now()), intervalMin: env.HEARTBEAT_INTERVAL_MIN, position: currentPool ? (currentPool.poolName ?? currentPool.poolAddress.slice(0, 8)) : null, uptimeMin: Math.round(process.uptime() / 60) });
+  }
   void maybeLogSmartWalletSnapshot(); // fire and forget: a log for a later accumulation backtest, never blocks or throws into the tick
   if (!currentPool) {
     missingPositionTicks = 0;

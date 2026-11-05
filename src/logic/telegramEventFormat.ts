@@ -1,5 +1,6 @@
 /** Telegram text for the other bot log events (pure): entered pool, AI manager, close/complete, warnings/errors and a compact generic form for the rest. */
 import { formatAiScreener, wibTime } from './telegramAiFormat.js';
+import { formatHeartbeat } from './heartbeat.js';
 
 const shortPool = (p: string) => (p.length > 14 ? `${p.slice(0, 6)}…${p.slice(-4)}` : p);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -90,6 +91,7 @@ export function formatEvent(line: string): string | null | undefined {
   }
   const time = wibTime(line);
   if (mod === 'index' && msg.startsWith('AI manager: closing position')) return null; // repeats the "[ai] manager decision" close line logged just before
+  if (mod === 'heartbeat' && msg === 'bot heartbeat' && d) return formatHeartbeat(d, time);
   const ep = /^entered pool (\S+)$/.exec(msg);
   if (ep && d) return enteredPool(ep[1]!, d, time);
   if (mod === 'ai' && d) {
