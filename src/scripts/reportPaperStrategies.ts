@@ -15,6 +15,7 @@ for (const name of ['dipladder', 'calm', 'hotyield', 'blitz']) {
   for (const l of ex) { const r = String(l.reason).split(':')[0]!.replace(/ for \d+ min/, ''); reasons[r] = (reasons[r] ?? 0) + 1; }
   console.log(`${name}: entries ${entries}, closed ${n}/30, win ${n ? ((wins / n) * 100).toFixed(0) : '-'}%, NET ${sum(f('netSol')).toFixed(4)} SOL (avg ${n ? (sum(f('netPct')) / n).toFixed(2) : '-'}%)`);
   console.log(`  fees ${sum(f('feesSol')).toFixed(4)} | value change (IL+price) ${sum(f('valueChangeSol')).toFixed(4)} | exit cost ${sum(f('exitCostSol')).toFixed(4)} | gas ${sum(f('gasSol')).toFixed(4)}`);
+  console.log(`  net WITHOUT value change (fees - exit cost - gas) ${(sum(f('feesSol')) - sum(f('exitCostSol')) - sum(f('gasSol'))).toFixed(4)} | slippage inside costs ${sum(f('slippageSol')).toFixed(4)}`);
   console.log(`  comparators: hold SOL 0.0000 | hold same token ${sum(f('holdTokenSol')).toFixed(4)} SOL | avg hold ${n ? Math.round(sum(f('minutesHeld')) / n) : '-'} min`);
   console.log(`  exits: ${Object.entries(reasons).map(([k, v]) => `${k} ${v}`).join(', ') || '-'}`);
 }

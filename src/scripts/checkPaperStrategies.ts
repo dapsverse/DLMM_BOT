@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { PAPER_STRATEGIES, advancePaper, belowHighPct, entryReject, openPaper, type PaperCandidate } from '../logic/paperStrategies.js';
+import { PAPER_STRATEGIES, advancePaper, belowHighPct, entryReject, openPaper, sizeTooBigReject, slipFrac, tokenBlocked, type PaperCandidate } from '../logic/paperStrategies.js';
 import { priceOfU } from '../logic/shadowSim.js';
 
 const costs = { exitCostPct: 1, gasSol: 0.0005, feeFactor: 1 };
@@ -77,5 +77,38 @@ assert.match(entryReject(Z.entry, { ...cand, change24hPct: 2000 }) ?? '', /24h/)
 assert.match(entryReject(Z.entry, { ...cand, change1hPct: null }) ?? '', /unknown/);
 const zp = openPaper(Z, { id: 'z', pool: 'p', name: 'T', mint: 'm', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 30 }, costs);
 assert.ok(Math.abs(zp.solBins.reduce((a, b) => a + b.s, 0) - 0.5) < 1e-9 && zp.lo === -5 && zp.hi === 6); // half of 1 SOL in 6 bins below, token half above
+
+// blitz risk fixes: TVL >= 50k, size <= 2% TVL, slippage ~ size / TVL, one position per token
+assert.equal(Z.entry.minTvlUsd, 50_000);
+assert.equal(Z.maxPosPctOfTvl, 2);
+assert.match(entryReject(Z.entry, { ...cand, tvlUsd: 49_999 }) ?? '', /tvl/);
+assert.equal(entryReject(Z.entry, { ...cand, tvlUsd: 50_000 }), null);
+assert.equal(sizeTooBigReject(1, 150, 50_000, 2), null); // 0.3%
+assert.match(sizeTooBigReject(10, 150, 50_000, 2) ?? '', /3\.00% of pool TVL > 2%/);
+assert.match(sizeTooBigReject(1, null, 50_000, 2) ?? '', /unknown/);
+assert.match(sizeTooBigReject(1, 150, null, 2) ?? '', /unknown/);
+assert.equal(sizeTooBigReject(100, 150, 1000, undefined), null); // other strategies: off
+assert.ok(Math.abs(slipFrac(1, 150, 15_000) - 0.02) < 1e-12); // 2 x 150 / 15000
+assert.ok(slipFrac(1, 150, 7_500) > slipFrac(1, 150, 15_000)); // thinner pool, more slippage
+assert.equal(slipFrac(1, 150, null), 0);
+assert.equal(slipFrac(1e6, 150, 1000), 0.5); // capped
+// slippage lowers the tokens bought at entry (two-sided) and raises the cost at exit, only for strategies with maxPosPctOfTvl
+const inp = { id: 's', pool: 'p', name: 'T', mint: 'mm', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 30, solPriceUsd: 150, tvlUsd: 15_000 };
+const withSlip = openPaper(Z, inp, costs);
+const noSlip = openPaper({ ...Z, maxPosPctOfTvl: undefined }, inp, costs);
+const tok = (p: { tokBins: { tau: number }[] }) => p.tokBins.reduce((a, b) => a + b.tau, 0);
+assert.ok(tok(withSlip) < tok(noSlip) && (withSlip as { tvlUsd?: number }).tvlUsd === 15_000 && (noSlip as { tvlUsd?: number }).tvlUsd === undefined);
+const up2 = Array.from({ length: 6 }, (_, i) => mk(300 * (i + 1), 1.3));
+const eSlip = advancePaper(withSlip, up2, { ...Z, oorMinutes: 5 }, costs).exit!;
+const eNo = advancePaper(noSlip, up2, { ...Z, maxPosPctOfTvl: undefined, oorMinutes: 5 }, costs).exit!;
+assert.ok(eSlip.slippageSol > 0 && eNo.slippageSol === 0 && eSlip.netSol < eNo.netSol);
+// one position per token
+const none = new Map<string, number>();
+assert.equal(tokenBlocked([], none, 'm1', 1_000_000, 60), null);
+assert.match(tokenBlocked(['m1'], none, 'm1', 1_000_000, 60) ?? '', /open position/);
+const recent = new Map([['m1', 1_000_000 - 30 * 60_000]]);
+assert.match(tokenBlocked([], recent, 'm1', 1_000_000, 60) ?? '', /cooldown 60 min/);
+assert.equal(tokenBlocked([], recent, 'm1', 1_000_000 + 40 * 60_000, 60), null); // 70 min later
+assert.equal(tokenBlocked([], recent, 'm2', 1_000_000, 60), null); // other token free
 
 console.log('OK: paper strategies (entry rules, ladder open, net PnL accounting, exits, comparators)');

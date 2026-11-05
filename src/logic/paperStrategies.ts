@@ -22,6 +22,10 @@ export interface PaperStrategy {
   oorMinutes: number;
   maxOpen: number;
   cooldownMin: number;
+  /** blitz only: position size cap in % of pool TVL; setting it also turns on price-impact slippage on the swaps (see slipFrac) */
+  maxPosPctOfTvl?: number;
+  /** blitz only: minutes a TOKEN (not just a pool) is blocked after an out-of-range-above exit */
+  tokenOorAboveCooldownMin?: number;
   entry: EntryRule;
 }
 
@@ -61,7 +65,7 @@ export const PAPER_STRATEGIES: Record<string, PaperStrategy> = {
   calm: { name: 'calm', kind: 'two_sided', bins: 12, capitalSol: 1, tpPct: 3, slPct: 6, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 720, oorMinutes: 30, maxOpen: 3, cooldownMin: 240, entry: { minFeeTvl24hPct: 7, minTvlUsd: 100_000, minMcapUsd: 5_000_000, minHolders: 5000, max6hAbsPct: 15, min24hPct: -30 } },
   // C: hot-yield momentum, wide ladder, short time stop (tight ladders lost in the backtest: 25 bins SL10 -4.1 SOL / 341 trades)
   // D: high-frequency paper scalp (Master 2026-11-05: NOT selective): near-open entry filter, concentrated two-sided 6+6 bins, 1 SOL x up to 2 open (2 SOL max exposure), 5 min cooldown, tight TP/SL, 60 min time stop
-  blitz: { name: 'blitz', kind: 'two_sided', bins: 6, capitalSol: 1, tpPct: 2, slPct: 3, trailTriggerPct: 1.2, trailDropPct: 0.6, maxMinutes: 60, oorMinutes: 10, maxOpen: 2, cooldownMin: 5, entry: { minFeeTvl24hPct: 0, min1hPct: -30, max1hPct: 100, min24hPct: -70, max24hPct: 1000 } },
+  blitz: { name: 'blitz', kind: 'two_sided', bins: 6, capitalSol: 1, tpPct: 2, slPct: 3, trailTriggerPct: 1.2, trailDropPct: 0.6, maxMinutes: 60, oorMinutes: 10, maxOpen: 2, cooldownMin: 5, maxPosPctOfTvl: 2, tokenOorAboveCooldownMin: 60, entry: { minFeeTvl24hPct: 0, minTvlUsd: 50_000, min1hPct: -30, max1hPct: 100, min24hPct: -70, max24hPct: 1000 } },
   hotyield: { name: 'hotyield', kind: 'sol_ladder', bins: 69, capitalSol: 1, tpPct: 3, slPct: 8, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 180, oorMinutes: 15, maxOpen: 3, cooldownMin: 60, entry: { minFeeTvl24hPct: 40, minSpike: 1.5, min1hPct: -5, max1hPct: 25, max24hPct: 300 } },
 };
 
@@ -106,13 +110,35 @@ const weights = (n: number): number[] => {
   return w.map((x) => x / t);
 };
 
-export function openPaper(s: PaperStrategy, i: { id: string; pool: string; name: string | null; mint: string; binStep: number; entryTs: number; lastTs: number; entryPrice: number; feeTvl24hPct: number | null }, costs: PaperCosts): SimPosition {
+/** A paper position; `tvlUsd` is set only for strategies with slippage on (blitz): pool TVL at entry. */
+export type PaperPosition = SimPosition & { tvlUsd?: number | null };
+
+/**
+ * Price-impact slippage of a swap of `tradeSol` into a pool with `tvlUsd` of liquidity, as a fraction: constant-product style 2 x trade / TVL (a swap of s into a pool
+ * with half of its TVL on each side moves the price about 2s/TVL), capped at 50%. Unknown price/TVL = 0 (the flat exitCostPct still applies).
+ */
+export function slipFrac(tradeSol: number, solPriceUsd: number | null | undefined, tvlUsd: number | null | undefined): number {
+  if (!(tradeSol > 0) || !(typeof solPriceUsd === 'number' && solPriceUsd > 0) || !(typeof tvlUsd === 'number' && tvlUsd > 0)) return 0;
+  return Math.min(0.5, (2 * tradeSol * solPriceUsd) / tvlUsd);
+}
+
+/** Position size above `maxPct` % of the pool TVL (or an unknown size ratio) is rejected: it would move the pool and dilute its own fees. maxPct undefined/0 = off. */
+export function sizeTooBigReject(capitalSol: number, solPriceUsd: number | null | undefined, tvlUsd: number | null | undefined, maxPct: number | undefined): string | null {
+  if (!(typeof maxPct === 'number' && maxPct > 0)) return null;
+  if (!(typeof solPriceUsd === 'number' && solPriceUsd > 0) || !(typeof tvlUsd === 'number' && tvlUsd > 0)) return 'size vs TVL unknown';
+  const pct = ((capitalSol * solPriceUsd) / tvlUsd) * 100;
+  return pct > maxPct ? `position ${pct.toFixed(2)}% of pool TVL > ${maxPct}%` : null;
+}
+
+export function openPaper(s: PaperStrategy, i: { id: string; pool: string; name: string | null; mint: string; binStep: number; entryTs: number; lastTs: number; entryPrice: number; feeTvl24hPct: number | null; solPriceUsd?: number | null; tvlUsd?: number | null }, costs: PaperCosts): PaperPosition {
   const C = s.capitalSol;
-  const base = { id: i.id, decisionId: i.id, pool: i.pool, name: i.name, mint: i.mint, binStep: i.binStep, solPriceUsd: null, capitalSol: C, entryTs: i.entryTs, lastTs: i.lastTs, entryPrice: i.entryPrice, feeTvl24hPct: i.feeTvl24hPct, feesSol: 0, peakPct: 0, oorSinceTs: null, flipTvlUsd: null, flipTs: null, phase: 'classic' as const };
+  const slipOn = s.maxPosPctOfTvl !== undefined;
+  const base = { id: i.id, decisionId: i.id, pool: i.pool, name: i.name, mint: i.mint, binStep: i.binStep, solPriceUsd: i.solPriceUsd ?? null, ...(slipOn ? { tvlUsd: i.tvlUsd ?? null } : {}), capitalSol: C, entryTs: i.entryTs, lastTs: i.lastTs, entryPrice: i.entryPrice, feeTvl24hPct: i.feeTvl24hPct, feesSol: 0, peakPct: 0, oorSinceTs: null, flipTvlUsd: null, flipTs: null, phase: 'classic' as const };
   const n = s.bins;
   if (s.kind === 'sol_ladder') return { ...base, mode: 'B', solBins: weights(n).map((x, d) => ({ k: -d, s: C * x })), tokBins: [], lo: -(n - 1), hi: 0, gasPaidSol: costs.gasSol };
   const half = C / 2;
-  const tokens = (half * (1 - costs.exitCostPct / 100)) / i.entryPrice; // the token half is bought with a swap that costs exitCostPct
+  const entrySlip = slipOn ? slipFrac(half, i.solPriceUsd, i.tvlUsd) : 0;
+  const tokens = (half * (1 - costs.exitCostPct / 100 - entrySlip)) / i.entryPrice; // the token half is bought with a swap that costs exitCostPct (+ price-impact slippage for blitz)
   return { ...base, mode: 'A', solBins: weights(n).map((x, d) => ({ k: -d, s: half * x })), tokBins: weights(n).map((x, j) => ({ k: 1 + j, tau: tokens * x })), lo: -(n - 1), hi: n, gasPaidSol: 2 * costs.gasSol };
 }
 
@@ -126,6 +152,8 @@ export interface PaperExit {
   /** value of the holdings at exit minus the deposit: impermanent loss + price move of the part that is exposed */
   valueChangeSol: number;
   exitCostSol: number;
+  /** price-impact slippage inside the costs: entry swap (token half, two-sided) + exit swap; 0 when the strategy has no slippage model */
+  slippageSol: number;
   gasSol: number;
   minutesHeld: number;
   /** comparators: hold SOL = 0 by definition; hold the same token = the whole deposit in the token from entry to exit (no entry cost) */
@@ -135,8 +163,9 @@ export interface PaperExit {
   tokenMovePct: number;
 }
 
-export function advancePaper(posIn: SimPosition, candlesIn: ShadowCandle[], s: PaperStrategy, costs: PaperCosts): { pos: SimPosition; exit: PaperExit | null } {
-  const pos: SimPosition = { ...posIn };
+export function advancePaper(posIn: PaperPosition, candlesIn: ShadowCandle[], s: PaperStrategy, costs: PaperCosts): { pos: PaperPosition; exit: PaperExit | null } {
+  const pos: PaperPosition = { ...posIn };
+  const slipOn = s.maxPosPctOfTvl !== undefined && typeof pos.tvlUsd === 'number';
   const C = pos.capitalSol;
   const candles = [...candlesIn].filter((c) => c.timestamp > pos.lastTs && Number.isFinite(c.close) && c.close > 0).sort((a, b) => a.timestamp - b.timestamp);
   for (const c of candles) {
@@ -148,7 +177,8 @@ export function advancePaper(posIn: SimPosition, candlesIn: ShadowCandle[], s: P
     const { valueSol, tokenValueSol } = valuePosition(pos, u);
     const inRange = ka >= pos.lo && ka <= pos.hi;
     if (inRange && pos.feeTvl24hPct !== null) pos.feesSol += valueSol * (pos.feeTvl24hPct / 100) * costs.feeFactor * (dtMin / 1440);
-    const exitCost = (tokenValueSol * costs.exitCostPct) / 100 + costs.gasSol;
+    const exitSlipSol = slipOn ? tokenValueSol * slipFrac(tokenValueSol, pos.solPriceUsd, pos.tvlUsd) : 0;
+    const exitCost = (tokenValueSol * costs.exitCostPct) / 100 + exitSlipSol + costs.gasSol;
     const netPct = ((valueSol + pos.feesSol - exitCost - pos.gasPaidSol - C) / C) * 100;
     if (!inRange) pos.oorSinceTs ??= closeTs;
     else pos.oorSinceTs = null;
@@ -165,10 +195,19 @@ export function advancePaper(posIn: SimPosition, candlesIn: ShadowCandle[], s: P
     if (reason) {
       const netSol = valueSol + pos.feesSol - exitCost - pos.gasPaidSol - C;
       const tokenMovePct = (c.close / pos.entryPrice - 1) * 100;
-      return { pos, exit: { ts: closeTs, price: c.close, reason, netSol, netPct: (netSol / C) * 100, feesSol: pos.feesSol, valueChangeSol: valueSol - C, exitCostSol: exitCost, gasSol: pos.gasPaidSol + costs.gasSol, minutesHeld: held, holdSolSol: 0, holdTokenSol: C * (c.close / pos.entryPrice - 1), tokenMovePct } };
+      const entrySlipSol = slipOn && pos.mode === 'A' ? (C / 2) * slipFrac(C / 2, pos.solPriceUsd, pos.tvlUsd) : 0; // entry swap of the token half, already inside valueChange
+      return { pos, exit: { ts: closeTs, price: c.close, reason, netSol, netPct: (netSol / C) * 100, feesSol: pos.feesSol, valueChangeSol: valueSol - C, exitCostSol: exitCost, slippageSol: exitSlipSol + entrySlipSol, gasSol: pos.gasPaidSol + costs.gasSol, minutesHeld: held, holdSolSol: 0, holdTokenSol: C * (c.close / pos.entryPrice - 1), tokenMovePct } };
     }
   }
   return { pos, exit: null };
+}
+
+/** One position per TOKEN: blocked while the token has an open position (any pool) or within `cooldownMin` after an out-of-range-above exit of it. cooldownMin undefined = only the open check. */
+export function tokenBlocked(openMints: string[], lastOorAboveMs: ReadonlyMap<string, number>, mint: string, nowMs: number, cooldownMin: number | undefined): string | null {
+  if (openMints.includes(mint)) return 'token already has an open position';
+  const t = lastOorAboveMs.get(mint);
+  if (cooldownMin && t !== undefined && nowMs - t < cooldownMin * 60_000) return `token left out-of-range above ${Math.round((nowMs - t) / 60_000)} min ago (cooldown ${cooldownMin} min)`;
+  return null;
 }
 
 /** Sanity helper for the check: price at which a ladder's lowest bin starts. */
