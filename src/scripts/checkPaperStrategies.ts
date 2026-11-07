@@ -18,7 +18,14 @@ assert.equal(entryReject(B, { ...cand, tvlUsd: 200_000, mcapUsd: 8e6, holders: 9
 assert.match(entryReject(B, { ...cand, tvlUsd: 2e5, mcapUsd: 8e6, holders: 9000, change6hPct: -20 }) ?? '', /6h/);
 const C = PAPER_STRATEGIES.hotyield!.entry;
 assert.equal(entryReject(C, { ...cand, feeTvl24hPct: 50, spike: 2 }), null);
-assert.match(entryReject(C, { ...cand, feeTvl24hPct: 50, spike: 1 }) ?? '', /spike/);
+assert.match(entryReject(C, { ...cand, feeTvl24hPct: 50, spike: 0.2 }) ?? '', /spike/);
+// 2026-11-07 loosened thresholds (dry run: every scanned pool failed the old fee floors)
+assert.equal(entryReject(C, { ...cand, feeTvl24hPct: 15.4, spike: 0.38, change1hPct: -6.9, change24hPct: 11.6 }), null); // Rocco-SOL in the dry run
+assert.match(entryReject(C, { ...cand, feeTvl24hPct: 14.9, spike: 1 }) ?? '', /fee\/TVL 24h < 15/);
+assert.match(entryReject(C, { ...cand, feeTvl24hPct: 30, spike: 1, change1hPct: -11 }) ?? '', /1h < -10/);
+assert.equal(entryReject(B, { ...cand, feeTvl24hPct: 2.67, tvlUsd: 103_000, mcapUsd: 12e6, holders: 61_399, change6hPct: 0.4, change24hPct: 14.8 }), null); // GTA6-SOL in the dry run
+assert.match(entryReject(B, { ...cand, feeTvl24hPct: 1.9, tvlUsd: 2e5, mcapUsd: 8e6, holders: 9000 }) ?? '', /fee\/TVL 24h < 2/);
+assert.ok(PAPER_STRATEGIES.calm!.simV2 && PAPER_STRATEGIES.hotyield!.simV2 && PAPER_STRATEGIES.calm!.maxEntriesPerToken === 5 && PAPER_STRATEGIES.hotyield!.maxEntriesPerToken === 5);
 
 // belowHighPct
 const mk = (t: number, close: number, high = close): { timestamp: number; open: number; high: number; low: number; close: number; volume: number } => ({ timestamp: t, open: close, high, low: close, close, volume: 1 });
@@ -28,7 +35,7 @@ assert.ok(Math.abs((belowHighPct(series) ?? 0) - 25) < 1e-9); // (1.2-0.9)/1.2
 assert.equal(belowHighPct(series.slice(0, 5)), null);
 
 // open ladder: all SOL, deposit = capital
-const S = { ...PAPER_STRATEGIES.hotyield!, bins: 12, slPct: 4, tpPct: 1.5 };
+const S = { ...PAPER_STRATEGIES.hotyield!, bins: 12, slPct: 4, tpPct: 1.5, simV2: false }; // v1 maths under test here (simulator v2 has its own section below)
 const pos = openPaper(S, { id: 'x', pool: 'p', name: 'T', mint: 'm', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 50 }, costs);
 assert.ok(Math.abs(pos.solBins.reduce((a, b) => a + b.s, 0) - 1) < 1e-9);
 assert.equal(pos.tokBins.length, 0);
