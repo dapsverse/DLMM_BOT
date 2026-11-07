@@ -6,7 +6,7 @@
  */
 import fs from 'node:fs';
 import { SHADOW_RUNNER_DUMMY_KEY, isRunnerKeySafe } from '../logic/shadowRunner.js';
-import { PAPER_STRATEGIES, advancePaper, belowHighPct, entryReject, openPaper, sizeTooBigReject, tokenBlocked, type PaperCandidate, type PaperPosition } from '../logic/paperStrategies.js';
+import { PAPER_STRATEGIES, advancePaper, belowHighPct, entryReject, killReason, openPaper, sizeTooBigReject, tokenBlocked, tokenEntryCapReject, vol1hPct, type PaperCandidate, type PaperPosition } from '../logic/paperStrategies.js';
 
 if (!isRunnerKeySafe(process.env.PRIVATE_KEY)) {
   console.error(`paperStrategies: refusing to start, PRIVATE_KEY must be exactly ${SHADOW_RUNNER_DUMMY_KEY}`);
@@ -41,43 +41,54 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) process.on(sig, () => { stoppi
 const lastExitMs = new Map<string, number>();
 // per-TOKEN out-of-range-above exits, rebuilt from the log so a restart keeps the cooldown (exit lines carry the mint since 2026-11-05)
 const lastOorAboveMs = new Map<string, number>();
+// entries per token and closed results of this run, rebuilt from the log on restart (token cap and early kill survive a restart)
+const entriesPerMint = new Map<string, number>();
+const closedRuns: { netSol: number; netPct: number }[] = [];
 if (fs.existsSync(logFile)) {
   for (const line of fs.readFileSync(logFile, 'utf8').split('\n')) {
     try {
-      const l = JSON.parse(line) as { type?: string; reason?: string; mint?: string; ts?: string };
+      const l = JSON.parse(line) as { type?: string; reason?: string; mint?: string; ts?: string; netSol?: number; netPct?: number };
       if (l.type === 'paper_exit' && l.mint && String(l.reason).startsWith('out of range above') && l.ts) lastOorAboveMs.set(l.mint, Math.max(lastOorAboveMs.get(l.mint) ?? 0, Date.parse(l.ts)));
+      if (l.type === 'paper_entry' && l.mint) entriesPerMint.set(l.mint, (entriesPerMint.get(l.mint) ?? 0) + 1);
+      if (l.type === 'paper_exit' && typeof l.netSol === 'number' && typeof l.netPct === 'number') closedRuns.push({ netSol: l.netSol, netPct: l.netPct });
     } catch { /* blank or partial line */ }
   }
 }
+let killed: string | null = null;
 while (!stopping) {
   try {
     const nowMs = Date.now();
     let open: SimPosition[] = loadOpenSims(openFile);
     // ---- entries
     const pairs = await scanPools(defaultScannerConfig(new Map()), env.INITIAL_LP_CAPITAL_SOL);
-    for (const p of pairs) {
+    killed ??= killReason(closedRuns, strat.kill);
+    if (killed) logger.warn('[paper] early kill criteria met: no new entries (open positions still stepped)', { strategy: strat.name, why: killed });
+    for (const p of killed ? [] : pairs) {
       if (open.length >= strat.maxOpen) break;
       if (p.mint_y !== WSOL) continue; // price orientation: token (x) priced in SOL (y)
       if (open.some((o) => o.pool === p.address)) continue;
       if (nowMs - (lastExitMs.get(p.address) ?? 0) < strat.cooldownMin * 60_000) continue;
+      if (strat.maxEntriesPerToken !== undefined && (open.some((o) => o.mint === p.mint_x) || tokenEntryCapReject(entriesPerMint.get(p.mint_x) ?? 0, strat.maxEntriesPerToken))) continue;
       if (strat.tokenOorAboveCooldownMin !== undefined && tokenBlocked(open.map((o) => o.mint), lastOorAboveMs, p.mint_x, nowMs, strat.tokenOorAboveCooldownMin)) continue;
       const solPriceUsd = fin(p.tokenY.priceUsd);
       const sizeWhy = sizeTooBigReject(strat.capitalSol, solPriceUsd, fin(Number(p.liquidity)), strat.maxPosPctOfTvl);
       if (sizeWhy) { logger.info('[paper] skip', { pool: p.address, name: p.name, why: sizeWhy }); continue; }
       const feeTvl24hPct = fin(p.feeTvlRatio24h);
-      const cand: PaperCandidate = { feeTvl24hPct, tvlUsd: fin(Number(p.liquidity)), mcapUsd: fin(p.tokenX.marketCapUsd), holders: fin(p.tokenX.holders), spike: p.volumeH6Usd === undefined ? null : volumeSpikeRatio(p), change1hPct: fin(p.priceChange1hPct), change6hPct: fin(p.priceChange6hPct), change24hPct: fin(p.priceChange24hPct), belowHigh4hPct: null };
+      const cand: PaperCandidate = { feeTvl24hPct, tvlUsd: fin(Number(p.liquidity)), mcapUsd: fin(p.tokenX.marketCapUsd), holders: fin(p.tokenX.holders), spike: p.volumeH6Usd === undefined ? null : volumeSpikeRatio(p), change1hPct: fin(p.priceChange1hPct), change6hPct: fin(p.priceChange6hPct), change24hPct: fin(p.priceChange24hPct), belowHigh4hPct: null, poolAgeH: p.createdAtMs > 0 ? (nowMs - p.createdAtMs) / 3_600_000 : null, vol1hPct: null };
       const pre = entryReject({ ...strat.entry, belowHigh4hMinPct: undefined, belowHigh4hMaxPct: undefined }, cand);
       if (pre) continue;
       let candles: Awaited<ReturnType<typeof fetchCandles5m>> = [];
       try { candles = (await fetchCandles5m(p.address, env.SHADOW_FETCH_TIMEOUT_MS, 5)).filter((c) => c.timestamp + 300 <= nowMs / 1000); } catch { continue; }
       cand.belowHigh4hPct = belowHighPct(candles);
+      cand.vol1hPct = vol1hPct(candles);
       const why = entryReject(strat.entry, cand);
       if (why) { logger.info('[paper] skip', { pool: p.address, name: p.name, why }); continue; }
       const last = [...candles].sort((a, b) => a.timestamp - b.timestamp).pop();
       if (!last || !(last.close > 0)) continue;
       const pos = openPaper(strat, { id: `${strat.name}:${p.address}:${nowMs}`, pool: p.address, name: p.name ?? null, mint: p.mint_x, binStep: p.bin_step, entryTs: Math.floor(nowMs / 1000), lastTs: last.timestamp, entryPrice: last.close, feeTvl24hPct, solPriceUsd, tvlUsd: cand.tvlUsd }, costs);
       open.push(pos);
-      appendSimLine({ type: 'paper_entry', strategy: strat.name, id: pos.id, ts: iso(nowMs), pool: p.address, name: p.name, price: last.close, binStep: p.bin_step, rangeBins: [pos.lo, pos.hi], capitalSol: strat.capitalSol, feeTvl24hPct, cand }, logFile);
+      entriesPerMint.set(p.mint_x, (entriesPerMint.get(p.mint_x) ?? 0) + 1);
+      appendSimLine({ type: 'paper_entry', strategy: strat.name, id: pos.id, ts: iso(nowMs), pool: p.address, mint: p.mint_x, name: p.name, price: last.close, binStep: p.bin_step, rangeBins: [pos.lo, pos.hi], capitalSol: strat.capitalSol, feeTvl24hPct, cand }, logFile);
     }
     // ---- step every open position
     const still: SimPosition[] = [];
@@ -92,6 +103,7 @@ while (!stopping) {
           closed++;
           lastExitMs.set(pos.pool, nowMs);
           if (e.reason.startsWith('out of range above')) lastOorAboveMs.set(pos.mint, nowMs);
+          closedRuns.push({ netSol: e.netSol, netPct: e.netPct });
           appendSimLine({ type: 'paper_exit', strategy: strat.name, id: pos.id, ts: iso(e.ts * 1000), pool: pos.pool, mint: pos.mint, name: pos.name, reason: e.reason, price: e.price, minutesHeld: Math.round(e.minutesHeld), netSol: +e.netSol.toFixed(5), netPct: +e.netPct.toFixed(2), feesSol: +e.feesSol.toFixed(5), valueChangeSol: +e.valueChangeSol.toFixed(5), exitCostSol: +e.exitCostSol.toFixed(5), slippageSol: +e.slippageSol.toFixed(5), gasSol: +e.gasSol.toFixed(5), holdSolSol: 0, holdTokenSol: +e.holdTokenSol.toFixed(5), tokenMovePct: +e.tokenMovePct.toFixed(2) }, logFile);
         } else still.push(r.pos);
       } catch (err) {
