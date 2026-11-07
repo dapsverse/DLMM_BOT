@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { PAPER_STRATEGIES, advancePaper, belowHighPct, entryReject, openPaper, sizeTooBigReject, slipFrac, tokenBlocked, type PaperCandidate } from '../logic/paperStrategies.js';
+import { PAPER_STRATEGIES, advancePaper, belowHighPct, binsForRangePct, entryReject, inRangeFraction, killReason, openPaper, sizeTooBigReject, slipFrac, tokenBlocked, tokenEntryCapReject, vol1hPct, type PaperCandidate } from '../logic/paperStrategies.js';
 import { priceOfU } from '../logic/shadowSim.js';
 
 const costs = { exitCostPct: 1, gasSol: 0.0005, feeFactor: 1 };
@@ -110,5 +110,66 @@ const recent = new Map([['m1', 1_000_000 - 30 * 60_000]]);
 assert.match(tokenBlocked([], recent, 'm1', 1_000_000, 60) ?? '', /cooldown 60 min/);
 assert.equal(tokenBlocked([], recent, 'm1', 1_000_000 + 40 * 60_000, 60), null); // 70 min later
 assert.equal(tokenBlocked([], recent, 'm2', 1_000_000, 60), null); // other token free
+
+// ---- simulator v2 + S1 widehold / S2 dipladder2 (2026-11-07)
+const W = PAPER_STRATEGIES.widehold!;
+const D2 = PAPER_STRATEGIES.dipladder2!;
+assert.ok(W.simV2 && D2.simV2 && W.shape === 'spot' && W.rangePct === 35 && D2.bins === 69);
+assert.equal(binsForRangePct(35, 100), 31); // ln 1.35 / ln 1.01 = 30.2
+assert.equal(binsForRangePct(35, 80), 38);
+assert.equal(binsForRangePct(0.01, 100), 1);
+const ohlc = (t: number, o: number, h: number, l: number, c: number) => ({ timestamp: t, open: o, high: h, low: l, close: c, volume: 1 });
+const wIn = { id: 'w', pool: 'p', name: 'T', mint: 'mw', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 20 };
+const wp = openPaper(W, wIn, costs);
+assert.ok(wp.lo === -30 && wp.hi === 31 && new Set(wp.solBins.map((b) => b.s.toFixed(12))).size === 1); // 31 bins a side, uniform (spot)
+// entry rules: pool age, spike ceiling, unknown age fails
+const wc = { ...cand, feeTvl24hPct: 20, tvlUsd: 200_000, spike: 1, change24hPct: 50, belowHigh4hPct: 10, poolAgeH: 72, vol1hPct: 4 };
+assert.equal(entryReject(W.entry, wc), null);
+assert.match(entryReject(W.entry, { ...wc, poolAgeH: 10 }) ?? '', /pool age < 48/);
+assert.match(entryReject(W.entry, { ...wc, poolAgeH: null }) ?? '', /pool age unknown/);
+assert.match(entryReject(W.entry, { ...wc, spike: 4 }) ?? '', /spike > 3/);
+assert.match(entryReject(W.entry, { ...wc, change24hPct: 200 }) ?? '', /24h > 150/);
+assert.match(entryReject(D2.entry, { ...cand, feeTvl24hPct: 20, spike: 1, belowHigh4hPct: 15, change24hPct: 2292, poolAgeH: 100 }) ?? '', /24h > 300/); // Diamond-SOL
+// fee pro rata to the candle span inside the range
+assert.equal(inRangeFraction(-1, 1, 0, -5, 5), 1);
+assert.ok(Math.abs(inRangeFraction(4, 8, 7, -5, 5) - 0.5) < 1e-12); // span 4..8, range (-5, 6]: 2 of 4
+assert.equal(inRangeFraction(10, 12, 11, -5, 5), 0);
+assert.equal(inRangeFraction(3, 3, 3, -5, 5), 1);
+// stop loss on the candle LOW, filled at the stop level (no 5m-close overshoot): blitz realised -5.1% on a -3% stop with v1
+const wideDrop = advancePaper(wp, [ohlc(300, 1, 1, 0.5, 0.95)], { ...W, slPct: 5 }, costs).exit!;
+assert.match(wideDrop.reason, /stop loss/);
+assert.ok(Math.abs(wideDrop.netPct + 5) < 0.01, `filled at the stop: ${wideDrop.netPct}`);
+assert.ok(wideDrop.price > 0.5 && wideDrop.price < 0.95);
+// a gap below the stop fills at the open (worse than the stop, as in reality)
+const gap = advancePaper(wp, [ohlc(300, 0.6, 0.6, 0.55, 0.58)], { ...W, slPct: 5 }, costs).exit!;
+assert.ok(gap.price === 0.6 && gap.netPct < -5);
+// v1 strategies keep the close-only maths: same candle, close 0.95 above the stop -> no exit
+assert.equal(advancePaper(openPaper({ ...W, simV2: false }, wIn, costs), [ohlc(300, 1, 1, 0.5, 0.95)], { ...W, simV2: false, slPct: 5 }, costs).exit, null);
+// S2 crash guard and fast slide (sol ladder)
+const dp = openPaper(D2, { ...wIn, mint: 'md' }, costs);
+const crash = advancePaper(dp, [ohlc(300, 1, 1, 0.88, 0.88)], { ...D2, slPct: 50 }, costs).exit!;
+assert.match(crash.reason, /crash guard: 5m candle -12\.0%/);
+const slideP = priceOfU(-25, 1, 100); // below 30% of the 69-bin depth (bin -20.4)
+const slide = advancePaper(dp, [ohlc(300, 1, 1, 0.97, 0.97), ohlc(600, 0.97, 0.97, slideP, slideP * 1.0001)], { ...D2, slPct: 50, crashCandlePct: 99 }, costs).exit!;
+assert.match(slide.reason, /fast slide/);
+const late = advancePaper({ ...dp, entryTs: -3600 }, [ohlc(300, 1, 1, slideP, slideP)], { ...D2, slPct: 50, crashCandlePct: 99 }, costs).exit; // 65 min after entry: not a fast slide
+assert.ok(late === null || !/fast slide/.test(late.reason));
+// fees accrue under v2 while in range
+const calmRun = advancePaper(wp, Array.from({ length: 12 }, (_, i) => ohlc(300 * (i + 1), 1, 1.01, 0.99, 1)), W, costs);
+assert.ok(calmRun.exit === null && calmRun.pos.feesSol > 0);
+// recorded per entry: 1h high-low range
+assert.ok(Math.abs((vol1hPct(Array.from({ length: 12 }, (_, i) => ohlc(i * 300, 1, i === 5 ? 1.1 : 1, i === 7 ? 0.95 : 1, 1))) ?? 0) - 15) < 1e-9);
+assert.equal(vol1hPct([ohlc(0, 1, 1, 1, 1)]), null);
+// max 5 positions per token, early kill after 15 positions
+assert.equal(tokenEntryCapReject(4, 5), null);
+assert.match(tokenEntryCapReject(5, 5) ?? '', /max 5/);
+assert.equal(tokenEntryCapReject(99, undefined), null);
+const k = W.kill!;
+const runs = (n: number, pct: number) => Array.from({ length: n }, () => ({ netSol: pct / 100, netPct: pct }));
+assert.equal(killReason(runs(14, -10), k), null); // not before 15
+assert.match(killReason(runs(15, -1.6), k) ?? '', /avg net -1\.60% < -1\.5%/);
+assert.equal(killReason(runs(15, -1.4), k), null); // -0.21 SOL total, avg -1.4%
+assert.match(killReason([...runs(14, 0.5), { netSol: -0.5, netPct: -50 }].map((r, i) => (i < 14 ? { netSol: 0.005, netPct: 0.5 } : r)), { minN: 15, avgPct: -99, totalSol: -0.3 }) ?? '', /total net -0\.430 SOL < -0\.3/);
+assert.equal(killReason(runs(30, -5), undefined), null);
 
 console.log('OK: paper strategies (entry rules, ladder open, net PnL accounting, exits, comparators)');
