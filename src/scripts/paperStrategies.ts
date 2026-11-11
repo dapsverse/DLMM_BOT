@@ -55,7 +55,13 @@ if (fs.existsSync(logFile)) {
   }
 }
 let killed: string | null = null;
+// PAPER_DRY_RUN=1: one scan, log every candidate's features and why it was rejected, write nothing, exit (for tuning filters)
+const dry = process.env.PAPER_DRY_RUN === '1';
+/** reject reason without its numbers, so the per-cycle counts group */
+const reasonKey = (why: string) => why.replace(/-?[\d.]+/g, 'N');
 while (!stopping) {
+  const rejects: Record<string, number> = {};
+  const reject = (why: string) => { const k = reasonKey(why); rejects[k] = (rejects[k] ?? 0) + 1; };
   try {
     const nowMs = Date.now();
     let open: SimPosition[] = loadOpenSims(openFile);
@@ -65,10 +71,10 @@ while (!stopping) {
     if (killed) logger.warn('[paper] early kill criteria met: no new entries (open positions still stepped)', { strategy: strat.name, why: killed });
     for (const p of killed ? [] : pairs) {
       if (open.length >= strat.maxOpen) break;
-      if (p.mint_y !== WSOL) continue; // price orientation: token (x) priced in SOL (y)
+      if (p.mint_y !== WSOL) { reject('not SOL-quoted'); continue; } // price orientation: token (x) priced in SOL (y)
       if (open.some((o) => o.pool === p.address)) continue;
       if (nowMs - (lastExitMs.get(p.address) ?? 0) < strat.cooldownMin * 60_000) continue;
-      if (strat.maxEntriesPerToken !== undefined && (open.some((o) => o.mint === p.mint_x) || tokenEntryCapReject(entriesPerMint.get(p.mint_x) ?? 0, strat.maxEntriesPerToken))) continue;
+      if (strat.maxEntriesPerToken !== undefined && (open.some((o) => o.mint === p.mint_x) || tokenEntryCapReject(entriesPerMint.get(p.mint_x) ?? 0, strat.maxEntriesPerToken))) { reject('token open or entry cap'); continue; }
       if (strat.tokenOorAboveCooldownMin !== undefined && tokenBlocked(open.map((o) => o.mint), lastOorAboveMs, p.mint_x, nowMs, strat.tokenOorAboveCooldownMin)) continue;
       const solPriceUsd = fin(p.tokenY.priceUsd);
       const sizeWhy = sizeTooBigReject(strat.capitalSol, solPriceUsd, fin(Number(p.liquidity)), strat.maxPosPctOfTvl);
@@ -76,19 +82,25 @@ while (!stopping) {
       const feeTvl24hPct = fin(p.feeTvlRatio24h);
       const cand: PaperCandidate = { feeTvl24hPct, tvlUsd: fin(Number(p.liquidity)), mcapUsd: fin(p.tokenX.marketCapUsd), holders: fin(p.tokenX.holders), spike: p.volumeH6Usd === undefined ? null : volumeSpikeRatio(p), change1hPct: fin(p.priceChange1hPct), change6hPct: fin(p.priceChange6hPct), change24hPct: fin(p.priceChange24hPct), belowHigh4hPct: null, poolAgeH: p.createdAtMs > 0 ? (nowMs - p.createdAtMs) / 3_600_000 : null, vol1hPct: null };
       const pre = entryReject({ ...strat.entry, belowHigh4hMinPct: undefined, belowHigh4hMaxPct: undefined }, cand);
-      if (pre) continue;
+      if (dry) logger.info('[paper] dry candidate', { name: p.name, binStep: p.bin_step, why: pre, ...cand });
+      if (pre) { reject(pre); continue; }
       let candles: Awaited<ReturnType<typeof fetchCandles5m>> = [];
       try { candles = (await fetchCandles5m(p.address, env.SHADOW_FETCH_TIMEOUT_MS, 5)).filter((c) => c.timestamp + 300 <= nowMs / 1000); } catch { continue; }
       cand.belowHigh4hPct = belowHighPct(candles);
       cand.vol1hPct = vol1hPct(candles);
       const why = entryReject(strat.entry, cand);
-      if (why) { logger.info('[paper] skip', { pool: p.address, name: p.name, why }); continue; }
+      if (why) { reject(why); logger.info('[paper] skip', { pool: p.address, name: p.name, why }); continue; }
       const last = [...candles].sort((a, b) => a.timestamp - b.timestamp).pop();
       if (!last || !(last.close > 0)) continue;
+      if (dry) { logger.info('[paper] dry: would enter', { name: p.name }); continue; }
       const pos = openPaper(strat, { id: `${strat.name}:${p.address}:${nowMs}`, pool: p.address, name: p.name ?? null, mint: p.mint_x, binStep: p.bin_step, entryTs: Math.floor(nowMs / 1000), lastTs: last.timestamp, entryPrice: last.close, feeTvl24hPct, solPriceUsd, tvlUsd: cand.tvlUsd }, costs);
       open.push(pos);
       entriesPerMint.set(p.mint_x, (entriesPerMint.get(p.mint_x) ?? 0) + 1);
       appendSimLine({ type: 'paper_entry', strategy: strat.name, id: pos.id, ts: iso(nowMs), pool: p.address, mint: p.mint_x, name: p.name, price: last.close, binStep: p.bin_step, rangeBins: [pos.lo, pos.hi], capitalSol: strat.capitalSol, feeTvl24hPct, cand }, logFile);
+    }
+    if (dry) {
+      logger.info('[paper] dry run done', { strategy: strat.name, scanned: pairs.length, rejects });
+      break;
     }
     // ---- step every open position
     const still: SimPosition[] = [];
@@ -112,7 +124,7 @@ while (!stopping) {
       }
     }
     saveOpenSims(still, openFile);
-    logger.info('[paper] cycle done', { strategy: strat.name, scanned: pairs.length, open: still.length, closed });
+    logger.info('[paper] cycle done', { strategy: strat.name, scanned: pairs.length, open: still.length, closed, rejects });
   } catch (err) {
     logger.error('[paper] cycle failed', { error: err instanceof Error ? err.message : String(err) });
   }
