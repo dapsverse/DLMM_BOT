@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync, renameSync, readFileSync, existsSync, copyFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { CloseRec } from '../logic/meridianCooldown.js';
+import type { PendingSwapBack } from '../logic/pendingSwapBack.js';
 
 /**
  * Persisted live-bot state (2026-10-11): everything the live loop keeps only in memory
@@ -65,7 +66,7 @@ export interface PersistedState {
   /** meridian per-pool close history ([pool, last closes]) behind the pool cooldowns, so a restart does not reset them; absent in files written before 2026-10-24 */
   closeHistory?: [string, CloseRec[]][];
   /** exit swap-back that failed after the close; absent in files written before 2026-10-12 */
-  pendingSwapBack?: { mint: string; amount: string } | null;
+  pendingSwapBack?: PendingSwapBack | null;
   /** open limit order the bot placed (entry bid or exit ask) that must be settled before anything else; absent in older files */
   pendingLimitOrder?: { kind: 'entryBid' | 'exitAsk'; pool: string; order: string; xIsSol: boolean; mint: string; amountRaw: string; keepRaw: string; deadlineMs: number } | null;
 }
@@ -137,6 +138,12 @@ export function parseState(raw: string, wallet: string): PersistedState | null {
   if (!Array.isArray(o.blacklist) || !Array.isArray(o.chaseGuard)) return null;
   const psb = o.pendingSwapBack as Record<string, unknown> | null | undefined;
   if (psb != null && (typeof psb !== 'object' || typeof psb.mint !== 'string' || typeof psb.amount !== 'string')) return null;
+  // the optional exit info only completes a PnL figure: a malformed one is dropped, never a reason to distrust the whole file
+  if (psb != null && psb.exit !== undefined) {
+    const e = psb.exit as Record<string, unknown> | null;
+    const ok = !!e && typeof e === 'object' && typeof e.pool === 'string' && ['partialReceivedSol', 'spentSol', 'bankedSol', 'depositSol'].every((k) => isFiniteNum(e[k]));
+    if (!ok) delete psb.exit;
+  }
   const plo = o.pendingLimitOrder as Record<string, unknown> | null | undefined;
   if (plo != null) {
     const strs = ['kind', 'pool', 'order', 'mint', 'amountRaw', 'keepRaw'];

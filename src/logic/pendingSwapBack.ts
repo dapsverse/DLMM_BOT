@@ -4,6 +4,17 @@ import BN from 'bn.js';
 export interface PendingSwapBack {
   mint: string;
   amount: string;
+  /**
+   * The exit this swap-back belongs to (set by closeAndConvertToSol), so the realized PnL can be completed once the token is sold: the outcome is written
+   * with a null realized PnL while the swap is pending (STANK-SOL 2026-11-11). partialReceivedSol = wallet gain over the close itself (without the token).
+   */
+  exit?: { pool: string; partialReceivedSol: number; spentSol: number; bankedSol: number; depositSol: number };
+}
+
+/** received over the whole exit = close + the late swap-back; null when the swap-back gain was not measured (<= 0) */
+export function completedReceivedSol(partialReceivedSol: number, swapGainSol: number | null): number | null {
+  if (swapGainSol === null || !Number.isFinite(swapGainSol) || swapGainSol <= 0 || !Number.isFinite(partialReceivedSol)) return null;
+  return partialReceivedSol + swapGainSol;
 }
 
 /** Raw units below this are dust no router will quote (6 raw units blocked all entries on 2026-10-12): drop instead of retrying forever. */

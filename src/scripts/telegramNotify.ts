@@ -12,6 +12,8 @@ import type { CycleBasis } from '../logic/cyclePnl.js';
 import { poolLineTexts } from '../logic/poolLines.js';
 import { walletFreeLine, totalLines } from '../logic/walletTotals.js';
 import { notifyKinds } from '../logic/notifyKind.js';
+import { heartbeatIntervalOf, shouldSendHeartbeat } from '../logic/heartbeat.js';
+import { createRetryQueue, delayedPrefix } from '../logic/notifyRetryQueue.js';
 import { createDeduper, formatEvent } from '../logic/telegramEventFormat.js';
 
 function loadEnv(path: string): Record<string, string> {
@@ -35,7 +37,7 @@ if (!TOKEN || !CHAT) {
 }
 
 const API = `https://api.telegram.org/bot${TOKEN}`;
-const EVENT_RE = /entered pool|closing position|HARD_EXIT|TAKE_PROFIT|FLOW_EXIT|AI_EXIT|\[ai\] |AI screener|AI manager|down-break|limit order (placed|cancelled)|entry bid (placed|settled)|\] error|stop-loss|REBALANCE|skipping pool .*transfer fee/i;
+const EVENT_RE = /\[heartbeat\]|entered pool|closing position|HARD_EXIT|TAKE_PROFIT|FLOW_EXIT|AI_EXIT|\[ai\] |AI screener|AI manager|down-break|limit order (placed|cancelled)|entry bid (placed|settled)|\] error|stop-loss|REBALANCE|skipping pool .*transfer fee/i;
 
 // Defense in depth: logs should never hold secrets, but strip anything that looks like one before it leaves the machine.
 const scrub = (s: string) =>
@@ -62,19 +64,27 @@ function batchLines(lines: string[], max: number): string[] {
 const tfetch = (url: string, init: RequestInit = {}, ms = 12_000): Promise<Response> => fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Sends to the owner chat (or `chatId`); up to 3 attempts, retrying only network errors, 429 (honouring retry_after) and 5xx. Never throws. */
-async function send(text: string, chatId: string = CHAT!, kind = 'reply'): Promise<void> {
+let lastSentMs = Date.now(); // the "online" message at start is the first send; a heartbeat needs a full interval of silence after the last one
+/** Messages that failed all their sends wait here and are retried from the poll tick (logic/notifyRetryQueue.ts: bounded, no spam). */
+const resendQueue = createRetryQueue();
+
+/**
+ * Up to `attempts` sends, retrying only network errors, 429 (honouring retry_after) and 5xx. Returns 'ok', 'retryable' (worth queueing) or 'fatal'
+ * (a 4xx other than 429: the message itself is rejected, resending will not help). Never throws.
+ */
+async function trySend(text: string, chatId: string, kind: string, attempts: number): Promise<'ok' | 'retryable' | 'fatal'> {
   const body = JSON.stringify({ chat_id: chatId, text: scrub(text).slice(0, 3800) });
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     let waitMs = 1000 * attempt;
     try {
       const res = await tfetch(`${API}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }, 15_000);
       if (res.ok) {
+        lastSentMs = Date.now(); // any message counts for the heartbeat quiet period
         console.log(`[notify] sent kind=${kind} chars=${text.length}`); // proof of delivery in the journal; kind only, never the content
-        return;
+        return 'ok';
       }
       console.error(`send http ${res.status} (attempt ${attempt})`);
-      if (res.status !== 429 && res.status < 500) return; // a 4xx other than 429 will not get better by retrying
+      if (res.status !== 429 && res.status < 500) return 'fatal';
       if (res.status === 429) {
         const j = (await res.json().catch(() => null)) as { parameters?: { retry_after?: number } } | null;
         waitMs = Math.min(j?.parameters?.retry_after ?? 1, 10) * 1000;
@@ -82,8 +92,28 @@ async function send(text: string, chatId: string = CHAT!, kind = 'reply'): Promi
     } catch (e) {
       console.error(`send failed (attempt ${attempt})`, e instanceof Error ? e.message : e);
     }
-    if (attempt < 3) await sleep(waitMs);
+    if (attempt < attempts) await sleep(waitMs);
   }
+  return 'retryable';
+}
+
+/** Sends to the owner chat (or `chatId`); 3 attempts, then the message is queued for a later resend instead of being lost. Never throws. */
+async function send(text: string, chatId: string = CHAT!, kind = 'reply'): Promise<void> {
+  if ((await trySend(text, chatId, kind, 3)) === 'retryable') {
+    resendQueue.push({ text, chatId, kind }, Date.now());
+    console.error(`[notify] queued for resend kind=${kind} (queue ${resendQueue.size()})`);
+  }
+}
+
+/** One resend attempt per due queued message (oldest first, max 3 per tick); called from the poll tick. */
+async function flushResendQueue(): Promise<void> {
+  const before = resendQueue.dropped();
+  for (const m of resendQueue.due(Date.now())) {
+    const r = await trySend(delayedPrefix(m.firstFailMs) + m.text, m.chatId, `${m.kind}-resend`, 1);
+    resendQueue.result(m, r !== 'retryable', Date.now()); // a fatal reply is not retried either
+  }
+  const lost = resendQueue.dropped() - before;
+  if (lost > 0) console.error(`[notify] gave up on ${lost} queued message(s) (too old, too many tries or queue full)`);
 }
 
 const newestLog = () => {
@@ -784,9 +814,10 @@ async function main(): Promise<void> {
         offset += Buffer.byteLength(chunk);
         // AI decision lines carry a long reason: keep up to 1500 chars per line and split into several messages (Telegram caps one at 4096)
         // events become one readable message each (logic/telegramEventFormat.ts, duplicates dropped); an unparsable line stays raw
-        const hits = chunk
-          .split('\n')
-          .filter((l) => EVENT_RE.test(l))
+        const eventLines = chunk.split('\n').filter((l) => EVENT_RE.test(l));
+        const hbLines = eventLines.filter((l) => heartbeatIntervalOf(l) !== null);
+        const hits = eventLines
+          .filter((l) => heartbeatIntervalOf(l) === null)
           .map((l) => {
             const s = scrub(l);
             const f = formatEvent(s);
@@ -795,7 +826,14 @@ async function main(): Promise<void> {
           .filter((m): m is string => m !== null && !isRepeat(m)); // the same message again within 10 min (a line logged every tick) is sent once
         for (const msg of batchLines(hits.slice(0, 8), 3800)) await send(msg, CHAT!, notifyKinds(msg));
         if (hits.length > 8) await send(`…+${hits.length - 8} more`);
+        // heartbeat: only after a full interval without ANY send (this chunk's events count, they were just sent above)
+        for (const l of hbLines) {
+          if (!shouldSendHeartbeat(lastSentMs, Date.now(), heartbeatIntervalOf(l) ?? 0)) continue;
+          const f = formatEvent(scrub(l));
+          if (f) await send(f, CHAT!, 'heartbeat');
+        }
       }
+      await flushResendQueue(); // late delivery of messages that failed their 3 sends (bounded, see logic/notifyRetryQueue.ts)
       const alive = botAlive();
       if (alive !== wasAlive) await send(alive ? 'bot STARTED' : 'bot STOPPED');
       wasAlive = alive;

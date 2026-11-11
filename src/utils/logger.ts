@@ -1,5 +1,6 @@
 import winston from 'winston';
 import { env } from '../config/env.js';
+import { heartbeat } from '../logic/heartbeat.js';
 
 /**
  * Redacts anything that looks like a secret key/seed before it hits any
@@ -40,10 +41,17 @@ const redactFormat = winston.format((info) => {
   return info;
 });
 
+/** Feeds every message to the in-memory heartbeat counters (logic/heartbeat.ts); never changes the entry. */
+const heartbeatTap = winston.format((info) => {
+  heartbeat.onLogLine(info.message);
+  return info;
+});
+
 export const logger = winston.createLogger({
   level: env.LOG_LEVEL,
   format: winston.format.combine(
     redactFormat(),
+    heartbeatTap(),
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
     winston.format.json(),

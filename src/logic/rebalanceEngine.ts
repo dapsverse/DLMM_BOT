@@ -18,7 +18,7 @@ import {
   type DlmmPool,
 } from '../services/meteoraDLMM.js';
 import { binsForMove, tokenPriceChangePct, shouldAbortEntry, needsFlowRecheck } from './limitOrderMath.js';
-import { settlePendingSwapBack, DUST_RAW, type PendingSwapBack } from './pendingSwapBack.js';
+import { completedReceivedSol, settlePendingSwapBack, DUST_RAW, type PendingSwapBack } from './pendingSwapBack.js';
 import { balanceTokenRatio, emergencySwapAllToSol, swapExactIn, WSOL_MINT } from '../services/jupiterSwap.js';
 import { connection, getWalletSolBalance, getTokenBalance, waitForTokenBalance } from '../services/solana.js';
 import { isPoolStillEligible, getCurrentPriceUsd, recordChaseGuardExit, type ScannerConfig } from '../services/meteoraScanner.js';
@@ -1070,12 +1070,37 @@ export function restorePendingSwapBack(p: PendingSwapBack | null): void {
   pendingSwapBack = p;
 }
 
-/** Throws if the swap still fails (pending stays set); no-op when nothing is pending. */
-export async function retryPendingSwapBack(): Promise<void> {
-  if (!pendingSwapBack) return;
-  logger.warn('[rebalanceEngine] retrying pending swap-back', { ...pendingSwapBack });
-  pendingSwapBack = await settlePendingSwapBack(pendingSwapBack, { getBalance: getTokenBalance, swap: emergencySwapAllToSol });
+/**
+ * Throws if the swap still fails (pending stays set); no-op when nothing is pending. When the pending carries its exit, the realized PnL of that exit is
+ * completed (close + this swap) and returned so index.ts can fill the outcome record that was written with a null realized PnL.
+ */
+export async function retryPendingSwapBack(): Promise<{ pool: string; pnlSol: number; pnlPct: number; receivedSol: number } | null> {
+  if (!pendingSwapBack) return null;
+  const p = pendingSwapBack;
+  logger.warn('[rebalanceEngine] retrying pending swap-back', { mint: p.mint, amount: p.amount });
+  const solBefore = p.exit ? await getWalletSolBalance() : null;
+  let outLamports: number | null = null;
+  pendingSwapBack = await settlePendingSwapBack(p, {
+    getBalance: getTokenBalance,
+    swap: async (mint, amount) => {
+      const r = await emergencySwapAllToSol(mint, amount);
+      outLamports = r ? Number(r.outAmount) : null;
+      return r;
+    },
+  });
   logger.info('[rebalanceEngine] pending swap-back settled');
+  if (!p.exit || solBefore === null) return null;
+  // wallet gain over the swap; a stale read right after the tx falls back to the quoted out amount
+  const delta = (await getWalletSolBalance()) - solBefore;
+  const gain = delta > 0 ? delta : outLamports !== null && outLamports > 0 ? outLamports / LAMPORTS_PER_SOL : null;
+  const received = completedReceivedSol(p.exit.partialReceivedSol, gain);
+  const real = realizedPnl(p.exit.spentSol, received, p.exit.bankedSol, p.exit.depositSol);
+  if (!real || received === null) {
+    logger.warn('[rebalanceEngine] swap-back settled but its SOL gain was not measured: realized PnL stays unknown', { pool: p.exit.pool, delta, outLamports });
+    return null;
+  }
+  logger.warn('[rebalanceEngine] realized PnL completed after the swap-back', { pool: p.exit.pool, receivedSol: +received.toFixed(6), realizedPnlSol: +real.pnlSol.toFixed(5), realizedPnlPct: +real.pnlPct.toFixed(2) });
+  return { pool: p.exit.pool, pnlSol: real.pnlSol, pnlPct: real.pnlPct, receivedSol: received };
 }
 
 /** Proceeds of the most recent exit (see closeAndConvertToSol); read by index.ts when it records the outcome. */
@@ -1147,10 +1172,12 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
       logger.warn(`[rebalanceEngine] ${logPrefix}: ask limit order failed, selling at market`, { pool: ctx.poolAddress, error: err instanceof Error ? err.message : String(err) });
     }
   }
+  let pendedHere = false;
   if (toSwap.gtn(0) && !askPlaced) {
     try {
       await emergencySwapAllToSol(otherMint, toSwap);
     } catch (err) {
+      pendedHere = true;
       // Found live 2026-10-07 (real bot's first SWITCH): a transient
       // RPC/Jupiter hiccup here (quote 5xx, blockhash expiry under load)
       // used to throw all the way up through executeHardExit/
@@ -1181,6 +1208,10 @@ async function closeAndConvertToSol(ctx: PoolContext, logPrefix: string, ask?: {
   // proceeds of this exit (close + token swap), measured over seconds; incomplete (null) when a swap-back is still pending or the close was not run here
   const receivedSol = solBeforeClose !== null && !pendingSwapBack ? solBalance - solBeforeClose : null;
   lastClose = { pool: ctx.poolAddress, receivedSol };
+  // the swap-back of THIS exit failed: keep what the close itself returned, the realized PnL is completed when the pending swap lands (retryPendingSwapBack)
+  if (pendedHere && pendingSwapBack && solBeforeClose !== null && ctx.openSpentSol !== undefined) {
+    pendingSwapBack.exit = { pool: ctx.poolAddress, partialReceivedSol: solBalance - solBeforeClose, spentSol: ctx.openSpentSol, bankedSol: ctx.bankedSol ?? 0, depositSol: ctx.initialDepositSol };
+  }
   // same inputs as the [index] outcome line (flushOutcome in index.ts), so Telegram and state/ai-outcomes.jsonl show identical numbers
   const real = realizedPnl(ctx.openSpentSol, receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol);
   logger.warn(`[rebalanceEngine] ${logPrefix} complete`, { pool: ctx.poolAddress, solBalance, nextCapital, depositSol: ctx.initialDepositSol, realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null, realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null, ...(exitReason ? { reason: exitReason } : {}) });
