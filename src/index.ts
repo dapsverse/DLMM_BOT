@@ -37,7 +37,7 @@ import { aiScreen, aiManage } from './services/aiAgent.js';
 import type { AiCandidate } from './logic/aiPrompts.js';
 import { outcomeLine, priorFor } from './logic/aiMemory.js';
 import { managerTrigger } from './logic/aiTriggers.js';
-import { loadOutcomes, recordOutcome } from './services/aiOutcomes.js';
+import { completeOutcomeRealized, loadOutcomes, recordOutcome } from './services/aiOutcomes.js';
 import { shadowDecision, shadowOutcome } from './services/shadowLog.js';
 import type { TokenAudit } from './logic/tokenAudit.js';
 import { getTransferFeeBps } from './services/tokenFee.js';
@@ -278,7 +278,13 @@ async function reconcilePoolStateAfterFailure(ctx: PoolContext): Promise<PoolCon
 async function tryEnterPool(): Promise<void> {
   // A failed exit swap-back must land before any new entry, or the entry funds only part of the capital.
   try {
-    await retryPendingSwapBack();
+    const completed = await retryPendingSwapBack();
+    if (completed) {
+      // the outcome of that exit was written with a null realized PnL while the swap was pending: fill it in now
+      const ok = completeOutcomeRealized(completed.pool, { realizedPnlSol: completed.pnlSol, realizedPnlPct: completed.pnlPct });
+      logger.info('[index] outcome realized PnL completed after the swap-back', { pool: completed.pool, realizedPnlSol: +completed.pnlSol.toFixed(5), realizedPnlPct: +completed.pnlPct.toFixed(2), outcomeUpdated: ok });
+      persist(); // the pending swap-back (and its exit info) is gone now
+    }
   } catch (err) {
     logger.error('[index] pending swap-back still failing — holding off new entries', { error: err instanceof Error ? err.message : String(err) });
     return;

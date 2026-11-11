@@ -6,6 +6,7 @@ import { env } from '../config/env.js';
 import { WSOL_MINT } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
+import { escalatedSlippageBps } from '../logic/swapSlippage.js';
 
 const jupiter = createJupiterApiClient({ basePath: env.JUPITER_API_BASE_URL });
 
@@ -30,12 +31,14 @@ async function quote(inputMint: string, outputMint: string, amount: BN, slippage
  * stale quote fails again with Jupiter 6001 (slippage exceeded) — seen live
  * 2026-10-10, 2 of 4 swaps in one session.
  */
-async function executeSwap(inputMint: string, outputMint: string, amount: BN, slippageBps: number): Promise<SwapResult> {
+async function executeSwap(inputMint: string, outputMint: string, amount: BN, slippageBps: number, slippageForAttempt?: (attempt: number) => number): Promise<SwapResult> {
   let attempt = 0;
   const { signature, outAmount } = await withRetry(
     async () => {
       const n = attempt++;
-      const quoteResponse = await quote(inputMint, outputMint, amount, slippageBps);
+      const bps = slippageForAttempt ? slippageForAttempt(n) : slippageBps;
+      if (slippageForAttempt) logger.warn('[jupiter] swap attempt', { attempt: n + 1, slippageBps: bps, inputMint });
+      const quoteResponse = await quote(inputMint, outputMint, amount, bps);
       const { swapTransaction } = await jupiter.swapPost({
         swapRequest: {
           quoteResponse,
@@ -160,7 +163,9 @@ export async function emergencySwapAllToSol(mint: string, amount: BN): Promise<S
   if (mint === WSOL_MINT || amount.lten(0)) return null;
   logger.warn('[jupiter] emergency swap to SOL', { mint, amount: amount.toString() });
   // Exit dumps get wider slippage: QI-SOL swap-back failed 2x with 0x1771 at 300 bps while the token was being sold off (2026-10-10).
-  return swapExactIn(mint, WSOL_MINT, amount, env.JUPITER_EXIT_SLIPPAGE_BPS);
+  // And it widens per retry attempt (STANK-SOL 2026-11-11 failed 4x with 0x1771 at a fixed 800 bps): base, base+step, ... capped (logic/swapSlippage.ts).
+  const base = env.JUPITER_EXIT_SLIPPAGE_BPS;
+  return executeSwap(mint, WSOL_MINT, amount, base, (n) => escalatedSlippageBps(base, n, env.JUPITER_EXIT_SLIPPAGE_STEP_BPS, env.JUPITER_EXIT_SLIPPAGE_MAX_BPS));
 }
 
 export function jupiterClient() {

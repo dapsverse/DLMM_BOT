@@ -630,6 +630,10 @@ export const env = {
   JUPITER_MAX_SLIPPAGE_BPS: num('JUPITER_MAX_SLIPPAGE_BPS', 300),
   // Cap on Jupiter's priority fee (lamports); swaps requested at level 'high'. 4x 'block height exceeded' seen 2026-10-10 with default fee.
   JUPITER_EXIT_SLIPPAGE_BPS: num('JUPITER_EXIT_SLIPPAGE_BPS', 800),
+  // Emergency swap-back (exit / pending swap-back): each retry attempt widens the slippage by STEP, capped at MAX (logic/swapSlippage.ts). STEP 0 = fixed.
+  // With the 4 attempts of one call: 800 -> 1200 -> 1600 -> 2000 bps. Only the exit dump uses it; entry swaps keep JUPITER_MAX_SLIPPAGE_BPS.
+  JUPITER_EXIT_SLIPPAGE_STEP_BPS: num('JUPITER_EXIT_SLIPPAGE_STEP_BPS', 400),
+  JUPITER_EXIT_SLIPPAGE_MAX_BPS: num('JUPITER_EXIT_SLIPPAGE_MAX_BPS', 2000),
   JUPITER_MAX_PRIORITY_FEE_LAMPORTS: num('JUPITER_MAX_PRIORITY_FEE_LAMPORTS', 1_000_000),
   JUPITER_API_BASE_URL: optionalStr('JUPITER_API_BASE_URL', 'https://quote-api.jup.ag'),
 
