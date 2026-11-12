@@ -48,6 +48,7 @@ import { isDollarFlowBreachConfirmed } from './logic/dollarFlowExit.js';
 import { getEntryPriceContext, getDrawdownFromHighPct, getBelowHigh4hPct } from './services/candleContext.js';
 import { dipEntryReject } from './logic/dipEntry.js';
 import { boostNoPresenceReject, dipFadingReject, lowYieldEntryReject, pumpedBagReject, sellBuyReject } from './logic/entryRiskGates.js';
+import { tokenLossCooldownUntil } from './logic/tokenLossCooldown.js';
 import { maybeLogSmartWalletSnapshot } from './services/smartWallets.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
@@ -120,6 +121,14 @@ function flushOutcome(now: number): void {
   const lc = getLastClose();
   const real = lc && lc.pool === ctx.poolAddress ? realizedPnl(ctx.openSpentSol, lc.receivedSol, ctx.bankedSol ?? 0, ctx.initialDepositSol) : null;
   logger.info('[index] outcome', { pool: ctx.poolAddress, snapshotPnlPct: +snap.profitPct.toFixed(2), realizedPnlPct: real ? +real.pnlPct.toFixed(2) : null, realizedPnlSol: real ? +real.pnlSol.toFixed(5) : null, spentSol: ctx.openSpentSol ?? null, receivedSol: lc && lc.pool === ctx.poolAddress ? lc.receivedSol : null });
+  // per-TOKEN cooldown after a losing exit of any kind (logic/tokenLossCooldown.ts): the scanner rejects every pool of a blacklisted mint; persisted with the blacklist
+  const tokenMint = ctx.xIsSol ? ctx.mintY : ctx.mintX;
+  const tokenUntil = tokenLossCooldownUntil(real?.pnlPct ?? null, snap.profitPct, env.TOKEN_LOSS_COOLDOWN_MIN_LOSS_PCT, env.TOKEN_LOSS_COOLDOWN_HOURS, now, blacklistPools.get(tokenMint));
+  if (tokenUntil !== null) {
+    blacklistPools.set(tokenMint, tokenUntil);
+    logger.warn('[index] token cooldown after a losing exit: no entry in any pool of this token', { mint: tokenMint, pool: ctx.poolAddress, pnlPct: +(real?.pnlPct ?? snap.profitPct).toFixed(2), until: new Date(tokenUntil).toISOString(), exit: reason.slice(0, 80) });
+    persist();
+  }
   recordOutcome({
     at: new Date(now).toISOString(),
     pool: ctx.poolAddress,
