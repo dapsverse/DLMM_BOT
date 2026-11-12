@@ -497,6 +497,11 @@ export const env = {
   // Per-pool re-entry cooldown (minutes) after an exit while the price was ABOVE the ladder (out of range above / pumped far above range): the pool is blacklisted
   // that long (persisted with the blacklist in state/live-state.json, never shortens a longer blacklist). 0 = off. NIO-SOL 2026-10-30 was re-entered 3 times in 2 h.
   REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN: num('REENTRY_COOLDOWN_AFTER_OOR_ABOVE_MIN', 60),
+  // Per-TOKEN cooldown (hours) after a live exit of ANY reason with a loss >= TOKEN_LOSS_COOLDOWN_MIN_LOSS_PCT (realized %, snapshot % when realized is unknown):
+  // the token's mint goes on the blacklist, so no pool of it is entered (logic/tokenLossCooldown.ts). Persisted, never shortens a longer entry. 0 hours = off.
+  // STANK-SOL 2026-11-11: two AI exits at -9.66% and -9.65% about 20 h apart, both allowed by the per-pool cooldowns.
+  TOKEN_LOSS_COOLDOWN_HOURS: num('TOKEN_LOSS_COOLDOWN_HOURS', 24),
+  TOKEN_LOSS_COOLDOWN_MIN_LOSS_PCT: num('TOKEN_LOSS_COOLDOWN_MIN_LOSS_PCT', 5),
   // Entry risk gates (after the Anakin-SOL stop loss 2026-11-02; logic/entryRiskGates.ts, audit-loop in index.ts). Unknown data never blocks; 0 = rule off.
   // (1) active DexScreener boost >= this with no website AND no X account on its profile.
   ENTRY_BOOST_MIN_NO_PRESENCE: num('ENTRY_BOOST_MIN_NO_PRESENCE', 100),
