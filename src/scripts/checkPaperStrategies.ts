@@ -190,16 +190,11 @@ assert.equal(entryReject(T2.entry, { ...cand, feeTvl24hPct: 7, spike: 0.15, belo
 assert.match(entryReject(T2.entry, { ...cand, feeTvl24hPct: 6.9, spike: 1, belowHigh4hPct: 15 }) ?? '', /fee\/TVL 24h < 7/);
 assert.match(entryReject(T2.entry, { ...cand, feeTvl24hPct: 20, spike: 0.1, belowHigh4hPct: 15 }) ?? '', /spike < 0\.15/);
 assert.match(entryReject(T2.entry, { ...cand, feeTvl24hPct: 20, spike: 1, belowHigh4hPct: 5 }) ?? '', /below the 4h high/);
-// trailing 2/1: a run to +2.5% net that falls back 1 point exits by trailing (live 3/1.5 would not have armed yet)
-const tp2 = openPaper(T2, { id: 't', pool: 'p', name: 'T', mint: 'mt', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 2000 }, costs);
-let trailExit: ReturnType<typeof advancePaper>['exit'] = null;
-let tpos = tp2;
-for (let i = 1; i <= 40 && !trailExit; i++) {
-  const r = advancePaper(tpos, [ohlc(300 * i, 1, 1, 1, 1)], { ...T2, trailDropPct: 1 }, costs);
-  tpos = r.pos;
-  if (r.pos.peakPct >= 2.5 && !r.exit) { const d = advancePaper(r.pos, [ohlc(300 * (i + 1), 1, 1, 0.99, 0.99)], T2, costs); trailExit = d.exit; break; }
-  trailExit = r.exit;
-}
-assert.match(trailExit?.reason ?? '', /trailing/);
+// trailing 2/1: a position that peaked at +2.5% net and is back near 0 exits by trailing; the live 3/1.5 would not have armed at a +2.5% peak
+const tp2 = { ...openPaper(T2, { id: 't', pool: 'p', name: 'T', mint: 'mt', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 0 }, costs), peakPct: 2.5 };
+const flat1 = [ohlc(300, 1, 1, 1, 1)];
+assert.match(advancePaper(tp2, flat1, T2, costs).exit?.reason ?? '', /trailing: net .* fell 1% below the peak 2\.50%/);
+assert.equal(advancePaper(tp2, flat1, { ...T2, trailTriggerPct: 3, trailDropPct: 1.5 }, costs).exit, null); // live 3/1.5: not armed
+assert.equal(advancePaper({ ...tp2, peakPct: 1.9 }, flat1, T2, costs).exit, null); // peak below +2%: trailing not armed
 
 console.log('OK: paper strategies (entry rules, ladder open, net PnL accounting, exits, comparators)');
