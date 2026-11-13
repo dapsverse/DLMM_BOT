@@ -179,4 +179,27 @@ assert.equal(killReason(runs(15, -1.4), k), null); // -0.21 SOL total, avg -1.4%
 assert.match(killReason([...runs(14, 0.5), { netSol: -0.5, netPct: -50 }].map((r, i) => (i < 14 ? { netSol: 0.005, netPct: 0.5 } : r)), { minN: 15, avgPct: -99, totalSol: -0.3 }) ?? '', /total net -0\.430 SOL < -0\.3/);
 assert.equal(killReason(runs(30, -5), undefined), null);
 
+// ---- 2026-11-13: only dipladder2 + trail2 active; the net-negative strategies are retired (runner refuses them)
+const active = Object.entries(PAPER_STRATEGIES).filter(([, s]) => !s.retired).map(([k]) => k).sort();
+assert.deepEqual(active, ['dipladder2', 'trail2']);
+for (const k of ['dipladder', 'calm', 'hotyield', 'widehold', 'blitz']) assert.match(PAPER_STRATEGIES[k]!.retired ?? '', /^2026-11-/);
+const T2 = PAPER_STRATEGIES.trail2!;
+// live shape (SOL-only bid-ask ladder 69, TP 5, SL 25, OOR 30) with trailing 2/1 instead of the live 3/1.5
+assert.ok(T2.kind === 'sol_ladder' && T2.bins === 69 && T2.tpPct === 5 && T2.slPct === 25 && T2.oorMinutes === 30 && T2.trailTriggerPct === 2 && T2.trailDropPct === 1 && T2.simV2);
+assert.equal(entryReject(T2.entry, { ...cand, feeTvl24hPct: 7, spike: 0.15, belowHigh4hPct: 10 }), null); // the live floors, inclusive
+assert.match(entryReject(T2.entry, { ...cand, feeTvl24hPct: 6.9, spike: 1, belowHigh4hPct: 15 }) ?? '', /fee\/TVL 24h < 7/);
+assert.match(entryReject(T2.entry, { ...cand, feeTvl24hPct: 20, spike: 0.1, belowHigh4hPct: 15 }) ?? '', /spike < 0\.15/);
+assert.match(entryReject(T2.entry, { ...cand, feeTvl24hPct: 20, spike: 1, belowHigh4hPct: 5 }) ?? '', /below the 4h high/);
+// trailing 2/1: a run to +2.5% net that falls back 1 point exits by trailing (live 3/1.5 would not have armed yet)
+const tp2 = openPaper(T2, { id: 't', pool: 'p', name: 'T', mint: 'mt', binStep: 100, entryTs: 0, lastTs: 0, entryPrice: 1, feeTvl24hPct: 2000 }, costs);
+let trailExit: ReturnType<typeof advancePaper>['exit'] = null;
+let tpos = tp2;
+for (let i = 1; i <= 40 && !trailExit; i++) {
+  const r = advancePaper(tpos, [ohlc(300 * i, 1, 1, 1, 1)], { ...T2, trailDropPct: 1 }, costs);
+  tpos = r.pos;
+  if (r.pos.peakPct >= 2.5 && !r.exit) { const d = advancePaper(r.pos, [ohlc(300 * (i + 1), 1, 1, 0.99, 0.99)], T2, costs); trailExit = d.exit; break; }
+  trailExit = r.exit;
+}
+assert.match(trailExit?.reason ?? '', /trailing/);
+
 console.log('OK: paper strategies (entry rules, ladder open, net PnL accounting, exits, comparators)');

@@ -43,6 +43,8 @@ export interface PaperStrategy {
   maxEntriesPerToken?: number;
   /** early kill: after `minN` closed positions, stop opening when avg net % < avgPct or total net SOL < totalSol */
   kill?: { minN: number; avgPct: number; totalSol: number };
+  /** set = strategy retired: the runner refuses to start it (exit 0, so a unit with Restart=on-failure does not loop); the text says why. Data archived, config kept for the record. */
+  retired?: string;
   entry: EntryRule;
 }
 
@@ -83,20 +85,24 @@ export interface PaperCandidate {
 /** The 3 strategies, see the report for the data behind each number. */
 export const PAPER_STRATEGIES: Record<string, PaperStrategy> = {
   // A: buy-the-dip wide SOL ladder (the live-like 69 bins, the only shape that backtested positive), strict yield, SL 12, bot-like trailing
-  dipladder: { name: 'dipladder', kind: 'sol_ladder', bins: 69, capitalSol: 1, tpPct: 5, slPct: 12, trailTriggerPct: 3, trailDropPct: 1.5, maxMinutes: 720, oorMinutes: 30, maxOpen: 3, cooldownMin: 120, entry: { minFeeTvl24hPct: 15, minSpike: 0.5, belowHigh4hMinPct: 10, belowHigh4hMaxPct: 30 } },
+  dipladder: { name: 'dipladder', retired: '2026-11-13: net -0.376 SOL over 30 closed (hold token +0.645); data in state/paper-archive-2026-11-13',kind: 'sol_ladder', bins: 69, capitalSol: 1, tpPct: 5, slPct: 12, trailTriggerPct: 3, trailDropPct: 1.5, maxMinutes: 720, oorMinutes: 30, maxOpen: 3, cooldownMin: 120, entry: { minFeeTvl24hPct: 15, minSpike: 0.5, belowHigh4hMinPct: 10, belowHigh4hMaxPct: 30 } },
   // B: calm mature pool, two-sided 12+12 bins, long hold on fees, small directional exposure (untested by backtest: no two-sided data)
   // 2026-11-07 loosened: a dry run showed fee/TVL 24h >= 7 rejected all 15 scanned mature pools (they sat at 0.2-4.5%); now >= 2. Simulator v2 + max 5 entries per token.
-  calm: { name: 'calm', kind: 'two_sided', bins: 12, simV2: true, maxEntriesPerToken: 5, capitalSol: 1, tpPct: 3, slPct: 6, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 720, oorMinutes: 30, maxOpen: 3, cooldownMin: 240, entry: { minFeeTvl24hPct: 2, minTvlUsd: 100_000, minMcapUsd: 5_000_000, minHolders: 5000, max6hAbsPct: 15, min24hPct: -30 } },
+  calm: { name: 'calm', retired: '2026-11-09 stopped, 2026-11-13 retired: net -0.318 SOL over 19 closed',kind: 'two_sided', bins: 12, simV2: true, maxEntriesPerToken: 5, capitalSol: 1, tpPct: 3, slPct: 6, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 720, oorMinutes: 30, maxOpen: 3, cooldownMin: 240, entry: { minFeeTvl24hPct: 2, minTvlUsd: 100_000, minMcapUsd: 5_000_000, minHolders: 5000, max6hAbsPct: 15, min24hPct: -30 } },
   // C: hot-yield momentum, wide ladder, short time stop (tight ladders lost in the backtest: 25 bins SL10 -4.1 SOL / 341 trades)
   // D: high-frequency paper scalp (Master 2026-11-05: NOT selective): near-open entry filter, concentrated two-sided 6+6 bins, 1 SOL x up to 2 open (2 SOL max exposure), 5 min cooldown, tight TP/SL, 60 min time stop
-  blitz: { name: 'blitz', kind: 'two_sided', bins: 6, capitalSol: 1, tpPct: 2, slPct: 3, trailTriggerPct: 1.2, trailDropPct: 0.6, maxMinutes: 60, oorMinutes: 10, maxOpen: 2, cooldownMin: 5, maxPosPctOfTvl: 2, tokenOorAboveCooldownMin: 60, entry: { minFeeTvl24hPct: 0, minTvlUsd: 50_000, min1hPct: -30, max1hPct: 100, min24hPct: -70, max24hPct: 1000 } },
+  blitz: { name: 'blitz', retired: '2026-11-07 stopped, 2026-11-13 retired: net -2.975 SOL over 135 closed',kind: 'two_sided', bins: 6, capitalSol: 1, tpPct: 2, slPct: 3, trailTriggerPct: 1.2, trailDropPct: 0.6, maxMinutes: 60, oorMinutes: 10, maxOpen: 2, cooldownMin: 5, maxPosPctOfTvl: 2, tokenOorAboveCooldownMin: 60, entry: { minFeeTvl24hPct: 0, minTvlUsd: 50_000, min1hPct: -30, max1hPct: 100, min24hPct: -70, max24hPct: 1000 } },
   // 2026-11-07 loosened: a dry run showed fee/TVL 24h >= 40 rejected all 6 scanned pools (2.5-28%) and every spike was 0.2-0.5 (< 1.5); now fee >= 15, spike >= 0.3,
   // 1h -10..+25%. Simulator v2 + max 5 entries per token.
-  hotyield: { name: 'hotyield', kind: 'sol_ladder', bins: 69, simV2: true, maxEntriesPerToken: 5, capitalSol: 1, tpPct: 3, slPct: 8, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 180, oorMinutes: 15, maxOpen: 3, cooldownMin: 60, entry: { minFeeTvl24hPct: 15, minSpike: 0.3, min1hPct: -10, max1hPct: 25, max24hPct: 300 } },
+  hotyield: { name: 'hotyield', retired: '2026-11-13: net -0.020 SOL over 23 closed (hold token +1.055)',kind: 'sol_ladder', bins: 69, simV2: true, maxEntriesPerToken: 5, capitalSol: 1, tpPct: 3, slPct: 8, trailTriggerPct: 0, trailDropPct: 0, maxMinutes: 180, oorMinutes: 15, maxOpen: 3, cooldownMin: 60, entry: { minFeeTvl24hPct: 15, minSpike: 0.3, min1hPct: -10, max1hPct: 25, max24hPct: 300 } },
   // S1 (2026-11-07 analysis): fee only beat value change when a position sat in range for hours (live trailing/TP exits, dipladder's in-range holds), and blitz's
   // narrow range lost 2.98 SOL / 135 on the down side. So: wide two-sided spot +-35%, mature high-yield pools, no post-pump, no fixed TP, long hold.
-  widehold: { name: 'widehold', kind: 'two_sided', bins: 0, rangePct: 35, shape: 'spot', simV2: true, capitalSol: 1, tpPct: 1000, slPct: 15, trailTriggerPct: 6, trailDropPct: 2, maxMinutes: 1440, oorMinutes: 60, maxOpen: 2, cooldownMin: 60, maxEntriesPerToken: 5, kill: { minN: 15, avgPct: -1.5, totalSol: -0.3 }, entry: { minFeeTvl24hPct: 15, minTvlUsd: 150_000, minPoolAgeH: 48, min24hPct: -40, max24hPct: 150, belowHigh4hMinPct: 5, belowHigh4hMaxPct: 25, minSpike: 0.5, maxSpike: 3 } },
+  widehold: { name: 'widehold', retired: '2026-11-13: net -0.268 SOL (1 closed, stop loss after the reboot gap)',kind: 'two_sided', bins: 0, rangePct: 35, shape: 'spot', simV2: true, capitalSol: 1, tpPct: 1000, slPct: 15, trailTriggerPct: 6, trailDropPct: 2, maxMinutes: 1440, oorMinutes: 60, maxOpen: 2, cooldownMin: 60, maxEntriesPerToken: 5, kill: { minN: 15, avgPct: -1.5, totalSol: -0.3 }, entry: { minFeeTvl24hPct: 15, minTvlUsd: 150_000, minPoolAgeH: 48, min24hPct: -40, max24hPct: 150, belowHigh4hMinPct: 5, belowHigh4hMaxPct: 25, minSpike: 0.5, maxSpike: 3 } },
   // S2: dipladder plus crash guards: its 2 losses (ABTC -12.5%, Diamond -24%) were fast dumps of 45-53%, Diamond after +2292% in 24h.
+  // trail2 (2026-11-13, replay of 100 live closes: trailing from +2% with a 1% trail turned both halves from negative to about break-even, train +0.21 / test +0.06 SOL,
+  // baseline -0.54 / -0.29): the live meridian shape (SOL-only bid-ask ladder 69 bins, TP 5, SL 25, out of range 30 min) and the live entry floors the paper scanner can see
+  // (fee/TVL 24h >= 7, volume spike >= 0.15, 10-30% under the 4h high), but trailing 2/1 instead of the live 3/1.5. No flip, no AI, no low-yield exit: compare with the live log.
+  trail2: { name: 'trail2', kind: 'sol_ladder', bins: 69, simV2: true, capitalSol: 1, tpPct: 5, slPct: 25, trailTriggerPct: 2, trailDropPct: 1, maxMinutes: 1440, oorMinutes: 30, maxOpen: 3, cooldownMin: 60, maxEntriesPerToken: 5, entry: { minFeeTvl24hPct: 7, minSpike: 0.15, belowHigh4hMinPct: 10, belowHigh4hMaxPct: 30 } },
   dipladder2: { name: 'dipladder2', kind: 'sol_ladder', bins: 69, simV2: true, capitalSol: 1, tpPct: 5, slPct: 12, trailTriggerPct: 3, trailDropPct: 1.5, maxMinutes: 720, oorMinutes: 30, maxOpen: 3, cooldownMin: 120, crashCandlePct: 10, fastDepth: { frac: 0.3, withinMin: 30 }, maxEntriesPerToken: 5, kill: { minN: 15, avgPct: -1.5, totalSol: -0.3 }, entry: { minFeeTvl24hPct: 15, minSpike: 0.5, belowHigh4hMinPct: 10, belowHigh4hMaxPct: 30, max24hPct: 300, minPoolAgeH: 24 } },
 };
 

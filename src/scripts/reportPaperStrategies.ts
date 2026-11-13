@@ -5,8 +5,8 @@ import { PAPER_STRATEGIES, killReason } from '../logic/paperStrategies.js';
 type L = Record<string, unknown> & { type?: string };
 const read = (f: string): L[] => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((x) => { try { return JSON.parse(x) as L; } catch { return {}; } }) : []);
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
-// blitz was stopped 2026-11-07 (135 closed, -2.98 SOL); its log is archived as blitz.jsonl.bak-final-20261107
-for (const name of ['dipladder', 'calm', 'hotyield', 'widehold', 'dipladder2']) {
+// active strategies only; retired ones (PaperStrategy.retired) keep their reason in the registry and their data in state/paper-archive-2026-11-13
+for (const [name] of Object.entries(PAPER_STRATEGIES).filter(([, s]) => !s.retired)) {
   const lines = read(`state/paper-strategies/${name}.jsonl`);
   const ex = lines.filter((l) => l.type === 'paper_exit');
   const entries = lines.filter((l) => l.type === 'paper_entry').length;
