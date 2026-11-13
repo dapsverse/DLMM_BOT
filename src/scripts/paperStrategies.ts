@@ -17,6 +17,11 @@ if (!strat) {
   console.error(`paperStrategies: PAPER_STRATEGY must be one of ${Object.keys(PAPER_STRATEGIES).join(', ')}`);
   process.exit(1);
 }
+if (strat.retired) {
+  // exit 0: a unit with Restart=on-failure stops for good instead of looping
+  console.error(`paperStrategies: strategy ${strat.name} is retired (${strat.retired}), not starting`);
+  process.exit(0);
+}
 
 const { scanPools, defaultScannerConfig, volumeSpikeRatio } = await import('../services/meteoraScanner.js');
 const { fetchCandles5m } = await import('../services/shadowLog.js');
