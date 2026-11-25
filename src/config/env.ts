@@ -502,6 +502,12 @@ export const env = {
   // STANK-SOL 2026-11-11: two AI exits at -9.66% and -9.65% about 20 h apart, both allowed by the per-pool cooldowns.
   TOKEN_LOSS_COOLDOWN_HOURS: num('TOKEN_LOSS_COOLDOWN_HOURS', 24),
   TOKEN_LOSS_COOLDOWN_MIN_LOSS_PCT: num('TOKEN_LOSS_COOLDOWN_MIN_LOSS_PCT', 5),
+  // Per-pool re-entry limits (logic/poolReentryLimits.ts, Master 2026-11-25 after Rings-SOL 4x in ~6 h and DCTY-SOL 3x in 24 h, all ~0 PnL): at most
+  // POOL_MAX_ENTRIES_PER_WINDOW positions per pool per POOL_ENTRY_WINDOW_HOURS (0 = off), and a POOL cooldown of OOR_EXIT_COOLDOWN_HOURS after a meridian
+  // "out of range" exit (0 = off). Both persisted with the blacklist, never shorten a longer entry.
+  POOL_MAX_ENTRIES_PER_WINDOW: num('POOL_MAX_ENTRIES_PER_WINDOW', 2),
+  POOL_ENTRY_WINDOW_HOURS: num('POOL_ENTRY_WINDOW_HOURS', 12),
+  OOR_EXIT_COOLDOWN_HOURS: num('OOR_EXIT_COOLDOWN_HOURS', 6),
   // Entry risk gates (after the Anakin-SOL stop loss 2026-11-02; logic/entryRiskGates.ts, audit-loop in index.ts). Unknown data never blocks; 0 = rule off.
   // (1) active DexScreener boost >= this with no website AND no X account on its profile.
   ENTRY_BOOST_MIN_NO_PRESENCE: num('ENTRY_BOOST_MIN_NO_PRESENCE', 100),
