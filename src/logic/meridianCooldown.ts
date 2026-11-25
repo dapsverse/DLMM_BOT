@@ -7,6 +7,8 @@ export type CloseKind = 'low yield' | 'oor' | 'stop loss' | 'other';
 export interface CloseRec {
   kind: CloseKind;
   feesSol: number;
+  /** close time (epoch ms), used by the per-pool re-entry cap (logic/poolReentryLimits.ts); absent in records written before 2026-11-25 */
+  atMs?: number;
 }
 export interface CooldownCfg {
   oorCount: number;

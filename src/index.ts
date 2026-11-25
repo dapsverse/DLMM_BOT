@@ -49,6 +49,7 @@ import { getEntryPriceContext, getDrawdownFromHighPct, getBelowHigh4hPct } from 
 import { dipEntryReject } from './logic/dipEntry.js';
 import { boostNoPresenceReject, dipFadingReject, lowYieldEntryReject, pumpedBagReject, sellBuyReject } from './logic/entryRiskGates.js';
 import { tokenLossCooldownUntil } from './logic/tokenLossCooldown.js';
+import { oorExitCooldownUntil, reentryCapUntil } from './logic/poolReentryLimits.js';
 import { maybeLogSmartWalletSnapshot } from './services/smartWallets.js';
 import { shouldExitOnUpsideBreak } from './logic/upsideBreak.js';
 import { meridianExitSignal, ExitConfirmer, getPoolFeeTvl24hPct, getPoolStats, oorWaitMinutes, trailingBlockedByFloor } from './logic/meridianExit.js';
@@ -103,10 +104,19 @@ function flushOutcome(now: number): void {
   pendingExit = null;
   if (currentPool) return; // exit failed or reopened: the position lives on
   if (env.MERIDIAN_RULES && env.ENTRY_STRATEGY_MODE === 'meridian' && ctx.ladderBins !== undefined) {
-    const u = recordClose(closeHistory.get(ctx.poolAddress), { kind: closeKindFromReason(reason), feesSol: snap.feesSol }, env.SL_POOL_COOLDOWN_HOURS);
+    const kind = closeKindFromReason(reason);
+    const u = recordClose(closeHistory.get(ctx.poolAddress), { kind, feesSol: snap.feesSol, atMs: now }, env.SL_POOL_COOLDOWN_HOURS);
     closeHistory.set(ctx.poolAddress, u.hist);
     // meridian cools the pool and its base mint (3 OOR / 3 fee-earning / low yield); a stop loss cools this pool only (SL_POOL_COOLDOWN_HOURS)
     for (const [addr, until] of cooldownBlacklistAdds(u, ctx.poolAddress, ctx.xIsSol ? ctx.mintY : ctx.mintX, now)) addToBlacklist(blacklistPools, addr, now, until - now);
+    // per-pool re-entry limits (logic/poolReentryLimits.ts): longer cooldown after an out-of-range exit, and at most N entries per pool per window
+    const oorUntil = oorExitCooldownUntil(kind, now, env.OOR_EXIT_COOLDOWN_HOURS, blacklistPools.get(ctx.poolAddress));
+    if (oorUntil !== null) blacklistPools.set(ctx.poolAddress, oorUntil);
+    const capUntil = reentryCapUntil(u.hist.map((r) => r.atMs ?? Number.NaN), now, env.POOL_MAX_ENTRIES_PER_WINDOW, env.POOL_ENTRY_WINDOW_HOURS, blacklistPools.get(ctx.poolAddress));
+    if (capUntil !== null) blacklistPools.set(ctx.poolAddress, capUntil);
+    if (oorUntil !== null || capUntil !== null) {
+      logger.info('[index] pool re-entry limit', { pool: ctx.poolAddress, until: new Date(blacklistPools.get(ctx.poolAddress)!).toISOString(), oorCooldown: oorUntil !== null, entryCap: capUntil !== null, exit: reason.slice(0, 80) });
+    }
     persist(); // written at once (history + blacklist): a restart right after the close must not lose them
   }
   if (oorAbove) {
